@@ -3,7 +3,7 @@ import MediaSender, { type MediaSenderOpts } from "./media";
 
 declare global {
   interface Window {
-    __fxCastBilibili?: { reinject: () => void };
+    __fxCastBilibili?: { reinject: () => void; isCasting: () => boolean };
   }
 }
 
@@ -56,6 +56,8 @@ function ensureDebugPanel() {
 }
 let activeKey = "";
 let changeGeneration = 0;
+/** Debounce timestamp so rapid/auto re-cast clicks don't fight each other. */
+let lastReinjectAt = 0;
 
 function debug(message: string, data?: unknown) {
   const suffix =
@@ -129,30 +131,45 @@ async function resolveMedia(): Promise<ResolvedMedia> {
   for (const [name, value] of Object.entries({
     bvid,
     cid: String(page.cid),
-    qn: "64",
+    // Prefer 1080P progressive MP4. Bilibili may return a lower quality when
+    // 1080P MP4 is unavailable for the video/account; the actual quality from
+    // the response is logged below instead of assuming the request succeeded.
+    qn: "80",
     fnval: "1",
     fnver: "0",
     fourk: "0",
+    try_look: "1",
   }))
     playUrl.searchParams.set(name, value);
   const play = await json<{
     code: number;
     message?: string;
-    data?: { format?: string; durl?: Array<{ url: string }> };
+    data?: {
+      quality?: number;
+      format?: string;
+      accept_quality?: number[];
+      accept_description?: string[];
+      durl?: Array<{ url: string; size?: number }>;
+    };
   }>(playUrl);
   const durls = play.data?.durl ?? [];
   const mediaUrl = durls[0]?.url;
   const format = play.data?.format ?? "";
   debug("playurl", {
     code: play.code,
+    requestedQuality: 80,
+    actualQuality: play.data?.quality,
+    acceptedQualities: play.data?.accept_quality,
+    acceptedDescriptions: play.data?.accept_description,
     format,
     count: durls.length,
+    size: durls[0]?.size,
     host: mediaUrl ? new URL(mediaUrl).hostname : undefined,
   });
   if (play.code !== 0 || !mediaUrl)
     throw new Error(play.message || "No progressive stream");
-  // The Chromecast Default Media Receiver cannot play FLV. qn=64 with
-  // fnval=1 (MP4/durl) usually yields MP4, but some videos only offer FLV;
+  // The Chromecast Default Media Receiver cannot play FLV. qn=80 with
+  // fnval=1 requests 1080P MP4/durl, with server-side quality fallback;
   // fail loudly instead of casting an unplayable stream.
   if (format.includes("flv")) {
     throw new Error(
@@ -171,8 +188,8 @@ async function resolveMedia(): Promise<ResolvedMedia> {
     key,
     mediaUrl,
     title: page.part || document.title,
-    // qn=64 requests 720P (needs login cookies, which fetch sends via
-    // credentials:"include"); the receiver only supports progressive MP4.
+    // The bridge proxies the returned bytes unchanged. The actual quality is
+    // reported by play.data.quality and logged above.
     contentType: "video/mp4",
   };
 }
@@ -232,6 +249,13 @@ async function loadCurrentItem(isInitial: boolean) {
     // one (which left the popup stuck on "casting...").
     onStopped: () => {
       debug("cast stopped; ready to re-cast");
+      // Pause the page's own <video> so it doesn't keep playing (or resume
+      // via the site's autoplay) now that the receiver has stopped.
+      const localVideo =
+        document.querySelector<HTMLVideoElement>("video") ?? undefined;
+      if (localVideo instanceof HTMLVideoElement && !localVideo.paused) {
+        localVideo.pause();
+      }
       sender = undefined;
       activeKey = "";
     },
@@ -248,15 +272,49 @@ async function loadCurrentItem(isInitial: boolean) {
   else await sender.updateMedia(opts);
 }
 
-// Expose a re-cast entry point for subsequent script injections (see the
-// guard at the top of this file). If a cast is already active we keep it;
-// otherwise we start a fresh one.
+// Re-cast entry point for subsequent extension clicks / script injections
+// (see the guard at the top of this file). Every click on the extension for
+// an already-injected tab lands here. We ALWAYS start a fresh cast: if a cast
+// is already running we tear it down first, then re-run resolve +
+// requestSession. This guarantees the receiver selector opens with real
+// castable media (a Cast button) instead of the empty device-only view the
+// generic background path produces for Bilibili.
 window.__fxCastBilibili = {
+  isCasting: () => Boolean(sender),
   reinject: () => {
-    if (sender) {
-      debug("re-cast ignored; already casting");
+    // Popup auto-cast (onMount) plus a manual click can fire this twice in
+    // quick succession; debounce so the second call doesn't stop the cast the
+    // first one just started.
+    const now = Date.now();
+    debug("reinject() called", {
+      hasSender: Boolean(sender),
+      sinceLastReinjectMs: now - lastReinjectAt,
+      willDebounce: now - lastReinjectAt < 1200,
+    });
+    if (now - lastReinjectAt < 1200) {
+      debug("re-cast ignored; debounced");
       return;
     }
+    lastReinjectAt = now;
+
+    if (sender) {
+      // Tear down the current cast before starting a fresh one so we don't
+      // leave an orphaned receiver session and so requestSession opens a clean
+      // selector. stop() invokes onStopped which resets these, but be
+      // defensive in case it doesn't fire.
+      debug("re-cast: stopping current cast first");
+      try {
+        sender.stop();
+      } catch (err) {
+        debug(
+          "re-cast stop failed",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+      sender = undefined;
+      activeKey = "";
+    }
+
     debug("re-cast requested");
     void loadCurrentItem(true).catch((err) => {
       debug(

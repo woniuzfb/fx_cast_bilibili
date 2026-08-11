@@ -80,6 +80,17 @@ export default class MediaSender {
   private session?: Session;
   private media?: Media;
   private removeMediaElementListeners?: () => void;
+  /**
+   * The receiver-action (Stop) listener registered on the shared `cast` SDK.
+   * The SDK is a reused page singleton (see export.ts ensureInit), so its
+   * listener set persists across re-casts. Keep a reference to THIS sender's
+   * listener so stop() can remove it; otherwise every re-cast leaks another
+   * listener and a single Stop fires stop() once per past sender.
+   */
+  private receiverActionListener?: (
+    receiver: unknown,
+    action: unknown
+  ) => void;
 
   constructor(opts: MediaSenderOpts) {
     this.mediaUrl = opts.mediaUrl;
@@ -102,6 +113,13 @@ export default class MediaSender {
   stop() {
     this.removeMediaElementListeners?.();
     this.removeMediaElementListeners = undefined;
+    // Remove this sender's Stop listener from the reused SDK singleton so it
+    // doesn't accumulate across re-casts (a leaked listener would make one
+    // Stop click fire stop() once per past sender).
+    if (this.receiverActionListener) {
+      cast.removeReceiverActionListener(this.receiverActionListener);
+      this.receiverActionListener = undefined;
+    }
     this.port?.postMessage({ subject: "bridge:stopMediaServer" });
     this.session?.stop();
     this.onStopped?.();
@@ -160,12 +178,13 @@ export default class MediaSender {
     // media server is torn down while the receiver app keeps running, so the
     // popup hangs on "Stopping..." until it times out. Actually stop the
     // Cast session here.
-    cast.addReceiverActionListener((_receiver, action) => {
+    this.receiverActionListener = (_receiver, action) => {
       if (action === cast.ReceiverAction.STOP) {
         this.debug?.("receiver action: stop requested");
         this.stop();
       }
-    });
+    };
+    cast.addReceiverActionListener(this.receiverActionListener);
 
     this.isLocalMedia = this.mediaUrl.startsWith("file://");
     this.isLocalMediaEnabled = await getOption("localMediaEnabled");
@@ -183,6 +202,10 @@ export default class MediaSender {
       capabilities.push(cast.Capability.VIDEO_OUT);
     }
 
+    this.debug?.("calling cast.initialize", {
+      wasSessionRequested: this.wasSessionRequested,
+      capabilities: capabilities.length,
+    });
     cast.initialize(
       new cast.ApiConfig(
         new cast.SessionRequest(
@@ -195,9 +218,11 @@ export default class MediaSender {
       ),
       undefined,
       (err) => {
+        this.debug?.("cast.initialize error callback", String(err));
         logger.error("Failed to initialize cast SDK", err);
       }
     );
+    this.debug?.("cast.initialize returned");
   }
 
   private sessionListener(session: Session) {
@@ -227,7 +252,14 @@ export default class MediaSender {
         },
         (err) => {
           this.wasSessionRequested = false;
-          this.debug?.("receiver selection failed", err);
+          // Distinguish a user/logic cancellation (selector closed or clobbered
+          // by another launch) from a genuine failure. `err` here is the Cast
+          // SDK error object; its `code` is "cancel" when the selector was
+          // closed out from under this request.
+          this.debug?.("receiver selection failed", {
+            code: (err as { code?: string })?.code ?? String(err),
+            description: (err as { description?: string })?.description,
+          });
           logger.error("Session request failed", err);
         }
       );
@@ -485,12 +517,33 @@ export default class MediaSender {
       this.debug?.("page control: seek", request.currentTime);
       boundMedia.seek(request, undefined, sendError("seek"));
     };
-    const onMediaUpdate = (isAlive: boolean) => {
-      if (!isAlive || !boundMedia) return;
+    const gated = this.gestureGatedControls;
+    const syncFromReceiver = () => {
+      if (!boundMedia) return;
+      // In gesture-gated mode, mirror the receiver's position/state onto the
+      // local <video> so the page's progress bar and play state faithfully
+      // follow the receiver. But right after a real user interaction, back
+      // off for the gesture window so we don't yank the element back before
+      // the user's command reaches the receiver (which would fight the seek).
+      if (gated && fromGesture()) return;
+
       const estimatedTime = boundMedia.getEstimatedTime();
-      if (Math.abs(mediaElement.currentTime - estimatedTime) > 2) {
-        suppressSeek++;
+      const drift = Math.abs(mediaElement.currentTime - estimatedTime);
+      const driftLimit =
+        boundMedia.playerState === cast.media.PlayerState.PLAYING ? 0.75 : 0.25;
+      if (drift > driftLimit) {
+        // In gated mode these programmatic writes are filtered by the gesture
+        // gate in onSeeked (no recent gesture), so no suppress counter is
+        // needed — avoiding the counter drift that used to swallow real seeks.
+        if (!gated) suppressSeek++;
         mediaElement.currentTime = estimatedTime;
+        if (drift > 1) {
+          this.debug?.("corrected local playback drift", {
+            drift,
+            estimatedTime,
+            playerState: boundMedia.playerState,
+          });
+        }
       }
 
       const localState = mediaElement.paused
@@ -499,22 +552,30 @@ export default class MediaSender {
       if (localState === boundMedia.playerState) return;
       switch (boundMedia.playerState) {
         case cast.media.PlayerState.PLAYING:
-          if (mediaElement.paused) suppressPlay++;
+          if (!gated && mediaElement.paused) suppressPlay++;
           void mediaElement
             .play()
             .catch((err) => {
-              suppressPlay = Math.max(0, suppressPlay - 1);
+              if (!gated) suppressPlay = Math.max(0, suppressPlay - 1);
               logger.error("Failed to sync play state", err);
             });
           break;
         case cast.media.PlayerState.PAUSED:
         case cast.media.PlayerState.BUFFERING:
         case cast.media.PlayerState.IDLE:
-          if (!mediaElement.paused) suppressPause++;
+          if (!gated && !mediaElement.paused) suppressPause++;
           mediaElement.pause();
           break;
       }
     };
+    const onMediaUpdate = (isAlive: boolean) => {
+      if (!isAlive) return;
+      syncFromReceiver();
+    };
+    // Receiver status updates are event-driven and may be sparse while media is
+    // steadily playing. Reconcile against the SDK's estimated receiver clock so
+    // repeated play/pause cycles cannot accumulate local decoder drift.
+    const syncIntervalId = window.setInterval(syncFromReceiver, 500);
 
     mediaElement.addEventListener("play", onPlay);
     mediaElement.addEventListener("pause", onPause);
@@ -529,6 +590,7 @@ export default class MediaSender {
         window.removeEventListener("keydown", markGesture, true);
       }
       boundMedia?.removeUpdateListener(onMediaUpdate);
+      window.clearInterval(syncIntervalId);
       this.debug?.("old page controls detached");
     };
     this.debug?.("page-to-receiver controls attached");

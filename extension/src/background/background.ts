@@ -135,6 +135,17 @@ async function init() {
     await initMenus();
     await initWhitelist();
 
+    // Surface popup debug logs in the background console. The browser-action
+    // popup can't be inspected directly, so Popup.svelte forwards its debug
+    // lines here via runtime.sendMessage({ subject: "popup:debugLog" }).
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "popup:debugLog") return;
+        logger.info(
+            "[popup] " + String(message?.data?.message),
+            message?.data?.data ?? {}
+        );
+    });
+
     browser.runtime.onMessage.addListener(message => {
         if (message?.subject !== "action:castCurrentTab") return;
 
@@ -146,6 +157,9 @@ async function init() {
             if (tab.id === undefined) {
                 logger.error("No active tab found for browser-action Cast");
                 return;
+            }
+            if (message.data?.selection) {
+                castManager.queueReceiverSelection(tab.id, message.data.selection);
             }
             if (/^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(tab.url ?? "")) {
                 await launchBilibiliSender(tab.id);

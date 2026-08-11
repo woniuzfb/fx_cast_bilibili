@@ -103,10 +103,54 @@
   let port: Nullable<Port> = null;
   let hasSelectorContext = false;
   let isPreparingSelector = false;
+  let selectionRequiresRefresh = false;
+  let autoCastTimeoutId: number | undefined;
 
-  async function castCurrentTab() {
+  /**
+   * The browser-action popup cannot be inspected directly (no right-click ->
+   * Inspect), so its debug logs are invisible. Mirror every popup debug line to
+   * the background script, where it shows up (prefixed with "[popup]") in the
+   * about:debugging -> Inspect background console. Still also console.info in
+   * case the popup ever is inspectable.
+   */
+  function popupLog(message: string, data?: unknown) {
+    try {
+      console.info("[fx_cast popup]", message, data ?? "");
+    } catch {
+      /* ignore */
+    }
+    void browser.runtime
+      .sendMessage({
+        subject: "popup:debugLog",
+        data: { message, data, t: Date.now() },
+      })
+      .catch(() => {
+        /* background may be asleep or not listening; ignore */
+      });
+  }
+
+  async function castCurrentTab(selection?: {
+    device: ReceiverDevice;
+    mediaType: ReceiverSelectorMediaType;
+  }) {
+    popupLog("castCurrentTab -> action:castCurrentTab", {
+      hasSelection: Boolean(selection),
+      deviceId: selection?.device.id,
+      mediaType: selection?.mediaType,
+    });
     isPreparingSelector = true;
-    await browser.runtime.sendMessage({ subject: "action:castCurrentTab" });
+    try {
+      await browser.runtime.sendMessage({
+        subject: "action:castCurrentTab",
+        data: selection ? { selection } : undefined,
+      });
+    } catch (err) {
+      isPreparingSelector = false;
+      isConnecting = false;
+      popupLog("castCurrentTab failed", {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   function connectPopupPort() {
@@ -116,7 +160,9 @@
   }
 
   function onRuntimeMessage(message: { subject?: string }) {
+    popupLog("runtime message", { subject: message?.subject });
     if (message?.subject !== "receiverSelector:ready") return;
+    popupLog("receiverSelector:ready -> reconnecting port");
     connectPopupPort();
   }
   let browserWindow: Nullable<browser.windows.Window> = null;
@@ -127,7 +173,13 @@
   onMount(async () => {
     browser.runtime.onMessage.addListener(onRuntimeMessage);
     connectPopupPort();
-    window.setTimeout(() => {
+    autoCastTimeoutId = window.setTimeout(() => {
+      autoCastTimeoutId = undefined;
+      popupLog("auto-cast timer fired", {
+        hasSelectorContext,
+        isPreparingSelector,
+        willAutoCast: !hasSelectorContext && !isPreparingSelector,
+      });
       if (!hasSelectorContext && !isPreparingSelector) {
         void castCurrentTab();
       }
@@ -170,6 +222,9 @@
   });
 
   onDestroy(() => {
+    if (autoCastTimeoutId !== undefined) {
+      window.clearTimeout(autoCastTimeoutId);
+    }
     browser.runtime.onMessage.removeListener(onRuntimeMessage);
     port?.disconnect();
     resizeObserver.disconnect();
@@ -185,12 +240,27 @@
   function onMessage(message: Message) {
     switch (message.subject) {
       case "popup:init":
+        if (autoCastTimeoutId !== undefined) {
+          window.clearTimeout(autoCastTimeoutId);
+          autoCastTimeoutId = undefined;
+        }
+        isPreparingSelector = false;
+        popupLog("popup:init received -> hasSelectorContext=true", {
+          appId: message.data.appInfo?.sessionRequest?.appId,
+          pageUrl: message.data.pageInfo?.url,
+        });
         hasSelectorContext = true;
         appInfo = message.data.appInfo;
         pageInfo = message.data.pageInfo;
         break;
 
       case "popup:update": {
+        popupLog("popup:update received", {
+          availableMediaTypes: message.data.availableMediaTypes,
+          defaultMediaType: message.data.defaultMediaType,
+          deviceCount: message.data.devices?.length,
+          connectedSessionIds: message.data.connectedSessionIds,
+        });
         isBridgeCompatible = message.data.isBridgeCompatible;
 
         updateKnownApp();
@@ -210,7 +280,9 @@
 
         if (message.data.connectedSessionIds) {
           connectedSessionIds = message.data.connectedSessionIds;
-          isConnecting = false;
+          if (connectedSessionIds.length > 0) {
+            isConnecting = false;
+          }
         }
 
         break;
@@ -316,7 +388,21 @@
   }
 
   function onReceiverCast(device: ReceiverDevice) {
+    popupLog("onReceiverCast (Cast button clicked)", {
+      mediaType,
+      availableMediaTypes,
+      isAppMediaTypeAvailable,
+      hasSelectorContext,
+      selectionRequiresRefresh,
+      deviceId: device.id,
+    });
     isConnecting = true;
+
+    if (selectionRequiresRefresh) {
+      selectionRequiresRefresh = false;
+      void castCurrentTab({ device, mediaType });
+      return;
+    }
 
     port?.postMessage({
       subject: "main:receiverSelected",
@@ -326,6 +412,11 @@
 
   function onReceiverStop(device: ReceiverDevice) {
     isConnecting = false;
+    // A receiver selector owns exactly one pending selection Promise. Once it
+    // has selected the session that is now being stopped, a later Cast click
+    // must start a fresh current-tab request instead of resolving that already
+    // consumed selector again.
+    selectionRequiresRefresh = true;
     port?.postMessage({
       subject: "main:receiverStopped",
       data: { deviceId: device.id },
@@ -470,9 +561,9 @@
             {device}
             {result}
             {connectedSessionIds}
-            {isMediaTypeAvailable}
-            isAnyMediaTypeAvailable={availableMediaTypes !==
-              ReceiverSelectorMediaType.None &&
+            isMediaTypeAvailable={selectionRequiresRefresh || isMediaTypeAvailable}
+            isAnyMediaTypeAvailable={(selectionRequiresRefresh ||
+              availableMediaTypes !== ReceiverSelectorMediaType.None) &&
               isDeviceCompatible(mediaType, device)}
             isAnyConnecting={isConnecting}
             bind:lastMenuShownDeviceId
@@ -492,9 +583,9 @@
           {port}
           {device}
           {connectedSessionIds}
-          {isMediaTypeAvailable}
-          isAnyMediaTypeAvailable={availableMediaTypes !==
-            ReceiverSelectorMediaType.None &&
+          isMediaTypeAvailable={selectionRequiresRefresh || isMediaTypeAvailable}
+          isAnyMediaTypeAvailable={(selectionRequiresRefresh ||
+            availableMediaTypes !== ReceiverSelectorMediaType.None) &&
             isDeviceCompatible(mediaType, device)}
           isAnyConnecting={isConnecting}
           bind:lastMenuShownDeviceId

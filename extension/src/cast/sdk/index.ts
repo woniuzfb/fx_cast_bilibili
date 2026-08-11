@@ -321,7 +321,33 @@ export default class {
     ) {
         logger.info("cast.initialize");
 
-        // Already initialized
+        /**
+         * Same-page re-initialization after a completed init cycle (e.g. the
+         * Bilibili sender re-casting after Stop). This SDK shim is a per-page
+         * singleton, so #apiConfig and the cached #receiverAvailability survive
+         * across casts and the background will NOT emit another availability
+         * update for an already-initialized page. Swap in the new apiConfig and
+         * replay the cached availability to its receiverListener so a freshly
+         * constructed MediaSender can reach requestSession, instead of silently
+         * stalling with the popup stuck on "Preparing receiver selector...".
+         */
+        if (this.#isInitialized) {
+            logger.info(
+                "cast.initialize: same-page reinit; replaying availability=" +
+                    String(this.#receiverAvailability) +
+                    " sessionRequestInFlight=" +
+                    String(Boolean(this.#sessionRequest))
+            );
+            this.#apiConfig = apiConfig;
+            successCallback?.();
+            if (this.#receiverAvailability !== undefined) {
+                apiConfig.receiverListener(this.#receiverAvailability);
+            }
+            return;
+        }
+
+        // Initialization already in flight (rare double-call before the first
+        // availability update arrives); preserve the original guard behaviour.
         if (this.#apiConfig) {
             errorCallback?.(new CastError(ErrorCode.INVALID_PARAMETER));
             return;

@@ -306,6 +306,17 @@ let baseConfig: BaseConfig;
 /** Shared receiver selector. */
 let receiverSelector: Optional<ReceiverSelector>;
 
+interface QueuedReceiverSelection {
+  selection: ReceiverSelection;
+  tabId: number;
+  frameId: number;
+  expiresAt: number;
+}
+
+/** A manual popup selection waiting for a freshly-created page Cast request. */
+let queuedReceiverSelection: Optional<QueuedReceiverSelection>;
+const QUEUED_RECEIVER_SELECTION_TTL_MS = 10_000;
+
 /** Set of active cast instances.  */
 const activeInstances = new Set<CastInstance>();
 
@@ -474,6 +485,24 @@ const castManager = new (class {
   }
 
   /**
+   * Queues a receiver chosen in a control-only popup for the next Cast request
+   * created by the same tab. This bridges Stop -> Cast without reusing the
+   * selector Promise that created the stopped session.
+   */
+  queueReceiverSelection(
+    tabId: number,
+    selection: ReceiverSelection,
+    frameId = 0
+  ) {
+    queuedReceiverSelection = {
+      selection,
+      tabId,
+      frameId,
+      expiresAt: Date.now() + QUEUED_RECEIVER_SELECTION_TTL_MS,
+    };
+  }
+
+  /**
    * Gets a receiver selection and loads the appropriate sender for a
    * given context.
    */
@@ -488,7 +517,20 @@ const castManager = new (class {
 
     if (!selection) return;
 
-    loadSender(selection, { tabId, frameId });
+    // Await + catch so a failing loadSender (e.g. App media type selected but
+    // no cast instance exists for the tab) is surfaced instead of silently
+    // swallowed. Previously the unhandled rejection left the popup stuck on
+    // "Casting..." forever.
+    try {
+      await loadSender(selection, { tabId, frameId });
+    } catch (err) {
+      logger.error("loadSender failed (triggerCast)", {
+        mediaType: selection.mediaType,
+        tabId,
+        frameId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 })();
 
@@ -783,12 +825,26 @@ async function loadSender(
     return;
   }
 
+  logger.info("loadSender", {
+    mediaType: selection.mediaType,
+    isApp: selection.mediaType === ReceiverSelectorMediaType.App,
+    isScreen: selection.mediaType === ReceiverSelectorMediaType.Screen,
+    tabId: contentContext.tabId,
+    frameId: contentContext.frameId,
+  });
+
   switch (selection.mediaType) {
     case ReceiverSelectorMediaType.App: {
       const instance = castManager.getInstanceAt(
         contentContext.tabId,
         contentContext.frameId
       );
+      logger.info("loadSender App branch", {
+        instanceFound: Boolean(instance),
+        hasApiConfig: Boolean(instance?.apiConfig?.sessionRequest.appId),
+        tabId: contentContext.tabId,
+        frameId: contentContext.frameId,
+      });
       if (!instance) {
         throw logger.error(
           `Cast instance not found at tabId ${contentContext.tabId} / frameId ${contentContext.frameId}`
@@ -941,10 +997,56 @@ async function getReceiverSelection(selectionOpts: {
   // Ensure status manager is initialized
   await deviceManager.init();
 
+  const queuedSelection = queuedReceiverSelection;
+  if (queuedSelection) {
+    const matchesContext =
+      queuedSelection.tabId === selectionOpts.tabId &&
+      queuedSelection.frameId === selectionOpts.frameId;
+    const isCurrent = queuedSelection.expiresAt >= Date.now();
+    const isAvailable = Boolean(
+      availableMediaTypes & queuedSelection.selection.mediaType
+    );
+    const deviceStillExists = Boolean(
+      deviceManager.getDeviceById(queuedSelection.selection.device.id)
+    );
+
+    if (matchesContext || !isCurrent) {
+      queuedReceiverSelection = undefined;
+    }
+
+    if (matchesContext && isCurrent && isAvailable && deviceStillExists) {
+      logger.info("Using queued popup receiver selection", {
+        tabId: selectionOpts.tabId,
+        frameId: selectionOpts.frameId,
+        mediaType: queuedSelection.selection.mediaType,
+        deviceId: queuedSelection.selection.device.id,
+      });
+      return queuedSelection.selection;
+    }
+  }
+
   return new Promise(async (resolve, reject) => {
-    // Close an existing open selector
+    // Close an existing open selector. This is the exact point where a good
+    // (App / Cast-button) selector opened by the page's requestSession can be
+    // clobbered by a later generic launch. Log it loudly with the incoming
+    // context so the race is visible in the background console.
+    const selectionContext = {
+      hasCastInstance: Boolean(selectionOpts.castInstance),
+      tabId: selectionOpts.tabId,
+      frameId: selectionOpts.frameId,
+      defaultMediaType,
+      availableMediaTypes,
+      appInfoPresent: Boolean(appInfo),
+      t: Date.now(),
+    };
     if (receiverSelector?.isOpen) {
+      logger.info(
+        "getReceiverSelection: CLOSING already-open selector before opening a new one",
+        selectionContext
+      );
       await receiverSelector.close();
+    } else {
+      logger.info("getReceiverSelection: no open selector to close", selectionContext);
     }
     receiverSelector = createSelector();
 
@@ -976,8 +1078,23 @@ async function getReceiverSelection(selectionOpts: {
       deviceCount: devices.length,
       defaultMediaType,
       availableMediaTypes,
+      // availableMediaTypes === 0 means the generic device-only view (no Cast
+      // button) — for Bilibili this is the "wrong" selector that indicates no
+      // cast instance was found for the tab (session already torn down).
+      isGenericDeviceOnly: availableMediaTypes === 0,
+      hasCastInstance: Boolean(selectionOpts.castInstance),
+      appInfoPresent: Boolean(appInfo),
       pageUrl: pageInfo?.url,
     });
+    // Include currently-owned session IDs so the popup can show the Stop
+    // button for an active session as soon as it connects (e.g. clicking the
+    // extension while a Bilibili cast is already running).
+    const connectedSessionIds: string[] = [];
+    for (const instance of activeInstances) {
+      if (instance.session?.sessionId) {
+        connectedSessionIds.push(instance.session.sessionId);
+      }
+    }
     void receiverSelector
       .open({
         devices,
@@ -985,6 +1102,7 @@ async function getReceiverSelection(selectionOpts: {
         availableMediaTypes,
         appInfo,
         pageInfo,
+        connectedSessionIds,
       })
       .then(() => logger.info("Receiver selector opened"))
       .catch((err) => {

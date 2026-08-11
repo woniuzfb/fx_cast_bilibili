@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from "svelte";
+  import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import fuzzysort from "fuzzysort";
 
   import type { Options } from "../../lib/options";
@@ -49,6 +49,22 @@
   $: isOwnedSession = Boolean(
     application && connectedSessionIds.includes(application.transportId)
   );
+
+  /**
+   * Forward debug logs to the background console. The browser-action popup
+   * cannot be inspected directly, so this mirrors Popup.svelte's popupLog and
+   * shows up (prefixed "[popup]") in the about:debugging background console.
+   */
+  function dbg(message: string, data?: unknown) {
+    void browser.runtime
+      .sendMessage({
+        subject: "popup:debugLog",
+        data: { message, data, t: Date.now() },
+      })
+      .catch(() => {
+        /* background may be asleep; ignore */
+      });
+  }
   let isStopping = false;
   let stopTimedOut = false;
   let stopTimeoutId: number | undefined;
@@ -114,8 +130,58 @@
 
   /** Whether a session request is in progress for this receiver. */
   let isConnecting = false;
-  $: if (isOwnedSession || (!application && connectedSessionIds.length === 0)) {
+  let connectTimeoutId: number | undefined;
+  function beginConnecting() {
+    isConnecting = true;
+    if (connectTimeoutId !== undefined) window.clearTimeout(connectTimeoutId);
+    connectTimeoutId = window.setTimeout(() => {
+      if (!isOwnedSession) isConnecting = false;
+      connectTimeoutId = undefined;
+    }, 20_000);
+  }
+  $: if (isOwnedSession) {
     isConnecting = false;
+    if (connectTimeoutId !== undefined) {
+      window.clearTimeout(connectTimeoutId);
+      connectTimeoutId = undefined;
+    }
+  }
+  onDestroy(() => {
+    if (connectTimeoutId !== undefined) window.clearTimeout(connectTimeoutId);
+  });
+
+  /**
+   * Log the exact inputs that decide whether this receiver row renders the
+   * Stop button ({#if application && !application.isIdleScreen && isOwnedSession})
+   * or the Cast button ({:else if isAnyMediaTypeAvailable}) or neither. This
+   * captures the reported play-vs-pause difference in Cast-button visibility
+   * after Stop. Throttled by a signature so it only logs on real change.
+   */
+  let lastButtonSig = "";
+  $: {
+    const showStop = Boolean(
+      application && !application.isIdleScreen && isOwnedSession
+    );
+    const showCast = !showStop && isAnyMediaTypeAvailable;
+    const buttonState = {
+      deviceId: device.id,
+      showStop,
+      showCast,
+      hasApp: Boolean(application),
+      isIdleScreen: application?.isIdleScreen ?? null,
+      isOwnedSession,
+      transportId: application?.transportId ?? null,
+      connectedSessionIds,
+      playerState: mediaStatus?.playerState ?? null,
+      isConnecting,
+      isAnyMediaTypeAvailable,
+      isMediaTypeAvailable,
+    };
+    const sig = JSON.stringify(buttonState);
+    if (sig !== lastButtonSig) {
+      lastButtonSig = sig;
+      dbg("Receiver button state", buttonState);
+    }
   }
 
   function sendReceiverMessage(
@@ -261,7 +327,7 @@
         break;
 
       case MenuId.PopupCast:
-        isConnecting = true;
+        beginConnecting();
         dispatch("cast", { device });
         break;
       case MenuId.PopupStop:
@@ -479,7 +545,7 @@
       class="receiver__cast-button"
       disabled={isConnecting || isAnyConnecting || !isMediaTypeAvailable}
       on:click={() => {
-        isConnecting = true;
+        beginConnecting();
         dispatch("cast", { device });
       }}
     >

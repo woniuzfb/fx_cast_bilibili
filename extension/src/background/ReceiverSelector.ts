@@ -55,6 +55,14 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
   private defaultMediaType?: ReceiverSelectorMediaType;
   private availableMediaTypes?: ReceiverSelectorMediaType;
 
+  /**
+   * Session IDs currently connected/owned by this browser. Cached so the very
+   * first popup:update (sent when the popup connects) can tell the popup which
+   * receiver is an owned session — this is what makes the Stop button appear
+   * immediately, instead of only after a later device-change refresh.
+   */
+  private connectedSessionIds: string[] = [];
+
   private wasReceiverSelected = false;
 
   appInfo?: ReceiverSelectorAppInfo;
@@ -89,12 +97,14 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
     availableMediaTypes: ReceiverSelectorMediaType;
     appInfo?: ReceiverSelectorAppInfo;
     pageInfo?: ReceiverSelectorPageInfo;
+    connectedSessionIds?: string[];
   }) {
     this.appInfo = opts.appInfo;
     this.pageInfo = opts.pageInfo;
     this.devices = opts.devices;
     this.defaultMediaType = opts.defaultMediaType;
     this.availableMediaTypes = opts.availableMediaTypes;
+    this.connectedSessionIds = opts.connectedSessionIds ?? [];
     this.wasReceiverSelected = false;
     this.messagePortDisconnected = true;
     this.messagePort = undefined;
@@ -110,6 +120,7 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
     connectedSessionIds: string[]
   ) {
     this.devices = devices;
+    this.connectedSessionIds = connectedSessionIds;
     if (!this.messagePort || this.messagePortDisconnected) return;
     try {
       this.messagePort.postMessage({
@@ -199,6 +210,7 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
         isBridgeCompatible: this.isBridgeCompatible,
         defaultMediaType: this.defaultMediaType,
         availableMediaTypes: this.availableMediaTypes,
+        connectedSessionIds: this.connectedSessionIds,
       },
     });
   }
@@ -207,6 +219,16 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
   private onPopupMessage(message: Message) {
     switch (message.subject) {
       case "main:receiverSelected":
+        // The selector's selected event resolves a one-shot Promise. Ignore a
+        // second selection from the same long-lived popup; Stop -> Cast must
+        // create a fresh current-tab request instead.
+        if (this.wasReceiverSelected) {
+          logger.info("Ignoring selection on consumed receiver selector", {
+            deviceId: message.data.device.id,
+            mediaType: message.data.mediaType,
+          });
+          break;
+        }
         this.wasReceiverSelected = true;
         this.dispatchEvent(
           new CustomEvent("selected", { detail: message.data })

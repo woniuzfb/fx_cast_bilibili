@@ -33,7 +33,36 @@ interface EnsureInitOpts {
  */
 export function ensureInit(opts?: EnsureInitOpts): Promise<CastPort> {
     return new Promise(async (resolve, reject) => {
-        // If already initialized
+        /**
+         * Already initialized on this page.
+         *
+         * The page<->manager messaging layer and the exported `cast` SDK are
+         * effectively one-shot per page load:
+         *   - `media.ts` imports the default `cast` ONCE. Because
+         *     `export default existingInstance` does not track later
+         *     reassignment, importers keep pointing at the original SDK; the
+         *     old `existingInstance = new CastSDK()` created an instance the
+         *     injected sender never used.
+         *   - `pageMessaging` performs a single INIT_MESSAGE handshake, and the
+         *     old code closed its page port here and then returned that very
+         *     (now-closed) port.
+         * The net effect for a same-page re-cast (e.g. Bilibili after Stop) was
+         * that the reused SDK's requestSession posted into a closed port, so the
+         * background never received `main:requestSession` and the receiver
+         * selector never opened (popup stuck on "Preparing receiver selector").
+         *
+         * Fix: for the non-trusted path (no receiverDevice), REUSE the existing
+         * open channel + SDK instead of tearing them down. Combined with the
+         * SDK's same-page reinit handling, the reused `cast` replays receiver
+         * availability and drives requestSession over the still-connected
+         * trusted-cast port, opening the proper App selector.
+         */
+        if (existingPort && !opts?.receiverDevice) {
+            resolve(existingPort);
+            return;
+        }
+
+        // If already initialized (trusted/mirroring re-init path)
         if (existingPort) {
             existingPort.close();
             existingInstance = new CastSDK();

@@ -18,6 +18,13 @@ const URL_PATTERNS_ALL = [...URL_PATTERNS_REMOTE, URL_PATTERN_FILE];
 /** Match patterns for the whitelist option menus. */
 const whitelistChildMenuPatterns = new Map<string | number, string>();
 
+/**
+ * Monotonic counter used to correlate a single launchBilibiliSender call with
+ * the selector-open events it triggers, so interleaved calls (popup auto-cast
+ * racing a manual click) can be told apart in the background log.
+ */
+let bilibiliLaunchSeq = 0;
+
 /** Handles initial menu setup. */
 export async function initMenus() {
   logger.info("init (menus)");
@@ -214,21 +221,64 @@ async function onMenuClicked(
 }
 
 export async function launchBilibiliSender(tabId: number) {
-  logger.info("Bilibili cast requested", { tabId });
+  const seq = ++bilibiliLaunchSeq;
+  logger.info("Bilibili cast requested", { seq, tabId, t: Date.now() });
   try {
-    const loaded = await browser.scripting.executeScript({
+    // Probe the tab: is the sender injected, and is it currently casting?
+    // Returns "absent" | "casting" | "idle".
+    const probe = await browser.scripting.executeScript({
       target: { tabId },
-      func: (() => Boolean((window as any).__fxCastBilibili)) as any,
+      func: (() => {
+        const api = (window as any).__fxCastBilibili;
+        if (!api) return "absent";
+        return api.isCasting?.() ? "casting" : "idle";
+      }) as any,
     });
-    if (loaded.some((result) => result.result)) {
-      // The sender module is already injected in this tab. Don't re-inject
-      // (that would throw and abort the flow, leaving the popup stuck on
-      // "Preparing receiver selector..."). Just re-open the receiver
-      // selector via the standard cast path.
-      logger.info("Bilibili sender already loaded; opening selector", {
+    const state = probe.find(
+      (result) => typeof result.result === "string"
+    )?.result as "absent" | "casting" | "idle" | undefined;
+
+    // Detailed probe trace: which branch this launch takes. Pair the `seq`
+    // with the subsequent "Opening receiver selector" log to see whether this
+    // launch is the one that clobbered a good (App) selector with the generic
+    // device-only view.
+    logger.info("Bilibili probe result", {
+      seq,
+      tabId,
+      state,
+      rawResults: probe.map((r) => r.result),
+    });
+
+    if (state === "casting") {
+      // A cast is already running. Open the receiver selector so the popup can
+      // show the running session with a Stop button. The Stop button depends on
+      // the owned session id being sent to the popup (getReceiverSelection now
+      // includes connectedSessionIds in the selector's initial state), NOT on
+      // availableMediaTypes, so it appears even though the generic path exposes
+      // no App media for Bilibili.
+      logger.info("Bilibili sender already casting; opening selector", {
+        seq,
         tabId,
       });
       await castManager.triggerCast(tabId);
+      logger.info("Bilibili casting-branch triggerCast returned", { seq, tabId });
+      return;
+    }
+
+    if (state === "idle") {
+      // Injected but not casting (e.g. the previous cast was stopped). Ask the
+      // sender to re-cast: it re-runs resolve + cast.requestSession in the page,
+      // which is the only path that opens a selector with real castable media
+      // (a Cast button) for Bilibili. reinject() is debounced so a popup
+      // auto-cast plus a manual click won't fight each other.
+      logger.info("Bilibili sender idle; re-casting", { seq, tabId });
+      await browser.scripting.executeScript({
+        target: { tabId },
+        func: (() => {
+          (window as any).__fxCastBilibili?.reinject();
+        }) as any,
+      });
+      logger.info("Bilibili idle-branch reinject dispatched", { seq, tabId });
       return;
     }
 
