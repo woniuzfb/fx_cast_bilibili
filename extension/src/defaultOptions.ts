@@ -68,6 +68,9 @@ export interface Options {
     /** Custom user agent string for whitelist. */
     siteWhitelistCustomUserAgent: string;
 
+    /** Internal version for custom Bilibili default migrations. */
+    bilibiliDefaultsVersion: number;
+
     /** Show advanced options on options page. */
     showAdvancedOptions: boolean;
 
@@ -83,8 +86,8 @@ export default {
     bridgeBackupPassword: "",
 
     mediaEnabled: true,
-    mediaSyncElement: false,
-    mediaStopOnUnload: false,
+    mediaSyncElement: true,
+    mediaStopOnUnload: true,
     localMediaEnabled: true,
     localMediaServerPort: 9555,
 
@@ -102,8 +105,13 @@ export default {
     receiverSelectorShowMediaImages: false,
 
     siteWhitelistEnabled: true,
-    siteWhitelist: [{ pattern: "https://www.netflix.com/*", isEnabled: true }],
+    siteWhitelist: [
+        { pattern: "https://www.netflix.com/*", isEnabled: true },
+        { pattern: "https://www.bilibili.com/video/*", isEnabled: true },
+        { pattern: "https://m.bilibili.com/video/*", isEnabled: true }
+    ],
     siteWhitelistCustomUserAgent: "",
 
+    bilibiliDefaultsVersion: 1,
     showAdvancedOptions: false
 } as Options;

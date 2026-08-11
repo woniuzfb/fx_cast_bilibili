@@ -1,26 +1,26 @@
 import type { TypedPort } from "./lib/TypedPort";
 
 import type {
-    ReceiverSelection,
-    ReceiverSelectorMediaMessage,
-    ReceiverSelectorReceiverMessage
-} from "./background/receiverSelector";
+  ReceiverSelection,
+  ReceiverSelectorMediaMessage,
+  ReceiverSelectorReceiverMessage,
+} from "./background/ReceiverSelector";
 
 import type {
-    CastSessionCreatedDetails,
-    CastSessionUpdatedDetails,
-    MediaStatus,
-    ReceiverStatus,
-    SenderMediaMessage,
-    SenderMessage
+  CastSessionCreatedDetails,
+  CastSessionUpdatedDetails,
+  MediaStatus,
+  ReceiverStatus,
+  SenderMediaMessage,
+  SenderMessage,
 } from "./cast/sdk/types";
 import type { ApiConfig, Receiver, SessionRequest } from "./cast/sdk/classes";
 
 import type {
-    ReceiverDevice,
-    ReceiverSelectorAppInfo,
-    ReceiverSelectorMediaType,
-    ReceiverSelectorPageInfo
+  ReceiverDevice,
+  ReceiverSelectorAppInfo,
+  ReceiverSelectorMediaType,
+  ReceiverSelectorPageInfo,
 } from "./types";
 import type { ReceiverAction } from "./cast/sdk/enums";
 
@@ -42,81 +42,81 @@ import type { ReceiverAction } from "./cast/sdk/enums";
  * components.
  */
 type ExtensionMessageDefinitions = {
-    /** Initial data to send to selector popup. */
-    "popup:init": {
-        appInfo?: ReceiverSelectorAppInfo;
-        pageInfo?: ReceiverSelectorPageInfo;
-    };
-    /** Updates selector popup with new data. */
-    "popup:update": {
-        devices: ReceiverDevice[];
-        isBridgeCompatible: boolean;
-        connectedSessionIds?: string[];
-        defaultMediaType?: ReceiverSelectorMediaType;
-        availableMediaTypes?: ReceiverSelectorMediaType;
-    };
+  /** Initial data to send to selector popup. */
+  "popup:init": {
+    appInfo?: ReceiverSelectorAppInfo;
+    pageInfo?: ReceiverSelectorPageInfo;
+  };
+  /** Updates selector popup with new data. */
+  "popup:update": {
+    devices: ReceiverDevice[];
+    isBridgeCompatible: boolean;
+    connectedSessionIds?: string[];
+    defaultMediaType?: ReceiverSelectorMediaType;
+    availableMediaTypes?: ReceiverSelectorMediaType;
+  };
 
-    /**
-     * Sent from the selector popup when a receiver has been
-     * selected.
-     */
-    "main:receiverSelected": ReceiverSelection;
-    /**
-     * Sent from the selector popup when a receiver has been
-     * stopped. Used to provide cast API receiver action updates.
-     */
-    "main:receiverStopped": { deviceId: string };
+  /**
+   * Sent from the selector popup when a receiver has been
+   * selected.
+   */
+  "main:receiverSelected": ReceiverSelection;
+  /**
+   * Sent from the selector popup when a receiver has been
+   * stopped. Used to provide cast API receiver action updates.
+   */
+  "main:receiverStopped": { deviceId: string };
 
-    /**
-     * Tells the cast manager to provide the cast API instance with
-     * receiver data.
-     */
-    "main:initializeCastSdk": { apiConfig: ApiConfig };
-    "cast:initialized": { isAvailable: boolean };
+  /**
+   * Tells the cast manager to provide the cast API instance with
+   * receiver data.
+   */
+  "main:initializeCastSdk": { apiConfig: ApiConfig };
+  "cast:initialized": { isAvailable: boolean };
 
-    /**
-     * Sent to the cast API when a session is requested or stopped via
-     * the extension UI.
-     */
-    "cast:receiverAction": { receiver: Receiver; action: ReceiverAction };
+  /**
+   * Sent to the cast API when a session is requested or stopped via
+   * the extension UI.
+   */
+  "cast:receiverAction": { receiver: Receiver; action: ReceiverAction };
 
-    /**
-     * Sent from the cast API to trigger receiver selection on session
-     * request.
-     */
-    "main:requestSession": {
-        sessionRequest: SessionRequest;
-        /** Skip receiver selection (allowed for trusted instances only). */
-        receiverDevice?: ReceiverDevice;
-    };
-    /** Return message to the cast API when a selection is cancelled. */
-    "cast:sessionRequestCancelled": undefined;
+  /**
+   * Sent from the cast API to trigger receiver selection on session
+   * request.
+   */
+  "main:requestSession": {
+    sessionRequest: SessionRequest;
+    /** Skip receiver selection (allowed for trusted instances only). */
+    receiverDevice?: ReceiverDevice;
+  };
+  /** Return message to the cast API when a selection is cancelled. */
+  "cast:sessionRequestCancelled": undefined;
 
-    "main:requestSessionById": { sessionId: string };
-    "main:leaveSession": void;
+  "main:requestSessionById": { sessionId: string };
+  "main:leaveSession": void;
 
-    "cast:instanceCreated": { isAvailable: boolean };
-    "cast:receiverAvailabilityUpdated": { isAvailable: boolean };
+  "cast:instanceCreated": { isAvailable: boolean };
+  "cast:receiverAvailabilityUpdated": { isAvailable: boolean };
 
-    "cast:sessionCreated": CastSessionCreatedDetails & {
-        receiver: Receiver;
-        media?: MediaStatus;
-    };
-    "cast:sessionUpdated": CastSessionUpdatedDetails;
-    "cast:sessionDisconnected": { sessionId: string };
+  "cast:sessionCreated": CastSessionCreatedDetails & {
+    receiver: Receiver;
+    media?: MediaStatus;
+  };
+  "cast:sessionUpdated": CastSessionUpdatedDetails;
+  "cast:sessionDisconnected": { sessionId: string };
 
-    /** Allows the selector popup to send cast NS_RECEIVER messages. */
-    "main:sendReceiverMessage": ReceiverSelectorReceiverMessage;
-    /** Allows the selector popup to send cast NS_MEDIA messages. */
-    "main:sendMediaMessage": ReceiverSelectorMediaMessage;
+  /** Allows the selector popup to send cast NS_RECEIVER messages. */
+  "main:sendReceiverMessage": ReceiverSelectorReceiverMessage;
+  /** Allows the selector popup to send cast NS_MEDIA messages. */
+  "main:sendMediaMessage": ReceiverSelectorMediaMessage;
 
-    /**
-     * Tells the device manager to clear its device list and re-connect
-     * to the bridge.
-     */
-    "main:refreshDeviceManager": void;
+  /**
+   * Tells the device manager to clear its device list and re-connect
+   * to the bridge.
+   */
+  "main:refreshDeviceManager": void;
 
-    "mirroringPopup:init": { device: ReceiverDevice };
+  "mirroringPopup:init": { device: ReceiverDevice };
 };
 
 /**
@@ -126,186 +126,192 @@ type ExtensionMessageDefinitions = {
  *   app/src/bridge/messaging.ts > MessageDefinitions
  */
 type BridgeMessageDefinitions = {
-    /**
-     * First message sent by the extension to the bridge.Responds directly with
-     * version string of the bridge to compare.
-     *
-     * Still uses `:/` message separator for compat talking to older bridge
-     * versions.
-     */
-    "bridge:getInfo": undefined;
-    "bridge:/getInfo": undefined;
+  /**
+   * First message sent by the extension to the bridge.Responds directly with
+   * version string of the bridge to compare.
+   *
+   * Still uses `:/` message separator for compat talking to older bridge
+   * versions.
+   */
+  "bridge:getInfo": undefined;
+  "bridge:/getInfo": undefined;
 
-    /**
-     * Tells a bridge to begin service discovery (and whether to
-     * establish connections to monitor the status of the receiver
-     * devices).
-     */
-    "bridge:startDiscovery": {
-        shouldWatchStatus: boolean;
-    };
+  /**
+   * Tells a bridge to begin service discovery (and whether to
+   * establish connections to monitor the status of the receiver
+   * devices).
+   */
+  "bridge:startDiscovery": {
+    shouldWatchStatus: boolean;
+  };
 
-    /**
-     * Sent to extension from the bridge whenever a receiver device is
-     * found.
-     */
-    "main:deviceUp": { deviceId: string; deviceInfo: ReceiverDevice };
-    /**
-     * Sent to extension from the bridge whenever a previously found
-     * receiver device is lost.
-     */
-    "main:deviceDown": { deviceId: string };
+  /**
+   * Sent to extension from the bridge whenever a receiver device is
+   * found.
+   */
+  "main:deviceUp": { deviceId: string; deviceInfo: ReceiverDevice };
+  /**
+   * Sent to extension from the bridge whenever a previously found
+   * receiver device is lost.
+   */
+  "main:deviceDown": { deviceId: string };
 
-    /**
-     * Sent to the extension from the bridge whenever a
-     * `RECEIVER_STATUS` message (`NS_RECEIVER`) is received.
-     */
-    "main:receiverDeviceStatusUpdated": {
-        deviceId: string;
-        status: ReceiverStatus;
-    };
-    /**
-     * Sent to the extension from the bridge whenever a
-     * `MEDIA_STATUS` message (`NS_RECEIVER`) is received.
-     */
-    "main:receiverDeviceMediaStatusUpdated": {
-        deviceId: string;
-        status: MediaStatus;
-    };
+  /**
+   * Sent to the extension from the bridge whenever a
+   * `RECEIVER_STATUS` message (`NS_RECEIVER`) is received.
+   */
+  "main:receiverDeviceStatusUpdated": {
+    deviceId: string;
+    status: ReceiverStatus;
+  };
+  /**
+   * Sent to the extension from the bridge whenever a
+   * `MEDIA_STATUS` message (`NS_RECEIVER`) is received.
+   */
+  "main:receiverDeviceMediaStatusUpdated": {
+    deviceId: string;
+    status: MediaStatus;
+  };
 
-    /**
-     * Sent to the bridge when non-session related receiver messages
-     * need to be sent (e.g. volume control, application stop, etc...).
-     */
-    "bridge:sendReceiverMessage": {
-        deviceId: string;
-        message: SenderMessage;
-    };
-    /**
-     * Sent to the bridge when the receiver selector media UI is used
-     * to control media playback.
-     */
-    "bridge:sendMediaMessage": {
-        deviceId: string;
-        message: SenderMediaMessage;
-    };
+  /**
+   * Sent to the bridge when non-session related receiver messages
+   * need to be sent (e.g. volume control, application stop, etc...).
+   */
+  "bridge:sendReceiverMessage": {
+    deviceId: string;
+    message: SenderMessage;
+  };
+  /**
+   * Sent to the bridge when the receiver selector media UI is used
+   * to control media playback.
+   */
+  "bridge:sendMediaMessage": {
+    deviceId: string;
+    message: SenderMediaMessage;
+  };
 
-    /**
-     * Sent to bridge from cast API instance when a session request is
-     * initiated.
-     */
-    "bridge:createCastSession": {
-        appId: string;
-        receiverDevice: ReceiverDevice;
-    };
-    /**
-     * Connects to, and sends a `STOP` message on the `NS_RECEIVER`
-     * channel for the given receiver device.
-     */
-    "bridge:stopCastSession": {
-        receiverDevice: ReceiverDevice;
-    };
+  /**
+   * Sent to bridge from cast API instance when a session request is
+   * initiated.
+   */
+  "bridge:createCastSession": {
+    appId: string;
+    receiverDevice: ReceiverDevice;
+  };
+  /**
+   * Connects to, and sends a `STOP` message on the `NS_RECEIVER`
+   * channel for the given receiver device.
+   */
+  "bridge:stopCastSession": {
+    receiverDevice: ReceiverDevice;
+  };
 
-    /**
-     * Sent to cast API instances whenever a session is created or
-     * updates. Updated details is a mutable subset of session details
-     * otherwise fixed on creation.
-     */
-    "main:castSessionCreated": CastSessionCreatedDetails;
-    "main:castSessionUpdated": CastSessionUpdatedDetails;
+  /**
+   * Sent to cast API instances whenever a session is created or
+   * updates. Updated details is a mutable subset of session details
+   * otherwise fixed on creation.
+   */
+  "main:castSessionCreated": CastSessionCreatedDetails;
+  "main:castSessionUpdated": CastSessionUpdatedDetails;
 
-    /**
-     * Sent to cast API instances whenever a session is stopped.
-     */
-    "cast:sessionStopped": {
-        sessionId: string;
-    };
+  /**
+   * Sent to cast API instances whenever a session is stopped.
+   */
+  "cast:sessionStopped": {
+    sessionId: string;
+  };
 
-    /**
-     * Sent to bridge from cast API instance whenever an `NS_RECEIVER`
-     * message needs to be sent.
-     */
-    "bridge:sendCastReceiverMessage": {
-        sessionId: string;
-        messageData: SenderMessage;
-        messageId: string;
-    };
+  /**
+   * Sent to bridge from cast API instance whenever an `NS_RECEIVER`
+   * message needs to be sent.
+   */
+  "bridge:sendCastReceiverMessage": {
+    sessionId: string;
+    messageData: SenderMessage;
+    messageId: string;
+  };
 
-    /**
-     * Sent to bridge from cast API instance whenever a application
-     * session message needs to be sent (via
-     * `chrome.cast.Session#sendMessage`).
-     */
-    "bridge:sendCastSessionMessage": {
-        sessionId: string;
-        namespace: string;
-        messageData: object | string;
-        messageId: string;
-    };
-    /**
-     * Sent to cast API instance from bridge when session message
-     * received from a receiver device.
-     */
-    "cast:sessionMessageReceived": {
-        sessionId: string;
-        namespace: string;
-        messageData: string;
-    };
+  /**
+   * Sent to bridge from cast API instance whenever a application
+   * session message needs to be sent (via
+   * `chrome.cast.Session#sendMessage`).
+   */
+  "bridge:sendCastSessionMessage": {
+    sessionId: string;
+    namespace: string;
+    messageData: object | string;
+    messageId: string;
+  };
+  /**
+   * Sent to cast API instance from bridge when session message
+   * received from a receiver device.
+   */
+  "cast:sessionMessageReceived": {
+    sessionId: string;
+    namespace: string;
+    messageData: string;
+  };
 
-    /**
-     * Sent to cast API instance from bridge whenever a message
-     * operation is completed. If an error ocurred, an error string will
-     * be passed as the `error` data property.
-     */
-    "cast:impl_sendMessage": {
-        sessionId: string;
-        messageId: string;
-        error?: string;
-    };
+  /**
+   * Sent to cast API instance from bridge whenever a message
+   * operation is completed. If an error ocurred, an error string will
+   * be passed as the `error` data property.
+   */
+  "cast:impl_sendMessage": {
+    sessionId: string;
+    messageId: string;
+    error?: string;
+  };
 
-    /**
-     * Sent to the bridge to start an HTTP media server at a given file
-     * path on the given port.
-     */
-    "bridge:startMediaServer": {
-        filePath: string;
-        port: number;
-    };
-    /**
-     * Sent to media sender from bridge when the media server is ready
-     * to serve files.
-     */
-    "mediaCast:mediaServerStarted": {
-        mediaPath: string;
-        subtitlePaths: string[];
-        localAddress: string;
-    };
-    /**
-     * Sent to bridge to stop HTTP media server.
-     */
-    "bridge:stopMediaServer": undefined;
-    /**
-     * Sent to media sender from bridge when the media server has
-     * stopped.
-     */
-    "mediaCast:mediaServerStopped": undefined;
-    /**
-     * Sent to media sender from bridge when the media server has
-     * encountered an error.
-     */
-    "mediaCast:mediaServerError": string;
+  /**
+   * Sent to the bridge to start an HTTP media server at a given file
+   * path on the given port.
+   */
+  "bridge:startMediaServer": {
+    filePath: string;
+    port: number;
+  };
+  "bridge:startRemoteMediaServer": {
+    mediaUrl: string;
+    referer: string;
+    contentType: string;
+    port: number;
+  };
+  /**
+   * Sent to media sender from bridge when the media server is ready
+   * to serve files.
+   */
+  "mediaCast:mediaServerStarted": {
+    mediaPath: string;
+    subtitlePaths: string[];
+    localAddress: string;
+  };
+  /**
+   * Sent to bridge to stop HTTP media server.
+   */
+  "bridge:stopMediaServer": undefined;
+  /**
+   * Sent to media sender from bridge when the media server has
+   * stopped.
+   */
+  "mediaCast:mediaServerStopped": undefined;
+  /**
+   * Sent to media sender from bridge when the media server has
+   * encountered an error.
+   */
+  "mediaCast:mediaServerError": string;
 };
 
 type MessageDefinitions = ExtensionMessageDefinitions &
-    BridgeMessageDefinitions;
+  BridgeMessageDefinitions;
 
 interface MessageBase<K extends keyof MessageDefinitions> {
-    subject: K;
-    data: MessageDefinitions[K];
+  subject: K;
+  data: MessageDefinitions[K];
 }
 
 type Messages = {
-    [K in keyof MessageDefinitions]: MessageBase<K>;
+  [K in keyof MessageDefinitions]: MessageBase<K>;
 };
 
 /**
@@ -313,11 +319,11 @@ type Messages = {
  * all-optional keys.
  */
 type NarrowedMessage<L extends MessageBase<keyof MessageDefinitions>> =
-    L extends unknown
-        ? undefined extends L["data"]
-            ? Omit<L, "data"> & Partial<L>
-            : L
-        : never;
+  L extends unknown
+    ? undefined extends L["data"]
+      ? Omit<L, "data"> & Partial<L>
+      : L
+    : never;
 
 export type Port = TypedPort<Message>;
 export type Message = NarrowedMessage<Messages[keyof Messages]>;
@@ -326,31 +332,31 @@ export type Message = NarrowedMessage<Messages[keyof Messages]>;
  * Typed WebExtension-style messaging utility class.
  */
 export default new (class Messenger {
-    connect(connectInfo: { name: string }) {
-        return browser.runtime.connect(connectInfo) as Port;
-    }
+  connect(connectInfo: { name: string }) {
+    return browser.runtime.connect(connectInfo) as Port;
+  }
 
-    connectTab(tabId: number, connectInfo: { name: string; frameId: number }) {
-        return browser.tabs.connect(tabId, connectInfo) as Port;
-    }
+  connectTab(tabId: number, connectInfo: { name: string; frameId: number }) {
+    return browser.tabs.connect(tabId, connectInfo) as Port;
+  }
 
-    sendMessage(
-        message: Message,
-        options?: browser.runtime._SendMessageOptions
-    ): Promise<any>;
-    sendMessage(
-        extensionId: string,
-        options?: browser.runtime._SendMessageOptions
-    ): Promise<any>;
-    sendMessage(
-        messageOrExtensionId: string | Message,
-        options?: browser.runtime._SendMessageOptions
-    ) {
-        return browser.runtime.sendMessage(messageOrExtensionId, options);
-    }
+  sendMessage(
+    message: Message,
+    options?: browser.runtime._SendMessageOptions
+  ): Promise<any>;
+  sendMessage(
+    extensionId: string,
+    options?: browser.runtime._SendMessageOptions
+  ): Promise<any>;
+  sendMessage(
+    messageOrExtensionId: string | Message,
+    options?: browser.runtime._SendMessageOptions
+  ) {
+    return browser.runtime.sendMessage(messageOrExtensionId, options);
+  }
 
-    onConnect = browser.runtime.onConnect as WebExtEvent<(port: Port) => void>;
-    onMessage = browser.runtime.onMessage as WebExtEvent<
-        (message: Message, sender: browser.runtime.MessageSender) => void
-    >;
+  onConnect = browser.runtime.onConnect as WebExtEvent<(port: Port) => void>;
+  onMessage = browser.runtime.onMessage as WebExtEvent<
+    (message: Message, sender: browser.runtime.MessageSender) => void
+  >;
 })();

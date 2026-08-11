@@ -10,7 +10,7 @@ import castManager from "./castManager";
 import deviceManager from "./deviceManager";
 
 import { initAction } from "./action";
-import { initMenus } from "./menus";
+import { initMenus, launchBilibiliSender } from "./menus";
 import { initWhitelist } from "./whitelist";
 import { cacheUaInfo, getChromeUserAgentString } from "../lib/userAgents";
 
@@ -134,6 +134,26 @@ async function init() {
     await initAction();
     await initMenus();
     await initWhitelist();
+
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "action:castCurrentTab") return;
+
+        void (async () => {
+            const [tab] = await browser.tabs.query({
+                active: true,
+                currentWindow: true
+            });
+            if (tab.id === undefined) {
+                logger.error("No active tab found for browser-action Cast");
+                return;
+            }
+            if (/^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(tab.url ?? "")) {
+                await launchBilibiliSender(tab.id);
+            } else {
+                await castManager.triggerCast(tab.id);
+            }
+        })().catch(err => logger.error("Browser-action Cast failed", err));
+    });
 
     messaging.onMessage.addListener(message => {
         switch (message.subject) {

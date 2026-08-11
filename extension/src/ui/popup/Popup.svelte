@@ -1,502 +1,507 @@
 <script lang="ts">
-    import { afterUpdate, onDestroy, onMount, tick } from "svelte";
-    import fuzzysort from "fuzzysort";
+  import { afterUpdate, onDestroy, onMount, tick } from "svelte";
+  import fuzzysort from "fuzzysort";
 
-    import messaging, { type Message, type Port } from "../../messaging";
-    import options, { type Options } from "../../lib/options";
-    import { RemoteMatchPattern } from "../../lib/matchPattern";
+  import messaging, { type Message, type Port } from "../../messaging";
+  import options, { type Options } from "../../lib/options";
+  import { RemoteMatchPattern } from "../../lib/matchPattern";
 
-    import { MenuId } from "../../menuIds";
+  import { MenuId } from "../../menuIds";
 
-    import {
-        type ReceiverDevice,
-        ReceiverDeviceCapabilities,
-        type ReceiverSelectorAppInfo,
-        ReceiverSelectorMediaType,
-        type ReceiverSelectorPageInfo
-    } from "../../types";
+  import {
+    type ReceiverDevice,
+    ReceiverDeviceCapabilities,
+    type ReceiverSelectorAppInfo,
+    ReceiverSelectorMediaType,
+    type ReceiverSelectorPageInfo,
+  } from "../../types";
 
-    import knownApps, { type KnownApp } from "../../cast/knownApps";
-    import { hasRequiredCapabilities } from "../../cast/utils";
+  import knownApps, { type KnownApp } from "../../cast/knownApps";
+  import { hasRequiredCapabilities } from "../../cast/utils";
 
-    import Receiver from "./Receiver.svelte";
+  import Receiver from "./Receiver.svelte";
 
-    const _ = browser.i18n.getMessage;
+  const _ = browser.i18n.getMessage;
 
-    /** Currently selected media type. */
-    let mediaType = ReceiverSelectorMediaType.App;
-    /** Media types available to select. */
-    let availableMediaTypes = ReceiverSelectorMediaType.App;
+  /** Currently selected media type. */
+  let mediaType = ReceiverSelectorMediaType.App;
+  /** Media types available to select. */
+  let availableMediaTypes = ReceiverSelectorMediaType.App;
 
-    /** Whether to show bridge warning banner. */
-    let isBridgeCompatible = true;
+  /** Whether to show bridge warning banner. */
+  let isBridgeCompatible = true;
 
-    /** Devices to display. */
-    let devices: ReceiverDevice[] = [];
-    /** IDs of sessions connected by this extension. */
-    let connectedSessionIds: string[] = [];
+  /** Devices to display. */
+  let devices: ReceiverDevice[] = [];
+  /** IDs of sessions connected by this extension. */
+  let connectedSessionIds: string[] = [];
 
-    /** Sender app info (if available). */
-    let appInfo: Optional<ReceiverSelectorAppInfo>;
-    /** Page info (if launched from page context). */
-    let pageInfo: Optional<ReceiverSelectorPageInfo>;
+  /** Sender app info (if available). */
+  let appInfo: Optional<ReceiverSelectorAppInfo>;
+  /** Page info (if launched from page context). */
+  let pageInfo: Optional<ReceiverSelectorPageInfo>;
 
-    /** App details (if matches known app). */
-    let knownApp: Nullable<KnownApp> = null;
+  /** App details (if matches known app). */
+  let knownApp: Nullable<KnownApp> = null;
 
-    /** Whether current page URL matches a whitelist pattern. */
-    let isPageWhitelisted = false;
+  /** Whether current page URL matches a whitelist pattern. */
+  let isPageWhitelisted = false;
 
-    /** Whether casting to a device been initiated from this selector. */
-    let isConnecting = false;
+  /** Whether casting to a device been initiated from this selector. */
+  let isConnecting = false;
 
-    /** Extension options */
-    let opts: Nullable<Options> = null;
+  /** Extension options */
+  let opts: Nullable<Options> = null;
 
-    $: isMediaTypeAvailable = !!(availableMediaTypes & mediaType);
-    $: isAppMediaTypeAvailable = !!(
-        availableMediaTypes & ReceiverSelectorMediaType.App
-    );
+  $: isMediaTypeAvailable = !!(availableMediaTypes & mediaType);
+  $: isAppMediaTypeAvailable = !!(
+    availableMediaTypes & ReceiverSelectorMediaType.App
+  );
 
-    /** Whether to display whitelist suggestion banner. */
-    $: shouldSuggestWhitelist =
-        // If we know the app
-        knownApp &&
-        // If the whitelist is enabled
-        opts?.siteWhitelistEnabled &&
-        // If the page is not whitelisted
-        !isPageWhitelisted &&
-        // If an app is not already loaded on the page
-        !(availableMediaTypes & ReceiverSelectorMediaType.App);
+  /** Whether to display whitelist suggestion banner. */
+  $: shouldSuggestWhitelist =
+    // If we know the app
+    knownApp &&
+    // If the whitelist is enabled
+    opts?.siteWhitelistEnabled &&
+    // If the page is not whitelisted
+    !isPageWhitelisted &&
+    // If an app is not already loaded on the page
+    !(availableMediaTypes & ReceiverSelectorMediaType.App);
 
-    /**
-     * Checks if device is compatible with the requested app and
-     * capabilities.
-     */
-    function isDeviceCompatible(
-        mediaType: ReceiverSelectorMediaType,
-        device: ReceiverDevice
-    ) {
-        switch (mediaType) {
-            case ReceiverSelectorMediaType.App:
-                // If device is audio-only, check app's audio support flag
-                if (
-                    !(
-                        device.capabilities &
-                        ReceiverDeviceCapabilities.VIDEO_OUT
-                    ) &&
-                    appInfo?.isRequestAppAudioCompatible === false
-                ) {
-                    return false;
-                }
-
-                return hasRequiredCapabilities(
-                    device,
-                    appInfo?.sessionRequest?.capabilities
-                );
-
-            /** Mirroring requires video output capability. */
-            case ReceiverSelectorMediaType.Screen:
-                return !!(
-                    device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT
-                );
+  /**
+   * Checks if device is compatible with the requested app and
+   * capabilities.
+   */
+  function isDeviceCompatible(
+    mediaType: ReceiverSelectorMediaType,
+    device: ReceiverDevice
+  ) {
+    switch (mediaType) {
+      case ReceiverSelectorMediaType.App:
+        // If device is audio-only, check app's audio support flag
+        if (
+          !(device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT) &&
+          appInfo?.isRequestAppAudioCompatible === false
+        ) {
+          return false;
         }
 
-        return false;
+        return hasRequiredCapabilities(
+          device,
+          appInfo?.sessionRequest?.capabilities
+        );
+
+      /** Mirroring requires video output capability. */
+      case ReceiverSelectorMediaType.Screen:
+        return !!(device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT);
     }
 
-    let port: Nullable<Port> = null;
-    let browserWindow: Nullable<browser.windows.Window> = null;
-    let resizeObserver = new ResizeObserver(() => fitWindowHeight());
+    return false;
+  }
 
-    window.addEventListener("resize", fitWindowHeight);
+  let port: Nullable<Port> = null;
+  let hasSelectorContext = false;
+  let isPreparingSelector = false;
 
-    onMount(async () => {
-        port = messaging.connect({ name: "popup" });
-        port.onMessage.addListener(onMessage);
+  async function castCurrentTab() {
+    isPreparingSelector = true;
+    await browser.runtime.sendMessage({ subject: "action:castCurrentTab" });
+  }
 
-        browserWindow = await browser.windows.getCurrent();
+  function connectPopupPort() {
+    port?.disconnect();
+    port = messaging.connect({ name: "popup" });
+    port.onMessage.addListener(onMessage);
+  }
 
-        opts = await options.getAll();
-        options.addEventListener("changed", async ev => {
-            opts = await options.getAll();
+  function onRuntimeMessage(message: { subject?: string }) {
+    if (message?.subject !== "receiverSelector:ready") return;
+    connectPopupPort();
+  }
+  let browserWindow: Nullable<browser.windows.Window> = null;
+  let resizeObserver = new ResizeObserver(() => fitWindowHeight());
 
-            /**
-             * Update available media types and ensure selected media
-             * type is valid.
-             */
-            if (ev.detail.includes("mirroringEnabled")) {
-                if (!opts.mirroringEnabled) {
-                    availableMediaTypes &= ~ReceiverSelectorMediaType.Screen;
-                } else {
-                    availableMediaTypes |= ReceiverSelectorMediaType.Screen;
-                }
+  window.addEventListener("resize", fitWindowHeight);
 
-                if (!(availableMediaTypes & mediaType)) {
-                    if (availableMediaTypes & ReceiverSelectorMediaType.App) {
-                        mediaType = ReceiverSelectorMediaType.App;
-                    } else if (
-                        availableMediaTypes & ReceiverSelectorMediaType.Screen
-                    ) {
-                        mediaType = ReceiverSelectorMediaType.Screen;
-                    } else {
-                        mediaType = ReceiverSelectorMediaType.App;
-                    }
-                }
-            }
-        });
+  onMount(async () => {
+    browser.runtime.onMessage.addListener(onRuntimeMessage);
+    connectPopupPort();
+    window.setTimeout(() => {
+      if (!hasSelectorContext && !isPreparingSelector) {
+        void castCurrentTab();
+      }
+    }, 500);
+
+    browserWindow = await browser.windows.getCurrent();
+
+    opts = await options.getAll();
+    options.addEventListener("changed", async (ev) => {
+      opts = await options.getAll();
+
+      /**
+       * Update available media types and ensure selected media
+       * type is valid.
+       */
+      if (ev.detail.includes("mirroringEnabled")) {
+        if (!opts.mirroringEnabled) {
+          availableMediaTypes &= ~ReceiverSelectorMediaType.Screen;
+        } else {
+          availableMediaTypes |= ReceiverSelectorMediaType.Screen;
+        }
+
+        if (!(availableMediaTypes & mediaType)) {
+          if (availableMediaTypes & ReceiverSelectorMediaType.App) {
+            mediaType = ReceiverSelectorMediaType.App;
+          } else if (availableMediaTypes & ReceiverSelectorMediaType.Screen) {
+            mediaType = ReceiverSelectorMediaType.Screen;
+          } else {
+            mediaType = ReceiverSelectorMediaType.App;
+          }
+        }
+      }
+    });
+
+    updateKnownApp();
+
+    resizeObserver.observe(document.documentElement);
+
+    browser.menus.onShown.addListener(onMenuShown);
+  });
+
+  onDestroy(() => {
+    browser.runtime.onMessage.removeListener(onRuntimeMessage);
+    port?.disconnect();
+    resizeObserver.disconnect();
+
+    browser.menus.onShown.removeListener(onMenuShown);
+  });
+
+  afterUpdate(async () => {
+    await tick();
+    fitWindowHeight();
+  });
+
+  function onMessage(message: Message) {
+    switch (message.subject) {
+      case "popup:init":
+        hasSelectorContext = true;
+        appInfo = message.data.appInfo;
+        pageInfo = message.data.pageInfo;
+        break;
+
+      case "popup:update": {
+        isBridgeCompatible = message.data.isBridgeCompatible;
 
         updateKnownApp();
 
-        resizeObserver.observe(document.documentElement);
+        if (
+          message.data.availableMediaTypes !== undefined &&
+          message.data.defaultMediaType !== undefined
+        ) {
+          availableMediaTypes = message.data.availableMediaTypes;
 
-        browser.menus.onShown.addListener(onMenuShown);
-    });
-
-    onDestroy(() => {
-        port?.disconnect();
-        resizeObserver.disconnect();
-
-        browser.menus.onShown.removeListener(onMenuShown);
-    });
-
-    afterUpdate(async () => {
-        await tick();
-        fitWindowHeight();
-    });
-
-    function onMessage(message: Message) {
-        switch (message.subject) {
-            case "popup:init":
-                appInfo = message.data.appInfo;
-                pageInfo = message.data.pageInfo;
-                break;
-
-            case "popup:update": {
-                isBridgeCompatible = message.data.isBridgeCompatible;
-
-                updateKnownApp();
-
-                if (
-                    message.data.availableMediaTypes !== undefined &&
-                    message.data.defaultMediaType !== undefined
-                ) {
-                    availableMediaTypes = message.data.availableMediaTypes;
-
-                    if (availableMediaTypes & message.data.defaultMediaType) {
-                        mediaType = message.data.defaultMediaType;
-                    }
-                }
-
-                devices = message.data.devices;
-
-                if (message.data.connectedSessionIds) {
-                    connectedSessionIds = message.data.connectedSessionIds;
-                }
-
-                break;
-            }
-        }
-    }
-
-    /** Resize browser window to fit content height. */
-    function fitWindowHeight() {
-        if (browserWindow?.id === undefined) return;
-        browser.windows.update(browserWindow.id, {
-            height: Math.ceil(
-                document.body.clientHeight +
-                    (window.outerHeight - window.innerHeight)
-            )
-        });
-    }
-
-    function updateKnownApp() {
-        let newKnownApp: Nullable<KnownApp> = null;
-
-        /**
-         * Check knownApps for an app with an ID matching the registered
-         * app on the target page.
-         */
-        if (isAppMediaTypeAvailable && appInfo?.sessionRequest.appId) {
-            newKnownApp = knownApps[appInfo.sessionRequest.appId];
-        } else if (pageInfo) {
-            const pageUrl = pageInfo.url;
-
-            /**
-             * Or if there isn't an registered app, check for an app
-             * with a match pattern matching the target page URL.
-             */
-            for (const [, app] of Object.entries(knownApps)) {
-                if (!app.matches) {
-                    continue;
-                }
-
-                const pattern = new RemoteMatchPattern(app.matches);
-                if (pattern.matches(pageUrl)) {
-                    newKnownApp = app;
-                    break;
-                }
-            }
+          if (availableMediaTypes & message.data.defaultMediaType) {
+            mediaType = message.data.defaultMediaType;
+          }
         }
 
-        // Check if target page URL is whitelisted.
-        if (pageInfo && opts?.siteWhitelist) {
-            for (const item of opts.siteWhitelist) {
-                const pattern = new RemoteMatchPattern(item.pattern);
-                if (pattern.matches(pageInfo.url)) {
-                    isPageWhitelisted = true;
-                    break;
-                }
-            }
+        devices = message.data.devices;
+
+        if (message.data.connectedSessionIds) {
+          connectedSessionIds = message.data.connectedSessionIds;
+          isConnecting = false;
         }
 
-        knownApp = newKnownApp;
+        break;
+      }
     }
+  }
 
-    async function addToWhitelist(
-        app: KnownApp,
-        pageInfo: ReceiverSelectorPageInfo
-    ) {
+  /** Resize browser window to fit content height. */
+  function fitWindowHeight() {
+    // Firefox owns browser-action popup sizing.
+  }
+
+  function updateKnownApp() {
+    let newKnownApp: Nullable<KnownApp> = null;
+
+    /**
+     * Check knownApps for an app with an ID matching the registered
+     * app on the target page.
+     */
+    if (isAppMediaTypeAvailable && appInfo?.sessionRequest.appId) {
+      newKnownApp = knownApps[appInfo.sessionRequest.appId];
+    } else if (pageInfo) {
+      const pageUrl = pageInfo.url;
+
+      /**
+       * Or if there isn't an registered app, check for an app
+       * with a match pattern matching the target page URL.
+       */
+      for (const [, app] of Object.entries(knownApps)) {
         if (!app.matches) {
-            return;
+          continue;
         }
 
-        const whitelist = await options.get("siteWhitelist");
-        if (!whitelist.find(item => item.pattern === app.matches)) {
-            whitelist.push({ pattern: app.matches, isEnabled: true });
-            await options.set("siteWhitelist", whitelist);
-
-            await browser.tabs.reload(pageInfo.tabId);
-            window.close();
+        const pattern = new RemoteMatchPattern(app.matches);
+        if (pattern.matches(pageUrl)) {
+          newKnownApp = app;
+          break;
         }
+      }
     }
 
-    /** Device ID associated with the last receiver menu that was shown. */
-    let lastMenuShownDeviceId: string;
-
-    const receiverMenuIds = [
-        MenuId.PopupCast,
-        MenuId.PopupStop,
-        MenuId.PopupMediaSeparator,
-        MenuId.PopupMediaPlayPause,
-        MenuId.PopupMediaMute,
-        MenuId.PopupMediaSkipPrevious,
-        MenuId.PopupMediaSkipNext,
-        MenuId.PopupMediaCaptions
-    ];
-
-    /** Handle show events for receiver context menus. */
-    function onMenuShown(info: browser.menus._OnShownInfo) {
-        // Only handle menu events on this page
-        if (info.pageUrl !== window.location.href) return;
-
-        if (!info.targetElementId) return;
-        const targetElement = browser.menus.getTargetElement(
-            info.targetElementId
-        );
-        if (!targetElement) return;
-
-        const receiverElement = targetElement.closest(".receiver");
-        if (!receiverElement) {
-            for (const menuId of receiverMenuIds)
-                browser.menus.update(menuId, { visible: false });
-            browser.menus.refresh();
+    // Check if target page URL is whitelisted.
+    if (pageInfo && opts?.siteWhitelist) {
+      for (const item of opts.siteWhitelist) {
+        const pattern = new RemoteMatchPattern(item.pattern);
+        if (pattern.matches(pageInfo.url)) {
+          isPageWhitelisted = true;
+          break;
         }
+      }
     }
 
-    function onReceiverCast(device: ReceiverDevice) {
-        isConnecting = true;
+    knownApp = newKnownApp;
+  }
 
-        port?.postMessage({
-            subject: "main:receiverSelected",
-            data: { device, mediaType }
-        });
+  async function addToWhitelist(
+    app: KnownApp,
+    pageInfo: ReceiverSelectorPageInfo
+  ) {
+    if (!app.matches) {
+      return;
     }
 
-    function onReceiverStop(device: ReceiverDevice) {
-        port?.postMessage({
-            subject: "main:sendReceiverMessage",
-            data: {
-                deviceId: device.id,
-                message: { requestId: 0, type: "STOP" }
-            }
-        });
+    const whitelist = await options.get("siteWhitelist");
+    if (!whitelist.find((item) => item.pattern === app.matches)) {
+      whitelist.push({ pattern: app.matches, isEnabled: true });
+      await options.set("siteWhitelist", whitelist);
 
-        port?.postMessage({
-            subject: "main:receiverStopped",
-            data: { deviceId: device.id }
-        });
+      await browser.tabs.reload(pageInfo.tabId);
+      window.close();
+    }
+  }
+
+  /** Device ID associated with the last receiver menu that was shown. */
+  let lastMenuShownDeviceId: string;
+
+  const receiverMenuIds = [
+    MenuId.PopupCast,
+    MenuId.PopupStop,
+    MenuId.PopupMediaSeparator,
+    MenuId.PopupMediaPlayPause,
+    MenuId.PopupMediaMute,
+    MenuId.PopupMediaSkipPrevious,
+    MenuId.PopupMediaSkipNext,
+    MenuId.PopupMediaCaptions,
+  ];
+
+  /** Handle show events for receiver context menus. */
+  function onMenuShown(info: browser.menus._OnShownInfo) {
+    // Only handle menu events on this page
+    if (info.pageUrl !== window.location.href) return;
+
+    if (!info.targetElementId) return;
+    const targetElement = browser.menus.getTargetElement(info.targetElementId);
+    if (!targetElement) return;
+
+    const receiverElement = targetElement.closest(".receiver");
+    if (!receiverElement) {
+      for (const menuId of receiverMenuIds)
+        browser.menus.update(menuId, { visible: false });
+      browser.menus.refresh();
+    }
+  }
+
+  function onReceiverCast(device: ReceiverDevice) {
+    isConnecting = true;
+
+    port?.postMessage({
+      subject: "main:receiverSelected",
+      data: { device, mediaType },
+    });
+  }
+
+  function onReceiverStop(device: ReceiverDevice) {
+    isConnecting = false;
+    port?.postMessage({
+      subject: "main:receiverStopped",
+      data: { deviceId: device.id },
+    });
+  }
+
+  function openOptionsPage() {
+    browser.runtime.openOptionsPage();
+  }
+
+  /** Search input element. */
+  let searchInput: HTMLInputElement | undefined;
+  /** Current search term. */
+  let searchTerm: string | undefined;
+  let isSearching = false;
+  /** Results of current search term. */
+  let searchResults: Fuzzysort.KeyResults<ReceiverDevice> | undefined;
+
+  async function handleKeyDown(ev: KeyboardEvent) {
+    if (ev.key === "Escape") {
+      handleSearchClear();
+      return;
+    }
+    if (!isSearching && ev.key.length === 1) {
+      isSearching = true;
     }
 
-    function openOptionsPage() {
-        browser.runtime.openOptionsPage();
+    await tick();
+    searchInput?.focus();
+  }
+  function handleSearchInput() {
+    // Clear search on empty string
+    if (!searchTerm) {
+      handleSearchClear();
+      return;
     }
 
-    /** Search input element. */
-    let searchInput: HTMLInputElement | undefined;
-    /** Current search term. */
-    let searchTerm: string | undefined;
-    let isSearching = false;
-    /** Results of current search term. */
-    let searchResults: Fuzzysort.KeyResults<ReceiverDevice> | undefined;
+    searchResults = fuzzysort.go(searchTerm, devices, {
+      key: "friendlyName",
+    });
+  }
 
-    async function handleKeyDown(ev: KeyboardEvent) {
-        if (ev.key === "Escape") {
-            handleSearchClear();
-            return;
-        }
-        if (!isSearching && ev.key.length === 1) {
-            isSearching = true;
-        }
-
-        await tick();
-        searchInput?.focus();
-    }
-    function handleSearchInput() {
-        // Clear search on empty string
-        if (!searchTerm) {
-            handleSearchClear();
-            return;
-        }
-
-        searchResults = fuzzysort.go(searchTerm, devices, {
-            key: "friendlyName"
-        });
-    }
-
-    function handleSearchClear() {
-        isSearching = false;
-        searchTerm = undefined;
-    }
+  function handleSearchClear() {
+    isSearching = false;
+    searchTerm = undefined;
+  }
 </script>
 
 <svelte:window on:keydown={handleKeyDown} />
 
+{#if !hasSelectorContext}
+  <div class="banner banner--info">Preparing receiver selector...</div>
+{/if}
+
 {#if !isBridgeCompatible}
-    <div class="banner banner--warn">
-        {_("popupBridgeErrorBanner")}
-        <button on:click={openOptionsPage}>
-            {_("popupBridgeErrorBannerOptions")}
-        </button>
-    </div>
+  <div class="banner banner--warn">
+    {_("popupBridgeErrorBanner")}
+    <button on:click={openOptionsPage}>
+      {_("popupBridgeErrorBannerOptions")}
+    </button>
+  </div>
 {/if}
 
 {#if shouldSuggestWhitelist}
-    <div class="banner banner--info">
-        {_("popupWhitelistNotWhitelisted", knownApp?.name)}
-        <button
-            on:click={() => {
-                if (!knownApp || !pageInfo) return;
-                addToWhitelist(knownApp, pageInfo);
-            }}
-        >
-            {_("popupWhitelistAddToWhitelist")}
-        </button>
-    </div>
+  <div class="banner banner--info">
+    {_("popupWhitelistNotWhitelisted", knownApp?.name)}
+    <button
+      on:click={() => {
+        if (!knownApp || !pageInfo) return;
+        addToWhitelist(knownApp, pageInfo);
+      }}
+    >
+      {_("popupWhitelistAddToWhitelist")}
+    </button>
+  </div>
 {/if}
 
-{#if availableMediaTypes !== ReceiverSelectorMediaType.None}
-    <div class="media-type-select">
-        <div class="media-type-select__label-cast">
-            {_("popupMediaSelectCastLabel")}
-        </div>
-        <div class="select-wrapper">
-            <select class="media-type-select__dropdown" bind:value={mediaType}>
-                <option
-                    value={ReceiverSelectorMediaType.App}
-                    disabled={!isAppMediaTypeAvailable}
-                >
-                    {knownApp?.name ?? _("popupMediaTypeApp")}
-                </option>
-
-                {#if opts?.mirroringEnabled}
-                    <option
-                        value={ReceiverSelectorMediaType.Screen}
-                        disabled={!(
-                            availableMediaTypes &
-                            ReceiverSelectorMediaType.Screen
-                        )}
-                    >
-                        {_("popupMediaTypeScreen")}
-                    </option>
-                {/if}
-            </select>
-        </div>
-        <div class="media-type-select__label-to">
-            {_("popupMediaSelectToLabel")}
-        </div>
+{#if hasSelectorContext && availableMediaTypes !== ReceiverSelectorMediaType.None}
+  <div class="media-type-select">
+    <div class="media-type-select__label-cast">
+      {_("popupMediaSelectCastLabel")}
     </div>
+    <div class="select-wrapper">
+      <select class="media-type-select__dropdown" bind:value={mediaType}>
+        <option
+          value={ReceiverSelectorMediaType.App}
+          disabled={!isAppMediaTypeAvailable}
+        >
+          {knownApp?.name ?? _("popupMediaTypeApp")}
+        </option>
+
+        {#if opts?.mirroringEnabled}
+          <option
+            value={ReceiverSelectorMediaType.Screen}
+            disabled={!(availableMediaTypes & ReceiverSelectorMediaType.Screen)}
+          >
+            {_("popupMediaTypeScreen")}
+          </option>
+        {/if}
+      </select>
+    </div>
+    <div class="media-type-select__label-to">
+      {_("popupMediaSelectToLabel")}
+    </div>
+  </div>
 {/if}
 
 {#if isSearching}
-    <div class="search">
-        <input
-            type="text"
-            class="search-input"
-            bind:this={searchInput}
-            bind:value={searchTerm}
-            on:input={handleSearchInput}
-            title={_("popupSearch")}
-        />
-        <button
-            class="search-clear ghost"
-            title={_("popupSearchClear")}
-            on:click={handleSearchClear}
-        />
-    </div>
+  <div class="search">
+    <input
+      type="text"
+      class="search-input"
+      bind:this={searchInput}
+      bind:value={searchTerm}
+      on:input={handleSearchInput}
+      title={_("popupSearch")}
+    />
+    <button
+      class="search-clear ghost"
+      title={_("popupSearchClear")}
+      on:click={handleSearchClear}
+    />
+  </div>
 {/if}
 
-<ul class="receiver-list">
+{#if hasSelectorContext}
+  <ul class="receiver-list">
     {#if searchTerm && searchResults}
-        {#if !searchResults.length}
-            <div class="receiver-list__not-found">
-                No devices found for "{searchTerm}"
-            </div>
-        {/if}
-
-        {#each searchResults as result}
-            {@const device = devices.find(
-                device => device.id === result.obj.id
-            )}
-
-            {#if device}
-                <Receiver
-                    {opts}
-                    {port}
-                    {device}
-                    {result}
-                    {connectedSessionIds}
-                    {isMediaTypeAvailable}
-                    isAnyMediaTypeAvailable={availableMediaTypes !==
-                        ReceiverSelectorMediaType.None &&
-                        isDeviceCompatible(mediaType, device)}
-                    isAnyConnecting={isConnecting}
-                    bind:lastMenuShownDeviceId
-                    on:cast={ev => onReceiverCast(ev.detail.device)}
-                    on:stop={ev => onReceiverStop(ev.detail.device)}
-                />
-            {/if}
-        {/each}
-    {:else if !devices.length}
+      {#if !searchResults.length}
         <div class="receiver-list__not-found">
-            {_("popupNoReceiversFound")}
+          No devices found for "{searchTerm}"
         </div>
+      {/if}
+
+      {#each searchResults as result}
+        {@const device = devices.find((device) => device.id === result.obj.id)}
+
+        {#if device}
+          <Receiver
+            {opts}
+            {port}
+            {device}
+            {result}
+            {connectedSessionIds}
+            {isMediaTypeAvailable}
+            isAnyMediaTypeAvailable={availableMediaTypes !==
+              ReceiverSelectorMediaType.None &&
+              isDeviceCompatible(mediaType, device)}
+            isAnyConnecting={isConnecting}
+            bind:lastMenuShownDeviceId
+            on:cast={(ev) => onReceiverCast(ev.detail.device)}
+            on:stop={(ev) => onReceiverStop(ev.detail.device)}
+          />
+        {/if}
+      {/each}
+    {:else if !devices.length}
+      <div class="receiver-list__not-found">
+        {_("popupNoReceiversFound")}
+      </div>
     {:else}
-        {#each devices as device}
-            <Receiver
-                {opts}
-                {port}
-                {device}
-                {connectedSessionIds}
-                {isMediaTypeAvailable}
-                isAnyMediaTypeAvailable={availableMediaTypes !==
-                    ReceiverSelectorMediaType.None &&
-                    isDeviceCompatible(mediaType, device)}
-                isAnyConnecting={isConnecting}
-                bind:lastMenuShownDeviceId
-                on:cast={ev => onReceiverCast(ev.detail.device)}
-                on:stop={ev => onReceiverStop(ev.detail.device)}
-            />
-        {/each}
+      {#each devices as device}
+        <Receiver
+          {opts}
+          {port}
+          {device}
+          {connectedSessionIds}
+          {isMediaTypeAvailable}
+          isAnyMediaTypeAvailable={availableMediaTypes !==
+            ReceiverSelectorMediaType.None &&
+            isDeviceCompatible(mediaType, device)}
+          isAnyConnecting={isConnecting}
+          bind:lastMenuShownDeviceId
+          on:cast={(ev) => onReceiverCast(ev.detail.device)}
+          on:stop={(ev) => onReceiverStop(ev.detail.device)}
+        />
+      {/each}
     {/if}
-</ul>
+  </ul>
+{/if}

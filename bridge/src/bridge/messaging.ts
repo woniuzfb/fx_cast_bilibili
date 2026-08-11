@@ -167,6 +167,7 @@ type MessageDefinitions = {
         filePath: string;
         port: number;
     };
+    "bridge:startRemoteMediaServer": { mediaUrl: string; referer: string; contentType: string; port: number; };
     /**
      * Sent to media sender from bridge when the media server is ready
      * to serve files.

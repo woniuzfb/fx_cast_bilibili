@@ -4,7 +4,7 @@ import { handleCastMessage } from "./components/cast";
 import CastDeviceBrowser from "./components/cast/deviceBrowser";
 import Remote from "./components/cast/remote";
 
-import { startMediaServer, stopMediaServer } from "./components/mediaServer";
+import { startMediaServer, startRemoteMediaServer, stopMediaServer } from "./components/mediaServer";
 
 import { applicationVersion } from "../../config.json";
 
@@ -119,6 +119,12 @@ export function run(messaging: Messenger) {
             case "bridge:startMediaServer": {
                 const { filePath, port } = message.data;
                 startMediaServer(messaging, filePath, port);
+                break;
+            }
+            case "bridge:startRemoteMediaServer": {
+                const { mediaUrl, referer, contentType, port } = message.data;
+                console.error("[fx_cast Bilibili] proxy requested", { host: new URL(mediaUrl).hostname, port });
+                startRemoteMediaServer(messaging, mediaUrl, referer, contentType, port);
                 break;
             }
             case "bridge:stopMediaServer": {

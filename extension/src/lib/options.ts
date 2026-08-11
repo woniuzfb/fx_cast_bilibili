@@ -17,7 +17,6 @@ interface EventMap {
 export default new (class extends TypedEventTarget<EventMap> {
     constructor() {
         super();
-        this.onStorageChanged = this.onStorageChanged.bind(this);
         browser.storage.onChanged.addListener(this.onStorageChanged);
 
         // Supresses sendRemoveListener closed conduit error
@@ -26,10 +25,12 @@ export default new (class extends TypedEventTarget<EventMap> {
         });
     }
 
-    private onStorageChanged(
+    // Use an own-property arrow callback. Firefox content-script isolated
+    // worlds can fail prototype lookup for methods on EventTarget subclasses.
+    private onStorageChanged = (
         changes: { [key: string]: browser.storage.StorageChange },
         areaName: string
-    ) {
+    ) => {
         if (areaName !== "sync") {
             return;
         }
@@ -78,7 +79,7 @@ export default new (class extends TypedEventTarget<EventMap> {
                 })
             );
         }
-    }
+    };
 
     /**
      * Fetches `options` key from storage and returns it as
@@ -131,6 +132,22 @@ export default new (class extends TypedEventTarget<EventMap> {
      */
     public async update(defaults = defaultOptions): Promise<void> {
         const newOpts = await this.getAll();
+
+        if ((newOpts.bilibiliDefaultsVersion ?? 0) < 1) {
+            newOpts.mediaSyncElement = true;
+            newOpts.mediaStopOnUnload = true;
+            const whitelist = newOpts.siteWhitelist ?? [];
+            for (const pattern of [
+                "https://www.bilibili.com/video/*",
+                "https://m.bilibili.com/video/*"
+            ]) {
+                if (!whitelist.some(item => item.pattern === pattern)) {
+                    whitelist.push({ pattern, isEnabled: true });
+                }
+            }
+            newOpts.siteWhitelist = whitelist;
+            newOpts.bilibiliDefaultsVersion = 1;
+        }
 
         // Find options not already in storage
         for (const [optName, optVal] of Object.entries(defaults)) {

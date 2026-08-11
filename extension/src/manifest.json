@@ -15,6 +15,7 @@
         }
     },
     "action": {
+        "default_popup": "ui/popup/index.html",
         "theme_icons": [
             {
                 "light": "icons/cast-default-light.svg",

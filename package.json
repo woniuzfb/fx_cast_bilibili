@@ -11,6 +11,7 @@
         "package": "npm run package:bridge && npm run package:extension",
         "package:bridge": "cd bridge && npm run package",
         "package:extension": "cd extension && npm run package",
+        "package:source": "git archive --format=tar.gz --prefix=fx_cast/ -o fx_cast-source.tar.gz HEAD",
         "test": "node test/driver.js",
         "install-manifest": "cd bridge && npm run install-manifest",
         "remove-manifest": "cd bridge && npm run remove-manifest",

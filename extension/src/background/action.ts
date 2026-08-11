@@ -12,49 +12,38 @@ const ACTION_ICON_CONNECTED = "icons/cast-connected.svg";
 const isDarkTheme = window.matchMedia("(prefers-color-scheme: dark)").matches;
 
 export enum ActionState {
-    Default,
-    Connecting,
-    Connected
+  Default,
+  Connecting,
+  Connected,
 }
 
 /** Updates action details depending on given state. */
 export function updateActionState(state: ActionState, tabId?: number) {
-    let title: string;
-    let path = isDarkTheme
-        ? ACTION_ICON_DEFAULT_LIGHT
-        : ACTION_ICON_DEFAULT_DARK;
+  let title: string;
+  let path = isDarkTheme ? ACTION_ICON_DEFAULT_LIGHT : ACTION_ICON_DEFAULT_DARK;
 
-    switch (state) {
-        case ActionState.Default:
-            title = _("actionTitleDefault");
-            break;
-        case ActionState.Connecting:
-            title = _("actionTitleConnecting");
-            path = isDarkTheme
-                ? ACTION_ICON_CONNECTING_LIGHT
-                : ACTION_ICON_CONNECTING_DARK;
-            break;
-        case ActionState.Connected:
-            title = _("actionTitleConnected");
-            path = ACTION_ICON_CONNECTED;
-            break;
-    }
+  switch (state) {
+    case ActionState.Default:
+      title = _("actionTitleDefault");
+      break;
+    case ActionState.Connecting:
+      title = _("actionTitleConnecting");
+      path = isDarkTheme
+        ? ACTION_ICON_CONNECTING_LIGHT
+        : ACTION_ICON_CONNECTING_DARK;
+      break;
+    case ActionState.Connected:
+      title = _("actionTitleConnected");
+      path = ACTION_ICON_CONNECTED;
+      break;
+  }
 
-    browser.action.setTitle({ tabId, title });
-    browser.action.setIcon({ tabId, path });
+  void browser.action.setTitle({ title, tabId });
+  void browser.action.setIcon({ path, tabId });
 }
 
 export function initAction() {
-    logger.info("init (action)");
+  logger.info("init (action)");
 
-    updateActionState(ActionState.Default);
-
-    browser.action.onClicked.addListener(async tab => {
-        if (tab.id === undefined) {
-            logger.error("Tab ID not found in browser action handler.");
-            return;
-        }
-
-        castManager.triggerCast(tab.id);
-    });
+  updateActionState(ActionState.Default);
 }

@@ -69,8 +69,9 @@ const buildOpts = {
         path.join(srcPath, "cast/content.ts"),
         path.join(srcPath, "cast/contentInitial.ts"),
         path.join(srcPath, "cast/contentBridge.ts"),
-        // Media sender
+        // Media senders
         path.join(srcPath, "cast/senders/media.ts"),
+        path.join(srcPath, "cast/senders/bilibili.ts"),
         // Mirroring sender
         path.join(srcPath, "/cast/senders/mirroring.ts"),
         // UI
