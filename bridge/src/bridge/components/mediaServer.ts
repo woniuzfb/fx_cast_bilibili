@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import http from "http";
 import os from "os";
@@ -11,6 +12,8 @@ import { convertSrtToVtt } from "../lib/subtitles";
 
 export let mediaServer: http.Server | undefined;
 let mediaServerStopPromise: Promise<void> | undefined;
+let dashRemuxProcess: ChildProcess | undefined;
+let dashTempDir: string | undefined;
 
 export async function startMediaServer(
   messaging: Messenger,
@@ -231,13 +234,164 @@ async function fetchRemoteMedia(
   throw new Error("Too many upstream redirects");
 }
 
+async function startDashRemuxServer(
+  messaging: Messenger,
+  videoUrl: string,
+  audioUrl: string,
+  referer: string,
+  port: number,
+  requiredDuration = 0
+) {
+  if (!remoteHostAllowed(videoUrl) || !remoteHostAllowed(audioUrl)) {
+    messaging.sendMessage({
+      subject: "mediaCast:mediaServerError",
+      data: "DASH media host not allowlisted",
+    });
+    return;
+  }
+  await stopMediaServer();
+  const tempDir = await fs.promises.mkdtemp(
+    path.join(os.tmpdir(), "fx-cast-dash-")
+  );
+  dashTempDir = tempDir;
+  const mediaPath = "index.m3u8";
+  const playlistPath = path.join(tempDir, mediaPath);
+  const inputHeaders = `Referer: ${referer}\r\nUser-Agent: Mozilla/5.0\r\n`;
+  const args = [
+    "-hide_banner", "-loglevel", "warning",
+    "-headers", inputHeaders, "-i", videoUrl,
+    "-headers", inputHeaders, "-i", audioUrl,
+    "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+    // Default Media Receiver accepts traditional MPEG-TS HLS more reliably
+    // than fragmented MP4 HLS on older Chromecast generations.
+    "-f", "hls", "-hls_time", "4", "-hls_list_size", "0",
+    "-hls_playlist_type", "event", "-hls_segment_type", "mpegts",
+    "-hls_flags", "independent_segments",
+    "-hls_segment_filename", path.join(tempDir, "segment-%06d.ts"),
+    playlistPath,
+  ];
+  const ffmpegPath = [
+    process.env.FX_CAST_FFMPEG,
+    "/opt/homebrew/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+    "/usr/bin/ffmpeg",
+  ].find((candidate) => candidate && fs.existsSync(candidate)) ?? "ffmpeg";
+  const remuxProcess = spawn(ffmpegPath, args, {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  dashRemuxProcess = remuxProcess;
+  let stderr = "";
+  remuxProcess.stderr?.on("data", (chunk) => {
+    stderr = (stderr + String(chunk)).slice(-8000);
+  });
+  remuxProcess.on("error", (err) => {
+    if (dashRemuxProcess !== remuxProcess) return;
+    messaging.sendMessage({
+      subject: "mediaCast:mediaServerError",
+      data: `Unable to start ffmpeg: ${err.message}`,
+    });
+  });
+  remuxProcess.on("exit", (code) => {
+    if (code && dashRemuxProcess === remuxProcess && mediaServer) {
+      messaging.sendMessage({
+        subject: "mediaCast:mediaServerError",
+        data: `ffmpeg DASH remux failed (${code}): ${stderr}`,
+      });
+    }
+  });
+  mediaServer = http.createServer(async (req, res) => {
+    const pathname = decodeURIComponent((req.url ?? "/").split("?", 1)[0]);
+    const filename = path.basename(pathname);
+    if (!filename || filename !== pathname.slice(1)) {
+      res.writeHead(404).end();
+      return;
+    }
+    const filePath = path.join(tempDir, filename);
+    try {
+      const stat = await fs.promises.stat(filePath);
+      const type = filename.endsWith(".m3u8")
+        ? "application/x-mpegURL"
+        : filename.endsWith(".ts")
+          ? "video/mp2t"
+          : "application/octet-stream";
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-cache",
+        "Content-Type": type,
+        "Content-Length": stat.size,
+      });
+      if (req.method === "HEAD") res.end();
+      else fs.createReadStream(filePath).pipe(res);
+    } catch {
+      res.writeHead(404).end();
+    }
+  });
+  mediaServer.on("error", (err) =>
+    messaging.sendMessage({ subject: "mediaCast:mediaServerError", data: err.message })
+  );
+  mediaServer.on("close", () =>
+    messaging.sendMessage({ subject: "mediaCast:mediaServerStopped" })
+  );
+  mediaServer.listen(port, async () => {
+    const address = firstLocalAddress();
+    if (!address) {
+      messaging.sendMessage({ subject: "mediaCast:mediaServerError", data: "No local IPv4 address" });
+      void stopMediaServer();
+      return;
+    }
+    const minimumPlaylistDuration = Math.max(4, requiredDuration + 8);
+    for (let attempt = 0; attempt < 900; attempt++) {
+      try {
+        const playlist = await fs.promises.readFile(playlistPath, "utf8");
+        const playlistDuration = [...playlist.matchAll(/^#EXTINF:([0-9.]+)/gm)]
+          .reduce((total, match) => total + Number(match[1]), 0);
+        if (
+          playlist.includes("segment-") &&
+          playlist.includes(".ts") &&
+          playlistDuration >= minimumPlaylistDuration
+        ) {
+          messaging.sendMessage({
+            subject: "mediaCast:mediaServerStarted",
+            data: {
+              mediaPath,
+              subtitlePaths: [],
+              localAddress: address,
+              mode: "dash-remux",
+            },
+          });
+          return;
+        }
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    messaging.sendMessage({
+      subject: "mediaCast:mediaServerError",
+      data: `Timed out preparing DASH stream through ${minimumPlaylistDuration}s: ${stderr}`,
+    });
+    void stopMediaServer();
+  });
+}
+
 export async function startRemoteMediaServer(
   messaging: Messenger,
   mediaUrl: string,
   referer: string,
   contentType: string,
-  port: number
+  port: number,
+  audioUrl?: string,
+  requiredDuration = 0
 ) {
+  if (audioUrl) {
+    await startDashRemuxServer(
+      messaging,
+      mediaUrl,
+      audioUrl,
+      referer,
+      port,
+      requiredDuration
+    );
+    return;
+  }
   const host = (() => {
     try {
       return new URL(mediaUrl).hostname;
@@ -331,33 +485,69 @@ export async function startRemoteMediaServer(
     }
     messaging.sendMessage({
       subject: "mediaCast:mediaServerStarted",
-      data: { mediaPath, subtitlePaths: [], localAddress: address },
+      data: {
+        mediaPath,
+        subtitlePaths: [],
+        localAddress: address,
+        mode: "proxy",
+      },
     });
   });
 }
 
 export function stopMediaServer() {
   if (mediaServerStopPromise) return mediaServerStopPromise;
+
   const server = mediaServer;
-  if (!server) return Promise.resolve();
+  const remuxProcess = dashRemuxProcess;
+  const tempDir = dashTempDir;
+  mediaServer = undefined;
+  dashRemuxProcess = undefined;
+  dashTempDir = undefined;
 
-  mediaServerStopPromise = new Promise<void>((resolve, reject) => {
-    const finish = (err?: Error) => {
-      if (mediaServer === server) mediaServer = undefined;
-      mediaServerStopPromise = undefined;
-      if (
-        err &&
-        (err as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
-      ) {
-        reject(err);
-      } else {
-        resolve();
-      }
-    };
+  mediaServerStopPromise = (async () => {
+    if (remuxProcess && remuxProcess.exitCode === null) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(forceKillTimeout);
+          clearTimeout(finalTimeout);
+          resolve();
+        };
+        const forceKillTimeout = setTimeout(() => {
+          remuxProcess.kill("SIGKILL");
+        }, 3000);
+        const finalTimeout = setTimeout(finish, 5000);
+        remuxProcess.once("exit", finish);
+        remuxProcess.kill("SIGTERM");
+      });
+    }
 
-    server.close((err) => finish(err ?? undefined));
-    server.closeAllConnections?.();
-    server.closeIdleConnections?.();
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => {
+          if (
+            err &&
+            (err as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+          ) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+        server.closeAllConnections?.();
+        server.closeIdleConnections?.();
+      });
+    }
+
+    if (tempDir) {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    }
+  })().finally(() => {
+    mediaServerStopPromise = undefined;
   });
+
   return mediaServerStopPromise;
 }

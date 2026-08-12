@@ -220,7 +220,7 @@ async function onMenuClicked(
   }
 }
 
-export async function launchBilibiliSender(tabId: number) {
+export async function launchBilibiliSender(tabId: number, quality = 0) {
   const seq = ++bilibiliLaunchSeq;
   logger.info("Bilibili cast requested", { seq, tabId, t: Date.now() });
   try {
@@ -237,6 +237,15 @@ export async function launchBilibiliSender(tabId: number) {
     const state = probe.find(
       (result) => typeof result.result === "string"
     )?.result as "absent" | "casting" | "idle" | undefined;
+    if (state !== "absent") {
+      await browser.scripting.executeScript({
+        target: { tabId },
+        func: ((selectedQuality: number) => {
+          (window as any).__fxCastBilibili?.setQuality?.(selectedQuality);
+        }) as any,
+        args: [quality],
+      });
+    }
 
     // Detailed probe trace: which branch this launch takes. Pair the `seq`
     // with the subsequent "Opening receiver selector" log to see whether this
@@ -282,6 +291,13 @@ export async function launchBilibiliSender(tabId: number) {
       return;
     }
 
+    await browser.scripting.executeScript({
+      target: { tabId },
+      func: ((selectedQuality: number) => {
+        (window as any).__fxCastBilibiliInitialQuality = selectedQuality;
+      }) as any,
+      args: [quality],
+    });
     const senderResults = await browser.scripting.executeScript({
       target: { tabId },
       files: ["cast/senders/bilibili.js"],

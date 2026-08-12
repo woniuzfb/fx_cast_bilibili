@@ -162,11 +162,29 @@ async function init() {
                 castManager.queueReceiverSelection(tab.id, message.data.selection);
             }
             if (/^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(tab.url ?? "")) {
-                await launchBilibiliSender(tab.id);
+                await launchBilibiliSender(
+                    tab.id,
+                    Number(message.data?.quality) || 0
+                );
             } else {
                 await castManager.triggerCast(tab.id);
             }
         })().catch(err => logger.error("Browser-action Cast failed", err));
+    });
+
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "action:setBilibiliQuality") return;
+        void (async () => {
+            const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+            if (tab.id === undefined) return;
+            await browser.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: ((quality: number) => {
+                    (window as any).__fxCastBilibili?.setQuality?.(quality);
+                }) as any,
+                args: [Number(message.data?.quality) || 0]
+            });
+        })().catch(err => logger.error("Bilibili quality change failed", err));
     });
 
     messaging.onMessage.addListener(message => {

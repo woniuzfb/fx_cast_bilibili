@@ -40,6 +40,10 @@
   let appInfo: Optional<ReceiverSelectorAppInfo>;
   /** Page info (if launched from page context). */
   let pageInfo: Optional<ReceiverSelectorPageInfo>;
+  let bilibiliQuality = 0;
+  $: isBilibiliPage = /^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(
+    pageInfo?.url ?? ""
+  );
 
   /** App details (if matches known app). */
   let knownApp: Nullable<KnownApp> = null;
@@ -142,7 +146,9 @@
     try {
       await browser.runtime.sendMessage({
         subject: "action:castCurrentTab",
-        data: selection ? { selection } : undefined,
+        data: selection
+          ? { selection, quality: bilibiliQuality }
+          : { quality: bilibiliQuality },
       });
     } catch (err) {
       isPreparingSelector = false;
@@ -151,6 +157,17 @@
         err: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  async function setBilibiliQuality() {
+    await browser.storage.local.set({ bilibiliQuality });
+    await browser.runtime.sendMessage({
+      subject: "action:setBilibiliQuality",
+      data: { quality: bilibiliQuality },
+    });
+    popupLog("Bilibili quality changed", {
+      quality: bilibiliQuality || "auto",
+    });
   }
 
   function connectPopupPort() {
@@ -171,6 +188,8 @@
   window.addEventListener("resize", fitWindowHeight);
 
   onMount(async () => {
+    const stored = await browser.storage.local.get("bilibiliQuality");
+    bilibiliQuality = Number(stored.bilibiliQuality) || 0;
     browser.runtime.onMessage.addListener(onRuntimeMessage);
     connectPopupPort();
     autoCastTimeoutId = window.setTimeout(() => {
@@ -491,6 +510,26 @@
     >
       {_("popupWhitelistAddToWhitelist")}
     </button>
+  </div>
+{/if}
+
+{#if hasSelectorContext && isBilibiliPage}
+  <div class="media-type-select">
+    <div class="media-type-select__label-cast">Quality</div>
+    <div class="select-wrapper">
+      <select
+        class="media-type-select__dropdown"
+        bind:value={bilibiliQuality}
+        on:change={setBilibiliQuality}
+      >
+        <option value={0}>Auto (highest compatible)</option>
+        <option value={112}>1080P+</option>
+        <option value={80}>1080P</option>
+        <option value={64}>720P</option>
+        <option value={32}>480P</option>
+        <option value={16}>360P</option>
+      </select>
+    </div>
   </div>
 {/if}
 

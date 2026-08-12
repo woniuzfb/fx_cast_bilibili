@@ -122,9 +122,21 @@ export function run(messaging: Messenger) {
                 break;
             }
             case "bridge:startRemoteMediaServer": {
-                const { mediaUrl, referer, contentType, port } = message.data;
-                console.error("[fx_cast Bilibili] proxy requested", { host: new URL(mediaUrl).hostname, port });
-                startRemoteMediaServer(messaging, mediaUrl, referer, contentType, port);
+                const { mediaUrl, audioUrl, referer, contentType, port, requiredDuration } = message.data;
+                console.error("[fx_cast Bilibili] proxy requested", {
+                    host: new URL(mediaUrl).hostname,
+                    hasSeparateAudio: Boolean(audioUrl),
+                    port
+                });
+                startRemoteMediaServer(
+                    messaging,
+                    mediaUrl,
+                    referer,
+                    contentType,
+                    port,
+                    audioUrl,
+                    requiredDuration
+                );
                 break;
             }
             case "bridge:stopMediaServer": {

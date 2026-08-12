@@ -167,7 +167,7 @@ type MessageDefinitions = {
         filePath: string;
         port: number;
     };
-    "bridge:startRemoteMediaServer": { mediaUrl: string; referer: string; contentType: string; port: number; };
+    "bridge:startRemoteMediaServer": { mediaUrl: string; audioUrl?: string; referer: string; contentType: string; port: number; requiredDuration?: number; };
     /**
      * Sent to media sender from bridge when the media server is ready
      * to serve files.
@@ -176,6 +176,7 @@ type MessageDefinitions = {
         mediaPath: string;
         subtitlePaths: string[];
         localAddress: string;
+        mode?: "proxy" | "dash-remux";
     };
     /**
      * Sent to bridge to stop HTTP media server.

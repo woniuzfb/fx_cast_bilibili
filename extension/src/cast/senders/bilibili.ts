@@ -3,7 +3,12 @@ import MediaSender, { type MediaSenderOpts } from "./media";
 
 declare global {
   interface Window {
-    __fxCastBilibili?: { reinject: () => void; isCasting: () => boolean };
+    __fxCastBilibili?: {
+      reinject: () => void;
+      isCasting: () => boolean;
+      setQuality: (quality: number) => void;
+    };
+    __fxCastBilibiliInitialQuality?: number;
   }
 }
 
@@ -27,6 +32,8 @@ const MAX_DEBUG_LINES = 200;
 const DEBUG_PANEL_ID = "fx-cast-bilibili-debug";
 const lines: string[] = [];
 let sender: MediaSender | undefined;
+let preferredQuality = Number(window.__fxCastBilibiliInitialQuality) || 0;
+const QUALITY_ORDER = [112, 80, 64, 32, 16];
 
 function ensureDebugPanel() {
   let panel = document.getElementById(DEBUG_PANEL_ID) as HTMLPreElement | null;
@@ -86,6 +93,7 @@ interface ResolvedMedia {
   mediaUrl: string;
   title: string;
   contentType: string;
+  audioUrl?: string;
 }
 
 async function json<T>(url: URL): Promise<T> {
@@ -131,66 +139,96 @@ async function resolveMedia(): Promise<ResolvedMedia> {
   for (const [name, value] of Object.entries({
     bvid,
     cid: String(page.cid),
-    // Prefer 1080P progressive MP4. Bilibili may return a lower quality when
-    // 1080P MP4 is unavailable for the video/account; the actual quality from
-    // the response is logged below instead of assuming the request succeeded.
-    qn: "80",
-    fnval: "1",
+    qn: String(preferredQuality || 112),
+    fnval: "16",
     fnver: "0",
     fourk: "0",
     try_look: "1",
   }))
     playUrl.searchParams.set(name, value);
+  interface DashStream {
+    id: number;
+    baseUrl?: string;
+    base_url?: string;
+    bandwidth?: number;
+    codecs?: string;
+    mimeType?: string;
+    mime_type?: string;
+    width?: number;
+    height?: number;
+    frameRate?: string;
+    frame_rate?: string;
+  }
   const play = await json<{
     code: number;
     message?: string;
     data?: {
       quality?: number;
-      format?: string;
       accept_quality?: number[];
       accept_description?: string[];
-      durl?: Array<{ url: string; size?: number }>;
+      dash?: { video?: DashStream[]; audio?: DashStream[] };
     };
   }>(playUrl);
-  const durls = play.data?.durl ?? [];
-  const mediaUrl = durls[0]?.url;
-  const format = play.data?.format ?? "";
-  debug("playurl", {
+  const videos = play.data?.dash?.video ?? [];
+  const audios = play.data?.dash?.audio ?? [];
+  const streamUrl = (stream?: DashStream) => stream?.baseUrl ?? stream?.base_url;
+  const avcVideos = videos.filter((stream) =>
+    (stream.codecs ?? "").toLowerCase().startsWith("avc")
+  );
+  const candidates = avcVideos.length ? avcVideos : videos;
+  const targetQuality = preferredQuality || QUALITY_ORDER.find((quality) =>
+    candidates.some((stream) => stream.id === quality)
+  );
+  const fallbackOrder = preferredQuality
+    ? QUALITY_ORDER.filter((quality) => quality <= preferredQuality)
+    : QUALITY_ORDER;
+  const selectedQuality =
+    (targetQuality && candidates.some((stream) => stream.id === targetQuality)
+      ? targetQuality
+      : fallbackOrder.find((quality) =>
+          candidates.some((stream) => stream.id === quality)
+        )) ?? candidates[0]?.id;
+  const video = [...candidates]
+    .filter((stream) => stream.id === selectedQuality)
+    .sort(
+      (left, right) =>
+        (right.bandwidth ?? 0) - (left.bandwidth ?? 0) ||
+        (right.height ?? 0) - (left.height ?? 0)
+    )[0] ?? candidates[0];
+  const audio = [...audios].sort(
+    (left, right) => (right.bandwidth ?? 0) - (left.bandwidth ?? 0)
+  )[0];
+  const mediaUrl = streamUrl(video);
+  const audioUrl = streamUrl(audio);
+  debug("playurl DASH", {
     code: play.code,
-    requestedQuality: 80,
-    actualQuality: play.data?.quality,
+    requestedQuality: preferredQuality || "auto",
+    actualQuality: video?.id ?? play.data?.quality,
     acceptedQualities: play.data?.accept_quality,
     acceptedDescriptions: play.data?.accept_description,
-    format,
-    count: durls.length,
-    size: durls[0]?.size,
-    host: mediaUrl ? new URL(mediaUrl).hostname : undefined,
+    video: video
+      ? {
+          id: video.id,
+          width: video.width,
+          height: video.height,
+          bandwidth: video.bandwidth,
+          codecs: video.codecs,
+          frameRate: video.frameRate ?? video.frame_rate,
+        }
+      : undefined,
+    audio: audio
+      ? { id: audio.id, bandwidth: audio.bandwidth, codecs: audio.codecs }
+      : undefined,
   });
-  if (play.code !== 0 || !mediaUrl)
-    throw new Error(play.message || "No progressive stream");
-  // The Chromecast Default Media Receiver cannot play FLV. qn=80 with
-  // fnval=1 requests 1080P MP4/durl, with server-side quality fallback;
-  // fail loudly instead of casting an unplayable stream.
-  if (format.includes("flv")) {
-    throw new Error(
-      "This video is only available as FLV, which Chromecast cannot play."
-    );
-  }
-  // Long videos are split into multiple durl segments. The Default Media
-  // Receiver can't stitch them, so only the first segment would play. Warn
-  // the user rather than silently truncating.
-  if (durls.length > 1) {
-    debug("multi-segment video; only the first segment will cast", {
-      segments: durls.length,
-    });
+  if (play.code !== 0 || !mediaUrl || !audioUrl) {
+    throw new Error(play.message || "No playable DASH video/audio pair");
   }
   return {
     key,
     mediaUrl,
+    audioUrl,
     title: page.part || document.title,
-    // The bridge proxies the returned bytes unchanged. The actual quality is
-    // reported by play.data.quality and logged above.
-    contentType: "video/mp4",
+    contentType: "application/x-mpegURL",
   };
 }
 
@@ -237,7 +275,7 @@ async function loadCurrentItem(isInitial: boolean) {
     mediaContentType: media.contentType,
     mediaElement,
     isVideo: true,
-    remoteProxy: { referer: location.href },
+    remoteProxy: { referer: location.href, audioUrl: media.audioUrl },
     // Let the page's own player controls (play/pause button, progress bar)
     // drive the receiver, but gate on real user gestures so Bilibili's
     // autonomous events (autoplay, buffering, quality switches) can't hijack
@@ -281,6 +319,24 @@ async function loadCurrentItem(isInitial: boolean) {
 // generic background path produces for Bilibili.
 window.__fxCastBilibili = {
   isCasting: () => Boolean(sender),
+  setQuality: (quality: number) => {
+    const normalized = QUALITY_ORDER.includes(quality) ? quality : 0;
+    if (preferredQuality === normalized) return;
+    preferredQuality = normalized;
+    debug("quality preference changed", {
+      preferredQuality: preferredQuality || "auto",
+      isCasting: Boolean(sender),
+    });
+    if (sender) {
+      void loadCurrentItem(false).catch((err) => {
+        debug(
+          "quality reload failed",
+          err instanceof Error ? err.message : String(err)
+        );
+        logger.error("Failed to reload Bilibili quality", err);
+      });
+    }
+  },
   reinject: () => {
     // Popup auto-cast (onMount) plus a manual click can fire this twice in
     // quick succession; debounce so the second call doesn't stop the cast the

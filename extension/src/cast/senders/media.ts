@@ -32,7 +32,7 @@ export interface MediaSenderOpts {
   mediaTitle?: string;
   mediaContentType?: string;
   isVideo?: boolean;
-  remoteProxy?: { referer: string };
+  remoteProxy?: { referer: string; audioUrl?: string };
   /**
    * Forward the local media element's play/pause/seek events to the
    * receiver. Disable for sites (e.g. Bilibili) whose own player script
@@ -59,7 +59,7 @@ export default class MediaSender {
   private mediaTitle?: string;
   private mediaContentType = "";
   private isVideo = false;
-  private remoteProxy?: { referer: string };
+  private remoteProxy?: { referer: string; audioUrl?: string };
   private forwardPageControls = true;
   private gestureGatedControls = false;
   private onStopped?: () => void;
@@ -273,12 +273,21 @@ export default class MediaSender {
 
     if (this.remoteProxy) {
       const port = await getOption("localMediaServerPort");
-      this.debug?.("starting bridge proxy", { port, host: mediaUrl.hostname });
+      this.debug?.("starting bridge proxy", {
+        port,
+        host: mediaUrl.hostname,
+        hasSeparateAudio: Boolean(this.remoteProxy.audioUrl),
+        expectedMode: this.remoteProxy.audioUrl ? "dash-remux" : "proxy",
+      });
       const result = await this.startRemoteMediaServer(
         this.mediaUrl,
         this.remoteProxy.referer,
         this.mediaContentType,
-        port
+        port,
+        this.remoteProxy.audioUrl,
+        this.mediaElement instanceof HTMLMediaElement
+          ? this.mediaElement.currentTime
+          : 0
       );
       mediaUrl = new URL(
         result.mediaPath,
@@ -528,21 +537,34 @@ export default class MediaSender {
       if (gated && fromGesture()) return;
 
       const estimatedTime = boundMedia.getEstimatedTime();
-      const drift = Math.abs(mediaElement.currentTime - estimatedTime);
-      const driftLimit =
-        boundMedia.playerState === cast.media.PlayerState.PLAYING ? 0.75 : 0.25;
-      if (drift > driftLimit) {
-        // In gated mode these programmatic writes are filtered by the gesture
-        // gate in onSeeked (no recent gesture), so no suppress counter is
-        // needed — avoiding the counter drift that used to swallow real seeks.
-        if (!gated) suppressSeek++;
-        mediaElement.currentTime = estimatedTime;
-        if (drift > 1) {
-          this.debug?.("corrected local playback drift", {
-            drift,
-            estimatedTime,
-            playerState: boundMedia.playerState,
-          });
+      // Chromecast HLS reports currentTime=-1 while its event timeline is
+      // being established. Skip only position reconciliation for that
+      // sentinel. Playback-state reconciliation below must still run, or the
+      // page video remains paused while the receiver is already PLAYING.
+      const canSyncPosition =
+        boundMedia.playerState === cast.media.PlayerState.PLAYING ||
+        boundMedia.playerState === cast.media.PlayerState.PAUSED;
+      if (
+        canSyncPosition &&
+        Number.isFinite(estimatedTime) &&
+        estimatedTime >= 0
+      ) {
+        const drift = Math.abs(mediaElement.currentTime - estimatedTime);
+        const driftLimit =
+          boundMedia.playerState === cast.media.PlayerState.PLAYING ? 0.75 : 0.25;
+        if (drift > driftLimit) {
+          // In gated mode these programmatic writes are filtered by the gesture
+          // gate in onSeeked (no recent gesture), so no suppress counter is
+          // needed — avoiding the counter drift that used to swallow real seeks.
+          if (!gated) suppressSeek++;
+          mediaElement.currentTime = estimatedTime;
+          if (drift > 1) {
+            this.debug?.("corrected local playback drift", {
+              drift,
+              estimatedTime,
+              playerState: boundMedia.playerState,
+            });
+          }
         }
       }
 
@@ -600,7 +622,9 @@ export default class MediaSender {
     mediaUrl: string,
     referer: string,
     contentType: string,
-    port: number
+    port: number,
+    audioUrl?: string,
+    requiredDuration = 0
   ): Promise<{ mediaPath: string; localAddress: string }> {
     return new Promise((resolve, reject) => {
       if (!this.port) return reject("Cast bridge unavailable");
@@ -613,6 +637,15 @@ export default class MediaSender {
         const message = ev.data;
         this.debug?.(`bridge: ${message.subject}`, message.data);
         if (message.subject === "mediaCast:mediaServerStarted") {
+          this.debug?.("bridge media server reported ready", message.data);
+          if (audioUrl && message.data.mode !== "dash-remux") {
+            cleanup();
+            reject(
+              "The installed native bridge does not support DASH remux. " +
+                "Rebuild, reinstall, and restart the fx_cast native bridge."
+            );
+            return;
+          }
           cleanup();
           resolve(message.data);
         } else if (message.subject === "mediaCast:mediaServerError") {
@@ -625,13 +658,28 @@ export default class MediaSender {
       const timeoutId = window.setTimeout(() => {
         cleanup();
         reject("Timed out waiting for the Cast bridge media server");
-      }, 10000);
+      }, audioUrl ? 90_000 : 10_000);
 
       this.port.addEventListener("message", onMessage);
       this.port.start();
+      this.debug?.("sending bridge:startRemoteMediaServer", {
+        videoHost: new URL(mediaUrl).hostname,
+        audioHost: audioUrl ? new URL(audioUrl).hostname : undefined,
+        hasSeparateAudio: Boolean(audioUrl),
+        contentType,
+        port,
+        requiredDuration,
+      });
       this.port.postMessage({
         subject: "bridge:startRemoteMediaServer",
-        data: { mediaUrl, referer, contentType, port },
+        data: {
+          mediaUrl,
+          audioUrl,
+          referer,
+          contentType,
+          port,
+          requiredDuration,
+        },
       });
     });
   }
