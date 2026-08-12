@@ -56,6 +56,7 @@
    * shows up (prefixed "[popup]") in the about:debugging background console.
    */
   function dbg(message: string, data?: unknown) {
+    if (!opts?.bilibiliDebugEnabled) return;
     void browser.runtime
       .sendMessage({
         subject: "popup:debugLog",

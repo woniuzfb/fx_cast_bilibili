@@ -56,6 +56,7 @@
 
   /** Extension options */
   let opts: Nullable<Options> = null;
+  $: debugEnabled = Boolean(opts?.bilibiliDebugEnabled);
 
   $: isMediaTypeAvailable = !!(availableMediaTypes & mediaType);
   $: isAppMediaTypeAvailable = !!(
@@ -118,6 +119,7 @@
    * case the popup ever is inspectable.
    */
   function popupLog(message: string, data?: unknown) {
+    if (!debugEnabled) return;
     try {
       console.info("[fx_cast popup]", message, data ?? "");
     } catch {

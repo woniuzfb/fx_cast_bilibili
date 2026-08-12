@@ -140,10 +140,13 @@ async function init() {
     // lines here via runtime.sendMessage({ subject: "popup:debugLog" }).
     browser.runtime.onMessage.addListener(message => {
         if (message?.subject !== "popup:debugLog") return;
-        logger.info(
-            "[popup] " + String(message?.data?.message),
-            message?.data?.data ?? {}
-        );
+        void options.get("bilibiliDebugEnabled").then(enabled => {
+            if (!enabled) return;
+            logger.info(
+                "[popup] " + String(message?.data?.message),
+                message?.data?.data ?? {}
+            );
+        });
     });
 
     browser.runtime.onMessage.addListener(message => {

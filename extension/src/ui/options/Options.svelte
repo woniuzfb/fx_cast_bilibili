@@ -331,6 +331,14 @@
 
         <div class="form__footer">
             <Option
+                id="bilibiliDebugEnabled"
+                label={_("optionsBilibiliDebugEnabled")}
+                description={_("optionsBilibiliDebugEnabledDescription")}
+                type="checkbox"
+                bind:checked={opts.bilibiliDebugEnabled}
+                inline
+            />
+            <Option
                 id="showAdvancedOptions"
                 label={_("optionsShowAdvancedOptions")}
                 type="checkbox"

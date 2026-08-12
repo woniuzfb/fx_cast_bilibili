@@ -70,6 +70,8 @@ export interface Options {
 
     /** Internal version for custom Bilibili default migrations. */
     bilibiliDefaultsVersion: number;
+    /** Show Bilibili debug overlay and verbose traces. */
+    bilibiliDebugEnabled: boolean;
 
     /** Show advanced options on options page. */
     showAdvancedOptions: boolean;
@@ -113,5 +115,6 @@ export default {
     siteWhitelistCustomUserAgent: "",
 
     bilibiliDefaultsVersion: 1,
+    bilibiliDebugEnabled: false,
     showAdvancedOptions: false
 } as Options;

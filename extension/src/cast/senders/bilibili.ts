@@ -7,8 +7,10 @@ declare global {
       reinject: () => void;
       isCasting: () => boolean;
       setQuality: (quality: number) => void;
+      setDebug: (enabled: boolean) => void;
     };
     __fxCastBilibiliInitialQuality?: number;
+    __fxCastBilibiliInitialDebug?: boolean;
   }
 }
 
@@ -32,6 +34,7 @@ const MAX_DEBUG_LINES = 200;
 const DEBUG_PANEL_ID = "fx-cast-bilibili-debug";
 const lines: string[] = [];
 let sender: MediaSender | undefined;
+let debugEnabled = Boolean(window.__fxCastBilibiliInitialDebug);
 let preferredQuality = Number(window.__fxCastBilibiliInitialQuality) || 0;
 const QUALITY_ORDER = [112, 80, 64, 32, 16];
 
@@ -67,6 +70,7 @@ let changeGeneration = 0;
 let lastReinjectAt = 0;
 
 function debug(message: string, data?: unknown) {
+  if (!debugEnabled) return;
   const suffix =
     data === undefined
       ? ""
@@ -319,6 +323,11 @@ async function loadCurrentItem(isInitial: boolean) {
 // generic background path produces for Bilibili.
 window.__fxCastBilibili = {
   isCasting: () => Boolean(sender),
+  setDebug: (enabled: boolean) => {
+    debugEnabled = Boolean(enabled);
+    if (!debugEnabled) document.getElementById(DEBUG_PANEL_ID)?.remove();
+    debug("debug logging enabled");
+  },
   setQuality: (quality: number) => {
     const normalized = QUALITY_ORDER.includes(quality) ? quality : 0;
     if (preferredQuality === normalized) return;

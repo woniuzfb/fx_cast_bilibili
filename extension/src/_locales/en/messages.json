@@ -7,7 +7,6 @@
         "message": "Enables Chromecast support for casting web apps (like Netflix or BBC iPlayer), HTML5 video and screen sharing.",
         "description": "Description of the extension shown in the add-ons manager."
     },
-
     "actionTitleDefault": {
         "message": "fx_cast",
         "description": "Title for toolbar button in default state."
@@ -20,7 +19,6 @@
         "message": "fx_cast: Connected",
         "description": "Title for toolbar button whilst connected."
     },
-
     "popupBridgeErrorBanner": {
         "message": "There is a problem with the bridge!",
         "description": "Bridge error banner message."
@@ -63,7 +61,6 @@
         "message": "Browse...",
         "description": "Receiver selector media type <option> text for opening a file selector dialog."
     },
-
     "popupMediaSelectCastLabel": {
         "message": "Cast",
         "description": "(Cast) <select> to:"
@@ -82,7 +79,7 @@
     },
     "popupCastingButtonTitle": {
         "message": "Casting$ellipsis$",
-        "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. → .. → ...) as loading indicator.",
+        "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. \u2192 .. \u2192 ...) as loading indicator.",
         "placeholders": {
             "ellipsis": {
                 "content": "$1",
@@ -174,7 +171,6 @@
         "message": "Live",
         "description": "Media controls label displayed for live streams."
     },
-
     "popupSearch": {
         "message": "Search devices",
         "description": "Media devices search title."
@@ -193,12 +189,10 @@
             }
         }
     },
-
     "contextCast": {
         "message": "Cast...",
         "description": "Main context menu item title. Ellipsis indicates additional information required as it triggers opening of receiver selector."
     },
-
     "contextAddToWhitelist": {
         "message": "Add to Whitelist",
         "description": "Top-level whitelist context menu item title."
@@ -223,7 +217,6 @@
             }
         }
     },
-
     "optionsBridgeLoading": {
         "message": "Loading bridge info...",
         "description": "Loading placeholder text for bridge section on options page."
@@ -252,7 +245,6 @@
         "message": "Try downloading and installing the latest version.",
         "description": "Bridge not found additional description text"
     },
-
     "optionsBridgeStatsName": {
         "message": "Name:",
         "description": "Bridge stats name row title."
@@ -307,7 +299,7 @@
     },
     "optionsBridgeUpdateChecking": {
         "message": "Checking for Updates$ellipsis$",
-        "description": "Update check button title while in progress. Ellipsis cycles (. → .. → ...) as loading indicator.",
+        "description": "Update check button title while in progress. Ellipsis cycles (. \u2192 .. \u2192 ...) as loading indicator.",
         "placeholders": {
             "ellipsis": {
                 "content": "$1",
@@ -335,7 +327,6 @@
         "message": "View Changelog",
         "description": "Link text for changelog link next to bridge update button."
     },
-
     "optionsBridgeBackupEnabled": {
         "message": "Enable backup daemon connection on $hostPort$",
         "description": "Backup daemon checkbox label. Host/port inputs are inserted inline at the hostPort substitution.",
@@ -365,7 +356,6 @@
         "message": "The optional password configured for the daemon connections.",
         "description": "Daemon password option description."
     },
-
     "optionsMediaCategoryName": {
         "message": "Media casting",
         "description": "Options page media casting category title."
@@ -390,7 +380,6 @@
         "message": "Stop receiver playback on page unload",
         "description": "Media stop on unload checkbox label."
     },
-
     "optionsLocalMediaCategoryName": {
         "message": "Local media casting",
         "description": "Options page local media category title."
@@ -407,7 +396,6 @@
         "message": "HTTP server port:",
         "description": "HTTP server port input label."
     },
-
     "optionsReceiverSelectorCategoryName": {
         "message": "Receiver selector",
         "description": "Options page receiver selector category title."
@@ -440,7 +428,6 @@
         "message": "Loads media thumbnail/branding images from remote servers.",
         "description": "Receiver selector show media images option description."
     },
-
     "optionsSiteWhitelistCategoryName": {
         "message": "Site whitelist",
         "description": "Options page whitelist category title."
@@ -521,7 +508,6 @@
         "message": "Match pattern",
         "description": "Whitelist item pattern edit input title."
     },
-
     "optionsMirroringCategoryName": {
         "message": "Screen mirroring",
         "description": "Options page mirroring category name."
@@ -582,12 +568,10 @@
         "message": "Height",
         "description": "Max resolution height input placeholder."
     },
-
     "optionsOptionRecommended": {
         "message": "recommended",
         "description": "Badge next to option label indicating boolean option is recommended enabled."
     },
-
     "optionsReset": {
         "message": "Restore Defaults",
         "description": "Restore default options button label."
@@ -604,7 +588,6 @@
         "message": "Show advanced options",
         "description": "Show advanced options checkbox label."
     },
-
     "mirroringPopupTitle": {
         "message": "Mirroring",
         "description": "Mirroring popup window title."
@@ -638,5 +621,11 @@
     "mirroringPopupStopMirroring": {
         "message": "Stop Mirroring",
         "description": "Mirroring popup stop mirroring button label."
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Bilibili debug logging"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "Show the in-page debug panel and verbose Bilibili popup/background logs."
     }
 }

@@ -25,6 +25,10 @@ const whitelistChildMenuPatterns = new Map<string | number, string>();
  */
 let bilibiliLaunchSeq = 0;
 
+async function bilibiliDebug(message: string, data?: unknown) {
+  if (await options.get("bilibiliDebugEnabled")) logger.info(message, data);
+}
+
 /** Handles initial menu setup. */
 export async function initMenus() {
   logger.info("init (menus)");
@@ -222,7 +226,8 @@ async function onMenuClicked(
 
 export async function launchBilibiliSender(tabId: number, quality = 0) {
   const seq = ++bilibiliLaunchSeq;
-  logger.info("Bilibili cast requested", { seq, tabId, t: Date.now() });
+  const debugEnabled = await options.get("bilibiliDebugEnabled");
+  void bilibiliDebug("Bilibili cast requested", { seq, tabId, t: Date.now() });
   try {
     // Probe the tab: is the sender injected, and is it currently casting?
     // Returns "absent" | "casting" | "idle".
@@ -240,10 +245,12 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
     if (state !== "absent") {
       await browser.scripting.executeScript({
         target: { tabId },
-        func: ((selectedQuality: number) => {
-          (window as any).__fxCastBilibili?.setQuality?.(selectedQuality);
+        func: ((selectedQuality: number, selectedDebug: boolean) => {
+          const api = (window as any).__fxCastBilibili;
+          api?.setDebug?.(selectedDebug);
+          api?.setQuality?.(selectedQuality);
         }) as any,
-        args: [quality],
+        args: [quality, debugEnabled],
       });
     }
 
@@ -251,7 +258,7 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
     // with the subsequent "Opening receiver selector" log to see whether this
     // launch is the one that clobbered a good (App) selector with the generic
     // device-only view.
-    logger.info("Bilibili probe result", {
+    void bilibiliDebug("Bilibili probe result", {
       seq,
       tabId,
       state,
@@ -265,12 +272,12 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
       // includes connectedSessionIds in the selector's initial state), NOT on
       // availableMediaTypes, so it appears even though the generic path exposes
       // no App media for Bilibili.
-      logger.info("Bilibili sender already casting; opening selector", {
+      void bilibiliDebug("Bilibili sender already casting; opening selector", {
         seq,
         tabId,
       });
       await castManager.triggerCast(tabId);
-      logger.info("Bilibili casting-branch triggerCast returned", { seq, tabId });
+      void bilibiliDebug("Bilibili casting-branch triggerCast returned", { seq, tabId });
       return;
     }
 
@@ -280,29 +287,30 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
       // which is the only path that opens a selector with real castable media
       // (a Cast button) for Bilibili. reinject() is debounced so a popup
       // auto-cast plus a manual click won't fight each other.
-      logger.info("Bilibili sender idle; re-casting", { seq, tabId });
+      void bilibiliDebug("Bilibili sender idle; re-casting", { seq, tabId });
       await browser.scripting.executeScript({
         target: { tabId },
         func: (() => {
           (window as any).__fxCastBilibili?.reinject();
         }) as any,
       });
-      logger.info("Bilibili idle-branch reinject dispatched", { seq, tabId });
+      void bilibiliDebug("Bilibili idle-branch reinject dispatched", { seq, tabId });
       return;
     }
 
     await browser.scripting.executeScript({
       target: { tabId },
-      func: ((selectedQuality: number) => {
+      func: ((selectedQuality: number, selectedDebug: boolean) => {
         (window as any).__fxCastBilibiliInitialQuality = selectedQuality;
+        (window as any).__fxCastBilibiliInitialDebug = selectedDebug;
       }) as any,
-      args: [quality],
+      args: [quality, debugEnabled],
     });
     const senderResults = await browser.scripting.executeScript({
       target: { tabId },
       files: ["cast/senders/bilibili.js"],
     });
-    logger.info("Bilibili sender execution result", senderResults);
+    void bilibiliDebug("Bilibili sender execution result", senderResults);
   } catch (err) {
     logger.error("Failed to execute Bilibili sender", err);
     await browser.notifications.create({
