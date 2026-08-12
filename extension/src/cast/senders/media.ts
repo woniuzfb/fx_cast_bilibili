@@ -318,6 +318,13 @@ export default class MediaSender {
     );
     mediaInfo.metadata = new cast.media.GenericMediaMetadata();
     mediaInfo.metadata.title = mediaTitle;
+    if (
+      this.mediaElement instanceof HTMLMediaElement &&
+      Number.isFinite(this.mediaElement.duration) &&
+      this.mediaElement.duration > 0
+    ) {
+      mediaInfo.duration = this.mediaElement.duration;
+    }
     mediaInfo.tracks = [];
 
     const activeTrackIds: number[] = [];

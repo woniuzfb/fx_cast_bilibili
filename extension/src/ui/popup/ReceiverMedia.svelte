@@ -12,7 +12,12 @@
         StreamType
     } from "../../cast/sdk/media/enums";
     import type { Track } from "../../cast/sdk/media/classes";
-    import { getEstimatedTime } from "../../cast/utils";
+    import {
+        clampPopupSeek,
+        estimatePopupMediaTime,
+        updatePopupMediaTimeline,
+        type PopupMediaTimeline
+    } from "./mediaTimeline";
 
     const _ = browser.i18n.getMessage;
 
@@ -34,7 +39,22 @@
         status.playerState === PlayerState.PLAYING ||
         status.playerState === PlayerState.PAUSED;
 
-    $: hasDuration = status.media?.duration && status.media?.duration > 0;
+    let timeline: PopupMediaTimeline = {
+        mediaId: "",
+        currentTime: 0,
+        updatedAt: 0,
+        duration: 0
+    };
+    $: {
+        const nextTimeline = updatePopupMediaTimeline(timeline, {
+            mediaId: status.media?.contentId,
+            currentTime: device.mediaStatus?.currentTime,
+            duration: status.media?.duration,
+            now: Date.now()
+        });
+        if (nextTimeline !== timeline) timeline = nextTimeline;
+    }
+    $: hasDuration = timeline.duration > 0;
     $: isSeekable = status.supportedMediaCommands & _MediaCommand.SEEK;
     $: isLive = status.media?.streamType === StreamType.LIVE;
 
@@ -86,19 +106,8 @@
         }
     }
 
-    // Keep track of update times for currentTime estimations
-    let lastUpdateTime = 0;
-    let lastCurrentTime = 0;
-    let currentTime = getEstimatedMediaTime();
-
-    $: if (
-        device.mediaStatus?.currentTime &&
-        device.mediaStatus.currentTime !== lastCurrentTime
-    ) {
-        lastUpdateTime = Date.now();
-        currentTime = device.mediaStatus.currentTime;
-        lastCurrentTime = currentTime;
-    }
+    let currentTime = 0;
+    $: currentTime = getEstimatedMediaTime();
 
     // Update estimated time every second
     onMount(() => {
@@ -118,17 +127,22 @@
      * update.
      */
     function getEstimatedMediaTime() {
-        if (!status.currentTime || !lastUpdateTime) return 0;
+        return estimatePopupMediaTime(
+            timeline,
+            status.playerState === PlayerState.PLAYING,
+            Date.now()
+        );
+    }
 
-        if (status.playerState === PlayerState.PLAYING) {
-            return getEstimatedTime({
-                currentTime: status.currentTime,
-                lastUpdateTime,
-                duration: status.media?.duration
-            });
-        }
-
-        return status.currentTime;
+    function seekTo(position: number) {
+        const target = clampPopupSeek(position, timeline.duration);
+        timeline = {
+            ...timeline,
+            currentTime: target,
+            updatedAt: Date.now()
+        };
+        currentTime = target;
+        dispatch("seek", { position: target });
     }
 
     /** Formats seconds into HH:MM:SS */
@@ -194,7 +208,7 @@
 
     <div class="media__controls">
         <!-- Seek bar -->
-        {#if status.media && status.media?.duration && hasDuration && isSeekable}
+        {#if status.media && hasDuration && isSeekable}
             <div class="media__seek">
                 {#if isLive}
                     <span class="media__live">
@@ -211,24 +225,20 @@
                         class:slider--indeterminate={status.playerState ===
                             PlayerState.BUFFERING}
                         aria-label={_("popupMediaSeek")}
-                        max={status.media.duration ?? currentTime}
+                        max={timeline.duration}
                         value={currentTime}
                         on:change={ev => {
                             if (seekHoverPosition) {
                                 ev.preventDefault();
                                 return;
                             }
-                            dispatch("seek", {
-                                position: ev.currentTarget.valueAsNumber
-                            });
+                            seekTo(ev.currentTarget.valueAsNumber);
                         }}
                         on:click={() => {
-                            if (seekHoverPosition && status.media?.duration) {
-                                dispatch("seek", {
-                                    position:
-                                        status.media.duration *
-                                        (seekHoverPosition / 100)
-                                });
+                            if (seekHoverPosition && timeline.duration) {
+                                seekTo(
+                                    timeline.duration * (seekHoverPosition / 100)
+                                );
                             }
                         }}
                         use:onSeekMouseMove
@@ -239,14 +249,14 @@
                             style:--seek-hover-position="{seekHoverPosition}%"
                         >
                             {formatTime(
-                                status.media.duration *
+                                timeline.duration *
                                     (seekHoverPosition / 100)
                             )}
                         </div>
                     {/if}
                 </div>
                 <span class="media__remaining-time">
-                    -{formatTime(status.media.duration - currentTime)}
+                    -{formatTime(Math.max(0, timeline.duration - currentTime))}
                 </span>
             </div>
         {/if}
@@ -265,7 +275,7 @@
                     title={_("popupMediaSeekBackward")}
                     disabled={status.playerState === PlayerState.IDLE}
                     on:click={() =>
-                        dispatch("seek", { position: currentTime - 5 })}
+                        seekTo(currentTime - 5)}
                 />
             {/if}
 
@@ -291,7 +301,7 @@
                     disabled={status.playerState === PlayerState.IDLE}
                     title={_("popupMediaSeekForward")}
                     on:click={() =>
-                        dispatch("seek", { position: currentTime + 5 })}
+                        seekTo(currentTime + 5)}
                 />
             {/if}
             {#if status.supportedMediaCommands & _MediaCommand.QUEUE_NEXT}
