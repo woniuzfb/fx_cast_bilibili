@@ -14,6 +14,7 @@
     import type { Track } from "../../cast/sdk/media/classes";
     import {
         clampPopupSeek,
+        createSeekedTimeline,
         estimatePopupMediaTime,
         updatePopupMediaTimeline,
         type PopupMediaTimeline
@@ -39,6 +40,33 @@
         status.playerState === PlayerState.PLAYING ||
         status.playerState === PlayerState.PAUSED;
 
+    // DASH remux sessions (Bilibili) report a live-style event playlist: the
+    // receiver may omit media.duration and the SEEK capability even though
+    // the page sender can seek by restarting the remux. The sender passes the
+    // real duration through customData.
+    $: dashRemuxData = ((): {
+        dashRemux?: boolean;
+        pageDuration?: number;
+    } => {
+        const customData = status.media?.customData;
+        return customData && typeof customData === "object"
+            ? (customData as {
+                  dashRemux?: boolean;
+                  pageDuration?: number;
+              })
+            : {};
+    })();
+    // contentId carries a cache-busting query that changes on every remux
+    // restart; strip it so the timeline isn't reset across seeks.
+    $: mediaId = status.media?.contentId?.split("?")[0];
+    // The receiver reports duration -1 (live sentinel) once playback of the
+    // event playlist starts, and -1 is not nullish, so `??` alone never
+    // falls back to pageDuration. Only trust positive durations.
+    $: reportedDuration =
+        status.media?.duration != null && status.media.duration > 0
+            ? status.media.duration
+            : dashRemuxData.pageDuration;
+
     let timeline: PopupMediaTimeline = {
         mediaId: "",
         currentTime: 0,
@@ -47,16 +75,44 @@
     };
     $: {
         const nextTimeline = updatePopupMediaTimeline(timeline, {
-            mediaId: status.media?.contentId,
+            mediaId,
             currentTime: device.mediaStatus?.currentTime,
-            duration: status.media?.duration,
+            duration: reportedDuration,
             now: Date.now()
         });
         if (nextTimeline !== timeline) timeline = nextTimeline;
     }
     $: hasDuration = timeline.duration > 0;
-    $: isSeekable = status.supportedMediaCommands & _MediaCommand.SEEK;
+    $: isSeekable =
+        (status.supportedMediaCommands & _MediaCommand.SEEK) !== 0 ||
+        Boolean(dashRemuxData.dashRemux);
     $: isLive = status.media?.streamType === StreamType.LIVE;
+
+    // Diagnose seek bar visibility across popup reopens (gated behind the
+    // Bilibili debug option by the background popup:debugLog listener).
+    let lastSeekBarDebug = "";
+    $: {
+        const seekBarDebug = JSON.stringify({
+            showsSeekBar: Boolean(status.media && hasDuration && isSeekable),
+            hasMedia: Boolean(status.media),
+            mediaDuration: status.media?.duration,
+            pageDuration: dashRemuxData.pageDuration,
+            timelineDuration: timeline.duration,
+            supportedMediaCommands: status.supportedMediaCommands
+        });
+        if (seekBarDebug !== lastSeekBarDebug) {
+            lastSeekBarDebug = seekBarDebug;
+            void browser.runtime
+                .sendMessage({
+                    subject: "popup:debugLog",
+                    data: {
+                        message: "[ReceiverMedia] seek bar state",
+                        data: JSON.parse(seekBarDebug)
+                    }
+                })
+                .catch(() => {});
+        }
+    }
 
     let mediaTitle: Optional<string>;
     let mediaSubtitle: Optional<string>;
@@ -136,11 +192,10 @@
 
     function seekTo(position: number) {
         const target = clampPopupSeek(position, timeline.duration);
-        timeline = {
-            ...timeline,
-            currentTime: target,
-            updatedAt: Date.now()
-        };
+        // Optimistic update with a confirmation window: the receiver keeps
+        // reporting old-stream positions during the debounce + remux
+        // restart, and plain optimistic updates would bounce back.
+        timeline = createSeekedTimeline(timeline, target, Date.now());
         currentTime = target;
         dispatch("seek", { position: target });
     }
@@ -269,7 +324,7 @@
                     on:click={() => dispatch("previous")}
                 />
             {/if}
-            {#if status.supportedMediaCommands & _MediaCommand.SEEK}
+            {#if isSeekable}
                 <button
                     class="media__backward-button ghost"
                     title={_("popupMediaSeekBackward")}
@@ -295,7 +350,7 @@
                 />
             {/if}
 
-            {#if status.supportedMediaCommands & _MediaCommand.SEEK}
+            {#if isSeekable}
                 <button
                     class="media__forward-button ghost"
                     disabled={status.playerState === PlayerState.IDLE}

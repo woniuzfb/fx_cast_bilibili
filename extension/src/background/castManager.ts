@@ -1173,8 +1173,34 @@ function createSelector() {
   selector.addEventListener("receiverMessage", onReceiverMessage);
 
   // Forward media messages
-  const onMediaMessage = (ev: CustomEvent<ReceiverSelectorMediaMessage>) =>
+  const onMediaMessage = async (
+    ev: CustomEvent<ReceiverSelectorMediaMessage>
+  ) => {
+    const { deviceId, message } = ev.detail;
+    // DASH remux sessions (Bilibili) cannot seek on the receiver: the remuxed
+    // HLS only exists up to the ffmpeg download frontier, so a native seek
+    // buffers forever. Route popup seeks to the page sender instead, which
+    // restarts the remux at the target position.
+    if (message.type === "SEEK" && typeof message.currentTime === "number") {
+      const instance = castManager.getInstanceByDeviceId(deviceId);
+      const tabId = instance?.contentContext?.tabId;
+      if (tabId !== undefined) {
+        try {
+          const results = await browser.scripting.executeScript({
+            target: { tabId },
+            func: ((time: number) =>
+              (window as any).__fxCastBilibili?.dashSeek?.(time) ===
+              true) as any,
+            args: [message.currentTime],
+          });
+          if (results.some((result) => result.result === true)) return;
+        } catch (err) {
+          logger.error("Failed to route popup seek to page sender", err);
+        }
+      }
+    }
     deviceManager.sendMediaMessage(ev.detail.deviceId, ev.detail.message);
+  };
   selector.addEventListener("mediaMessage", onMediaMessage);
 
   // Update selector data whenever devices change/update

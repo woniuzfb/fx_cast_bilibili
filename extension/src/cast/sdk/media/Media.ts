@@ -164,11 +164,17 @@ export default class Media {
      */
     getEstimatedTime(): number {
         if (this.playerState === PlayerState.PLAYING) {
+            // Live/event streams report duration as -1. A non-positive
+            // duration is truthy and would clamp every estimate to that
+            // sentinel (getEstimatedTime enforces estimated <= duration),
+            // so only pass through real durations.
+            const duration = this.media?.duration;
             return getEstimatedTime({
                 currentTime: this.currentTime,
                 lastUpdateTime: this.#lastUpdateTime,
                 playbackRate: this.playbackRate,
-                duration: this.media?.duration
+                duration:
+                    duration != null && duration > 0 ? duration : undefined
             });
         }
 

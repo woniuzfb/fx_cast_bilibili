@@ -92,6 +92,40 @@ export default class MediaSender {
     action: unknown
   ) => void;
 
+  /**
+   * DASH remux mode (Bilibili): the receiver cannot seek inside the
+   * sequentially-remuxed HLS (segments past the ffmpeg download frontier
+   * don't exist, and the Default Media Receiver treats the event playlist as
+   * live). So seeks restart the bridge remux at the target and reload the
+   * receiver. The bridge pads the playlist up to the seek target, so the
+   * receiver timeline stays in absolute video time (no offset mapping).
+   */
+  /**
+   * While a DASH seek reload is in flight, the old media session reports
+   * stale positions/states. Hold receiver->page sync so the sync loop can't
+   * yank the page back (which would also queue bogus follow-up seeks).
+   */
+  private dashSyncHold = false;
+  private dashSeekTarget?: number;
+  private dashSeekRunning = false;
+  /**
+   * Incremented on every loadMedia call. A receiver load callback only
+   * releases dashSyncHold when it belongs to the latest load, so an older
+   * in-flight reload can't resume sync while a newer seek is still loading.
+   */
+  private dashLoadId = 0;
+  /**
+   * Set by addMediaElementListeners (it closes over the suppress counters).
+   * Invoked when a DASH seek starts so the page video can be paused while
+   * the bridge re-prepares the stream without the pause echoing back to the
+   * receiver.
+   */
+  private onDashSeekStart?: (target: number) => void;
+
+  private get isDashRemux() {
+    return Boolean(this.remoteProxy?.audioUrl);
+  }
+
   constructor(opts: MediaSenderOpts) {
     this.mediaUrl = opts.mediaUrl;
     this.mediaElement = opts.mediaElement;
@@ -120,10 +154,51 @@ export default class MediaSender {
       cast.removeReceiverActionListener(this.receiverActionListener);
       this.receiverActionListener = undefined;
     }
+    if (this.dashSeekDebounceId !== undefined) {
+      window.clearTimeout(this.dashSeekDebounceId);
+      this.dashSeekDebounceId = undefined;
+    }
+    this.dashSeekTarget = undefined;
+    this.dashTightenSync = false;
     this.port?.postMessage({ subject: "bridge:stopMediaServer" });
     this.session?.stop();
     this.onStopped?.();
   }
+
+  /** Seek a DASH remux session by restarting the remux at the target. */
+  seekDashRemux(target: number) {
+    if (!this.isDashRemux || !this.session) return;
+    if (!Number.isFinite(target) || target < 0) return;
+    this.debug?.("dash seek requested", target);
+    // Pause/pre-position the page immediately for responsive feedback…
+    this.onDashSeekStart?.(target);
+    this.dashSeekTarget = target;
+    this.dashSyncHold = true;
+    // …but debounce the expensive remux restart so rapid seek clicks (popup
+    // ±5s button) coalesce into a single reload once clicking stops.
+    if (this.dashSeekDebounceId !== undefined) {
+      window.clearTimeout(this.dashSeekDebounceId);
+    }
+    this.dashSeekDebounceId = window.setTimeout(() => {
+      this.dashSeekDebounceId = undefined;
+      void this.runDashSeek();
+    }, MediaSender.DASH_SEEK_DEBOUNCE_MS);
+  }
+
+  private dashSeekDebounceId?: number;
+  private static DASH_SEEK_DEBOUNCE_MS = 800;
+  /**
+   * Set while a DASH seek reload is completing; the next valid sync tick
+   * performs a one-shot tight (0.25s) position snap to the receiver.
+   */
+  private dashTightenSync = false;
+  /**
+   * While a tighten is pending, the new media session may be invisible to
+   * this page (reload responses only carry the old session's INTERRUPTED
+   * status; the new one arrives via later broadcasts). Poll GET_STATUS to
+   * force a full status until the deadline, so reconciliation self-heals.
+   */
+  private dashTightenDeadline = 0;
 
   /** Temporarily detach page controls before a programmatic page pause. */
   suspendMediaElementSync() {
@@ -266,10 +341,21 @@ export default class MediaSender {
     }
   }
 
-  private async loadMedia() {
+  private async loadMedia(startTimeOverride?: number) {
     let mediaUrl = new URL(this.mediaUrl);
     const mediaTitle = this.mediaTitle ?? mediaUrl.pathname.slice(1);
     const subtitleUrls: URL[] = [];
+
+    // In DASH remux mode the bridge restarts ffmpeg at this position and
+    // pads the playlist so the receiver timeline stays in absolute video
+    // time (receiver currentTime == page currentTime).
+    const dashStartTime = this.isDashRemux
+      ? startTimeOverride ??
+        (this.mediaElement instanceof HTMLMediaElement &&
+        Number.isFinite(this.mediaElement.currentTime)
+          ? this.mediaElement.currentTime
+          : 0)
+      : 0;
 
     if (this.remoteProxy) {
       const port = await getOption("localMediaServerPort");
@@ -278,6 +364,7 @@ export default class MediaSender {
         host: mediaUrl.hostname,
         hasSeparateAudio: Boolean(this.remoteProxy.audioUrl),
         expectedMode: this.remoteProxy.audioUrl ? "dash-remux" : "proxy",
+        startTime: this.isDashRemux ? dashStartTime : undefined,
       });
       const result = await this.startRemoteMediaServer(
         this.mediaUrl,
@@ -285,9 +372,7 @@ export default class MediaSender {
         this.mediaContentType,
         port,
         this.remoteProxy.audioUrl,
-        this.mediaElement instanceof HTMLMediaElement
-          ? this.mediaElement.currentTime
-          : 0
+        dashStartTime
       );
       mediaUrl = new URL(
         result.mediaPath,
@@ -324,6 +409,17 @@ export default class MediaSender {
       this.mediaElement.duration > 0
     ) {
       mediaInfo.duration = this.mediaElement.duration;
+    }
+    if (this.isDashRemux) {
+      // The receiver may not report a duration for the live-style event
+      // playlist; the popup falls back to this for its seek bar, and uses
+      // the flag to route seeks back to the page sender.
+      mediaInfo.customData = {
+        dashRemux: true,
+        pageDuration: this.mediaElement instanceof HTMLMediaElement
+          ? this.mediaElement.duration
+          : undefined,
+      };
     }
     mediaInfo.tracks = [];
 
@@ -415,8 +511,13 @@ export default class MediaSender {
     loadRequest.activeTrackIds = activeTrackIds;
 
     if (this.mediaElement instanceof HTMLMediaElement) {
-      if (Number.isFinite(this.mediaElement.currentTime)) {
-        loadRequest.currentTime = this.mediaElement.currentTime;
+      // DASH remux streams are padded up to dashStartTime, so the initial
+      // position is expressed in absolute video time.
+      const initialTime = this.isDashRemux
+        ? dashStartTime
+        : this.mediaElement.currentTime;
+      if (Number.isFinite(initialTime)) {
+        loadRequest.currentTime = initialTime;
       }
       this.debug?.("applying initial media position", {
         currentTime: loadRequest.currentTime,
@@ -425,11 +526,22 @@ export default class MediaSender {
       });
     }
 
-    this.session?.loadMedia(
+    if (!this.session) {
+      // No active session: nothing will bind new media, so a DASH seek
+      // reload would leave receiver->page sync held forever.
+      this.dashSyncHold = false;
+      this.debug?.("loadMedia skipped: no cast session");
+      return;
+    }
+
+    const loadId = ++this.dashLoadId;
+
+    this.session.loadMedia(
       loadRequest,
       (media) => {
         this.debug?.("receiver media loaded");
         this.media = media;
+        if (loadId === this.dashLoadId) this.dashSyncHold = false;
         if (this.mediaElement instanceof HTMLMediaElement) {
           // Silence only the local tab. This assignment happens before
           // controls are attached, so it can never mute the receiver.
@@ -441,6 +553,10 @@ export default class MediaSender {
           this.forwardPageControls &&
           this.mediaElement instanceof HTMLMediaElement
         ) {
+          // Detach any previous element listeners first: loadMedia also runs
+          // for DASH seek reloads, and re-attaching without detaching would
+          // stack duplicate listeners and sync intervals.
+          this.suspendMediaElementSync();
           this.debug?.("media element synchronization enabled");
           this.addMediaElementListeners(this.mediaElement);
         } else if (!this.forwardPageControls) {
@@ -454,13 +570,30 @@ export default class MediaSender {
       },
       (err) => {
         this.debug?.("receiver media load rejected", err);
+        if (loadId === this.dashLoadId) this.dashSyncHold = false;
         logger.error("Failed to load media", err);
       }
     );
   }
 
   private addMediaElementListeners(mediaElement: HTMLMediaElement) {
-    const boundMedia = this.media;
+    // The Media object delivered by the loadMedia callback can be STALE after
+    // a reload (seek restart / quality change): the receiver answers the
+    // reload with the OLD item's INTERRUPTED status (the new media session
+    // only appears in later broadcasts), and Session#loadMedia resolves with
+    // the last entry of session.media — i.e. the dead, IDLE-forever old
+    // item. Session.media grows with each load and mediaSessionIds
+    // increment, so always resolve the latest entry instead of capturing the
+    // callback's object.
+    const currentMedia = () => {
+      const sessionMedia = this.session?.media;
+      return sessionMedia && sessionMedia.length
+        ? sessionMedia[sessionMedia.length - 1]
+        : this.media;
+    };
+    // Captured only for update-listener symmetry (removeEventListener needs
+    // the same object it was added to).
+    const listenerMedia = currentMedia();
 
     // Receiver -> local sync fires media events on the element (play/pause/
     // seeked). Those events are dispatched on a later macrotask, so a
@@ -487,8 +620,21 @@ export default class MediaSender {
       Date.now() - lastGestureTime <= GESTURE_WINDOW_MS;
     if (this.gestureGatedControls) {
       window.addEventListener("pointerdown", markGesture, true);
+      window.addEventListener("pointerup", markGesture, true);
       window.addEventListener("keydown", markGesture, true);
     }
+
+    // A user seek on the site's progress bar fires `seeking` immediately but
+    // `seeked` only after the site's player has fetched the data — for DASH
+    // sites (Bilibili) that can take seconds when the target isn't buffered,
+    // so the seeked lands outside the gesture window and gets dropped. Arm a
+    // grace window on the gesture-adjacent `seeking` and let its matching
+    // `seeked` through no matter how late it arrives.
+    const SEEK_ARM_WINDOW_MS = 10000;
+    let seekArmedUntil = 0;
+    const onSeeking = () => {
+      if (fromGesture()) seekArmedUntil = Date.now() + SEEK_ARM_WINDOW_MS;
+    };
 
     const sendError = (operation: string) => (err: unknown) => {
       this.debug?.(`page control failed: ${operation}`, err);
@@ -504,7 +650,9 @@ export default class MediaSender {
         return;
       }
       this.debug?.("page control: play");
-      boundMedia?.play(undefined, undefined, sendError("play"));
+      // A user-driven play/pause ends the post-seek settle window.
+      this.dashTightenSync = false;
+      currentMedia()?.play(undefined, undefined, sendError("play"));
     };
     const onPause = () => {
       if (suppressPause > 0) {
@@ -516,16 +664,47 @@ export default class MediaSender {
         return;
       }
       this.debug?.("page control: pause");
-      boundMedia?.pause(undefined, undefined, sendError("pause"));
+      // A user-driven play/pause ends the post-seek settle window.
+      this.dashTightenSync = false;
+      currentMedia()?.pause(undefined, undefined, sendError("pause"));
     };
+    // While the bridge re-prepares the stream for a DASH seek, pause the
+    // page video (suppressed so the pause isn't forwarded to the receiver)
+    // and pre-position it at the target; the sync loop resumes playback once
+    // the receiver reports PLAYING again.
+    this.onDashSeekStart = (target: number) => {
+      if (!mediaElement.paused) {
+        suppressPause++;
+        mediaElement.pause();
+      }
+      if (Math.abs(mediaElement.currentTime - target) > 0.1) {
+        suppressSeek++;
+        mediaElement.currentTime = target;
+      }
+    };
+
     const onSeeked = () => {
       if (suppressSeek > 0) {
         suppressSeek--;
         return;
       }
+      const boundMedia = currentMedia();
       if (!boundMedia) return;
-      if (!fromGesture()) {
+      // Consume the armed flag whether or not it is still needed: one
+      // gesture-adjacent `seeking` legitimizes exactly one `seeked`.
+      const seekArmed = Date.now() < seekArmedUntil;
+      seekArmedUntil = 0;
+      if (!seekArmed && !fromGesture()) {
         this.debug?.("ignored autonomous page seek");
+        return;
+      }
+      if (this.isDashRemux) {
+        // The receiver cannot seek inside the sequentially-remuxed HLS:
+        // segments past the ffmpeg download frontier return 404 and the
+        // receiver buffers forever. Restart the remux at the target instead.
+        this.debug?.("page control: seek (dash remux restart)",
+          mediaElement.currentTime);
+        this.seekDashRemux(mediaElement.currentTime);
         return;
       }
       const request = new cast.media.SeekRequest();
@@ -534,8 +713,33 @@ export default class MediaSender {
       boundMedia.seek(request, undefined, sendError("seek"));
     };
     const gated = this.gestureGatedControls;
+    let lastSyncDebugAt = 0;
+    let lastGetStatusPollAt = 0;
     const syncFromReceiver = () => {
+      const boundMedia = currentMedia();
+      // While a DASH seek reload is settling, log the sync inputs once per
+      // second so it's visible exactly where reconciliation is stuck.
+      if (
+        (this.dashSyncHold || this.dashTightenSync) &&
+        Date.now() - lastSyncDebugAt > 1000
+      ) {
+        lastSyncDebugAt = Date.now();
+        this.debug?.("post-seek sync state", {
+          hold: this.dashSyncHold,
+          tighten: this.dashTightenSync,
+          playerState: boundMedia?.playerState,
+          estimatedTime: boundMedia?.getEstimatedTime(),
+          mediaCount: this.session?.media?.length,
+          boundMediaSessionId: boundMedia?.mediaSessionId,
+          pageTime: mediaElement.currentTime,
+          pagePaused: mediaElement.paused,
+        });
+      }
       if (!boundMedia) return;
+      // A DASH seek reload is restarting the remux and rebinding the media
+      // session; the old session's position/state is stale and must not be
+      // mirrored onto the page.
+      if (this.dashSyncHold) return;
       // In gesture-gated mode, mirror the receiver's position/state onto the
       // local <video> so the page's progress bar and play state faithfully
       // follow the receiver. But right after a real user interaction, back
@@ -543,7 +747,42 @@ export default class MediaSender {
       // the user's command reaches the receiver (which would fight the seek).
       if (gated && fromGesture()) return;
 
-      const estimatedTime = boundMedia.getEstimatedTime();
+      // Give up on a tighten that never saw PLAYING (e.g. the user paused
+      // right after seeking): clear it at the deadline so the flag (and its
+      // diagnostics/polling) don't linger forever.
+      if (
+        this.dashTightenSync &&
+        Date.now() >= this.dashTightenDeadline
+      ) {
+        this.dashTightenSync = false;
+        this.debug?.("post-seek sync: tighten expired", {
+          playerState: boundMedia.playerState,
+        });
+      }
+
+      // The reload's new media session becomes visible to this page only
+      // when a status carrying its mediaSessionId arrives. If that hasn't
+      // happened (the receiver just echoed INTERRUPTED for the old session),
+      // poll GET_STATUS — the response carries every active session and
+      // re-creates the binding. Throttled and deadline-bound.
+      if (
+        this.dashTightenSync &&
+        Date.now() < this.dashTightenDeadline &&
+        boundMedia.playerState !== cast.media.PlayerState.PLAYING &&
+        Date.now() - lastGetStatusPollAt > 1000
+      ) {
+        lastGetStatusPollAt = Date.now();
+        this.debug?.("post-seek sync: polling GET_STATUS", {
+          playerState: boundMedia.playerState,
+          boundMediaSessionId: boundMedia.mediaSessionId,
+        });
+        this.session?.sendMessage("urn:x-cast:com.google.cast.media", {
+          type: "GET_STATUS",
+          requestId: 0,
+        });
+      }
+
+      const rawEstimatedTime = boundMedia.getEstimatedTime();
       // Chromecast HLS reports currentTime=-1 while its event timeline is
       // being established. Skip only position reconciliation for that
       // sentinel. Playback-state reconciliation below must still run, or the
@@ -553,24 +792,59 @@ export default class MediaSender {
         boundMedia.playerState === cast.media.PlayerState.PAUSED;
       if (
         canSyncPosition &&
-        Number.isFinite(estimatedTime) &&
-        estimatedTime >= 0
+        Number.isFinite(rawEstimatedTime) &&
+        rawEstimatedTime >= 0
       ) {
+        // DASH remux playlists are padded, so receiver positions are already
+        // in absolute video time and match the page timeline directly.
+        const estimatedTime = rawEstimatedTime;
         const drift = Math.abs(mediaElement.currentTime - estimatedTime);
-        const driftLimit =
-          boundMedia.playerState === cast.media.PlayerState.PLAYING ? 0.75 : 0.25;
-        if (drift > driftLimit) {
-          // In gated mode these programmatic writes are filtered by the gesture
-          // gate in onSeeked (no recent gesture), so no suppress counter is
-          // needed — avoiding the counter drift that used to swallow real seeks.
-          if (!gated) suppressSeek++;
-          mediaElement.currentTime = estimatedTime;
-          if (drift > 1) {
-            this.debug?.("corrected local playback drift", {
-              drift,
-              estimatedTime,
-              playerState: boundMedia.playerState,
-            });
+        // After a DASH seek reload, do a one-shot tight correction (the same
+        // 0.25s tolerance the paused-state correction gets) so the page snaps
+        // to the receiver's actual start position. Otherwise the loose 0.75s
+        // playing tolerance would leave a residual offset forever.
+        //
+        // Only evaluate once the receiver is actually PLAYING: the
+        // PAUSED/BUFFERING reports right after LOAD just echo the requested
+        // start position, which would consume the flag while the page is
+        // parked at the same value — without correcting anything.
+        if (this.dashTightenSync) {
+          if (boundMedia.playerState === cast.media.PlayerState.PLAYING) {
+            this.dashTightenSync = false;
+            if (drift > 0.25) {
+              if (!gated) suppressSeek++;
+              mediaElement.currentTime = estimatedTime;
+              this.debug?.("post-seek sync snap", {
+                drift,
+                estimatedTime,
+                playerState: boundMedia.playerState,
+              });
+            } else {
+              this.debug?.("post-seek sync already aligned", {
+                drift,
+                estimatedTime,
+              });
+            }
+          }
+        } else {
+          const driftLimit =
+            boundMedia.playerState === cast.media.PlayerState.PLAYING
+              ? 0.75
+              : 0.25;
+          if (drift > driftLimit) {
+            // In gated mode these programmatic writes are filtered by the
+            // gesture gate in onSeeked (no recent gesture), so no suppress
+            // counter is needed — avoiding the counter drift that used to
+            // swallow real seeks.
+            if (!gated) suppressSeek++;
+            mediaElement.currentTime = estimatedTime;
+            if (drift > 1) {
+              this.debug?.("corrected local playback drift", {
+                drift,
+                estimatedTime,
+                playerState: boundMedia.playerState,
+              });
+            }
           }
         }
       }
@@ -608,21 +882,57 @@ export default class MediaSender {
 
     mediaElement.addEventListener("play", onPlay);
     mediaElement.addEventListener("pause", onPause);
+    mediaElement.addEventListener("seeking", onSeeking);
     mediaElement.addEventListener("seeked", onSeeked);
-    boundMedia?.addUpdateListener(onMediaUpdate);
+    listenerMedia?.addUpdateListener(onMediaUpdate);
     this.removeMediaElementListeners = () => {
       mediaElement.removeEventListener("play", onPlay);
       mediaElement.removeEventListener("pause", onPause);
+      mediaElement.removeEventListener("seeking", onSeeking);
       mediaElement.removeEventListener("seeked", onSeeked);
+      this.onDashSeekStart = undefined;
       if (this.gestureGatedControls) {
         window.removeEventListener("pointerdown", markGesture, true);
+        window.removeEventListener("pointerup", markGesture, true);
         window.removeEventListener("keydown", markGesture, true);
       }
-      boundMedia?.removeUpdateListener(onMediaUpdate);
+      listenerMedia?.removeUpdateListener(onMediaUpdate);
       window.clearInterval(syncIntervalId);
       this.debug?.("old page controls detached");
     };
     this.debug?.("page-to-receiver controls attached");
+  }
+
+  /**
+   * Process queued DASH seek targets one at a time (latest wins while a
+   * reload is already running). Each seek restarts the bridge remux at the
+   * target and reloads the receiver with a keyframe-padded playlist.
+   */
+  private async runDashSeek() {
+    if (this.dashSeekRunning) return;
+    this.dashSeekRunning = true;
+    try {
+      while (this.dashSeekTarget !== undefined) {
+        const target = this.dashSeekTarget;
+        this.dashSeekTarget = undefined;
+        // Re-assert the hold for every reload: a failed previous iteration
+        // clears it, and a stale load callback may have released it early.
+        this.dashSyncHold = true;
+        this.dashTightenSync = true;
+        this.dashTightenDeadline = Date.now() + 15000;
+        try {
+          await this.loadMedia(target);
+        } catch (err) {
+          this.dashSyncHold = false;
+          // Don't snap to the stale position of a failed reload.
+          this.dashTightenSync = false;
+          this.debug?.("dash seek reload failed", String(err));
+          logger.error("DASH seek reload failed", err);
+        }
+      }
+    } finally {
+      this.dashSeekRunning = false;
+    }
   }
 
   private startRemoteMediaServer(
@@ -631,7 +941,7 @@ export default class MediaSender {
     contentType: string,
     port: number,
     audioUrl?: string,
-    requiredDuration = 0
+    startTime = 0
   ): Promise<{ mediaPath: string; localAddress: string }> {
     return new Promise((resolve, reject) => {
       if (!this.port) return reject("Cast bridge unavailable");
@@ -675,7 +985,7 @@ export default class MediaSender {
         hasSeparateAudio: Boolean(audioUrl),
         contentType,
         port,
-        requiredDuration,
+        startTime,
       });
       this.port.postMessage({
         subject: "bridge:startRemoteMediaServer",
@@ -685,7 +995,7 @@ export default class MediaSender {
           referer,
           contentType,
           port,
-          requiredDuration,
+          startTime,
         },
       });
     });

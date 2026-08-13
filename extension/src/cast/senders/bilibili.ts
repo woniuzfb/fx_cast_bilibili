@@ -8,6 +8,13 @@ declare global {
       isCasting: () => boolean;
       setQuality: (quality: number) => void;
       setDebug: (enabled: boolean) => void;
+      /**
+       * Popup-initiated seek for the DASH remux session. Returns true when a
+       * cast is running and the seek was handled (so the background does not
+       * forward a native seek to the receiver, which cannot seek the
+       * sequentially-remuxed stream).
+       */
+      dashSeek: (time: number) => boolean;
     };
     __fxCastBilibiliInitialQuality?: number;
     __fxCastBilibiliInitialDebug?: boolean;
@@ -323,6 +330,12 @@ async function loadCurrentItem(isInitial: boolean) {
 // generic background path produces for Bilibili.
 window.__fxCastBilibili = {
   isCasting: () => Boolean(sender),
+  dashSeek: (time: number) => {
+    if (!sender || !Number.isFinite(time) || time < 0) return false;
+    debug("popup seek routed to page sender", { time });
+    sender.seekDashRemux(time);
+    return true;
+  },
   setDebug: (enabled: boolean) => {
     debugEnabled = Boolean(enabled);
     if (!debugEnabled) document.getElementById(DEBUG_PANEL_ID)?.remove();

@@ -240,7 +240,7 @@ async function startDashRemuxServer(
   audioUrl: string,
   referer: string,
   port: number,
-  requiredDuration = 0
+  startTime = 0
 ) {
   if (!remoteHostAllowed(videoUrl) || !remoteHostAllowed(audioUrl)) {
     messaging.sendMessage({
@@ -256,11 +256,63 @@ async function startDashRemuxServer(
   dashTempDir = tempDir;
   const mediaPath = "index.m3u8";
   const playlistPath = path.join(tempDir, mediaPath);
+  const padPath = path.join(tempDir, "pad.ts");
+  // Segment URLs get a per-restart generation query so the receiver can never
+  // serve a stale cached segment from before a seek restart (same filenames,
+  // different content).
+  const generation = `${Date.now().toString(36)}`;
+  // Pad entries cover [0, padBaseSeconds) so the receiver's playlist-derived
+  // timeline matches the real video timeline: currentTime/duration displays
+  // and seek math stay in absolute video time even though ffmpeg only
+  // produces segments from startTime onward. Pads are never requested in
+  // practice (playback always starts at startTime and every seek restarts
+  // the remux), but a valid file must exist in case one is fetched.
+  //
+  // ffmpeg's input seek lands on the keyframe at/before startTime, so the
+  // first real segment actually starts at that keyframe. Padding to the
+  // keyframe (instead of startTime) lets the receiver seek INTO the first
+  // segment and begin at exactly startTime, instead of replaying the
+  // keyframe..startTime range with the clock already at startTime. The exact
+  // keyframe position is probed with ffprobe below (padBaseSeconds falls
+  // back to startTime when the probe fails).
+  const padSegmentSeconds = 4;
+  let padBaseSeconds = startTime;
+  let keyframeResolved = !(startTime > 0.05);
+  const rewritePlaylist = (raw: string) => {
+    const padCount = Math.floor(padBaseSeconds / padSegmentSeconds);
+    const padRemainder = padBaseSeconds - padCount * padSegmentSeconds;
+    let padsInserted = padCount <= 0 && padRemainder <= 0.05;
+    return raw
+      .split("\n")
+      .flatMap((line) => {
+        const out: string[] = [];
+        if (!padsInserted && line.startsWith("#EXTINF:")) {
+          for (let i = 0; i < padCount; i++) {
+            out.push(`#EXTINF:${padSegmentSeconds.toFixed(6)},`);
+            out.push(`pad.ts?g=${generation}`);
+          }
+          if (padRemainder > 0.05) {
+            out.push(`#EXTINF:${padRemainder.toFixed(6)},`);
+            out.push(`pad.ts?g=${generation}`);
+          }
+          padsInserted = true;
+        }
+        out.push(line.endsWith(".ts") ? `${line}?g=${generation}` : line);
+        return out;
+      })
+      .join("\n");
+  };
   const inputHeaders = `Referer: ${referer}\r\nUser-Agent: Mozilla/5.0\r\n`;
+  // ffmpeg remuxes the DASH sources strictly sequentially, so a receiver
+  // seek can never be served from not-yet-downloaded segments. The extension
+  // therefore restarts the remux at the seek target instead: input seeking
+  // (-ss before -i) uses HTTP range requests on the DASH CDN and lands on
+  // the preceding keyframe, making seeks (and mid-video cast starts) fast.
+  const seekArgs = startTime > 0 ? ["-ss", startTime.toFixed(3)] : [];
   const args = [
     "-hide_banner", "-loglevel", "warning",
-    "-headers", inputHeaders, "-i", videoUrl,
-    "-headers", inputHeaders, "-i", audioUrl,
+    "-headers", inputHeaders, ...seekArgs, "-i", videoUrl,
+    "-headers", inputHeaders, ...seekArgs, "-i", audioUrl,
     "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
     // Default Media Receiver accepts traditional MPEG-TS HLS more reliably
     // than fragmented MP4 HLS on older Chromecast generations.
@@ -276,6 +328,82 @@ async function startDashRemuxServer(
     "/usr/local/bin/ffmpeg",
     "/usr/bin/ffmpeg",
   ].find((candidate) => candidate && fs.existsSync(candidate)) ?? "ffmpeg";
+  // Probe the exact keyframe ffmpeg's input seek will land on, so the
+  // playlist can be padded to it (see above). ffprobe has no input -ss, so
+  // read a packet window around startTime and take the last keyframe at or
+  // before it. Runs in parallel with the remux; falls back to startTime on
+  // any failure.
+  if (!keyframeResolved) {
+    const ffprobePath = ffmpegPath.replace(/ffmpeg$/, "ffprobe");
+    let probeStdout = "";
+    const probeProcess = spawn(ffprobePath, [
+      "-v", "error",
+      "-headers", inputHeaders,
+      "-select_streams", "v:0",
+      "-show_entries", "packet=pts_time,flags",
+      "-of", "csv=p=0",
+      "-read_intervals", `${Math.max(0, startTime - 8).toFixed(3)}%+12`,
+      videoUrl,
+    ], { stdio: ["ignore", "pipe", "ignore"] });
+    const finishProbe = (keyframe?: number) => {
+      if (keyframeResolved) return;
+      if (
+        keyframe !== undefined &&
+        Number.isFinite(keyframe) &&
+        keyframe >= 0 &&
+        keyframe <= startTime
+      ) {
+        padBaseSeconds = keyframe;
+      }
+      keyframeResolved = true;
+    };
+    const probeTimeout = setTimeout(() => {
+      probeProcess.kill("SIGKILL");
+      finishProbe();
+    }, 8000);
+    probeProcess.stdout?.on("data", (chunk) => {
+      probeStdout += String(chunk);
+    });
+    probeProcess.on("exit", () => {
+      clearTimeout(probeTimeout);
+      let keyframe: number | undefined;
+      for (const line of probeStdout.split("\n")) {
+        const [ptsText, flags] = line.trim().split(",");
+        const pts = Number.parseFloat(ptsText);
+        if (
+          flags?.includes("K") &&
+          Number.isFinite(pts) &&
+          pts <= startTime + 0.001
+        ) {
+          keyframe = keyframe === undefined ? pts : Math.max(keyframe, pts);
+        }
+      }
+      finishProbe(keyframe);
+    });
+    probeProcess.on("error", () => {
+      clearTimeout(probeTimeout);
+      finishProbe();
+    });
+  }
+  // Generate the 4s black/silent pad segment in parallel. It backs the pad
+  // playlist entries that cover [0, startTime) and is essentially never
+  // fetched, so a tiny resolution keeps this cheap.
+  let padReady: Promise<void> | undefined;
+  if (startTime > 0.05) {
+    padReady = new Promise<void>((resolve) => {
+      const padProcess = spawn(ffmpegPath, [
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=320x180:r=5",
+        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-t", String(padSegmentSeconds),
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-g", "5", "-c:a", "aac", "-shortest",
+        "-f", "mpegts", padPath,
+      ], { stdio: ["ignore", "ignore", "pipe"] });
+      padProcess.on("exit", () => resolve());
+      padProcess.on("error", () => resolve());
+    });
+  }
   const remuxProcess = spawn(ffmpegPath, args, {
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -306,14 +434,42 @@ async function startDashRemuxServer(
       res.writeHead(404).end();
       return;
     }
+    // The playlist is rewritten on every request: pad entries for
+    // [0, startTime) are injected and segment URLs get a cache-busting
+    // generation query (see above).
+    if (filename.endsWith(".m3u8")) {
+      try {
+        const raw = await fs.promises.readFile(
+          path.join(tempDir, filename),
+          "utf8"
+        );
+        const body = rewritePlaylist(raw);
+        res.writeHead(200, {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Type": "application/x-mpegURL",
+          "Content-Length": Buffer.byteLength(body),
+        });
+        res.end(body);
+      } catch {
+        res.writeHead(404).end();
+      }
+      return;
+    }
     const filePath = path.join(tempDir, filename);
     try {
+      if (filename === "pad.ts" && padReady) {
+        // Pad generation runs in parallel with the remux; wait briefly if
+        // the receiver somehow requests a pad before it is ready.
+        await Promise.race([
+          padReady,
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      }
       const stat = await fs.promises.stat(filePath);
-      const type = filename.endsWith(".m3u8")
-        ? "application/x-mpegURL"
-        : filename.endsWith(".ts")
-          ? "video/mp2t"
-          : "application/octet-stream";
+      const type = filename.endsWith(".ts")
+        ? "video/mp2t"
+        : "application/octet-stream";
       res.writeHead(200, {
         "Access-Control-Allow-Origin": "*",
         "Cache-Control": "no-cache",
@@ -339,13 +495,18 @@ async function startDashRemuxServer(
       void stopMediaServer();
       return;
     }
-    const minimumPlaylistDuration = Math.max(4, requiredDuration + 8);
+    // The remux now starts at the requested position (startTime), so the
+    // receiver only needs the first couple of segments to begin playback.
+    const minimumPlaylistDuration = 8;
     for (let attempt = 0; attempt < 900; attempt++) {
       try {
         const playlist = await fs.promises.readFile(playlistPath, "utf8");
         const playlistDuration = [...playlist.matchAll(/^#EXTINF:([0-9.]+)/gm)]
           .reduce((total, match) => total + Number(match[1]), 0);
         if (
+          // Wait for the keyframe probe so the served playlist is padded to
+          // the probed keyframe, not the rough startTime.
+          keyframeResolved &&
           playlist.includes("segment-") &&
           playlist.includes(".ts") &&
           playlistDuration >= minimumPlaylistDuration
@@ -357,11 +518,15 @@ async function startDashRemuxServer(
               subtitlePaths: [],
               localAddress: address,
               mode: "dash-remux",
+              startTime,
+              padBaseSeconds,
             },
           });
           return;
         }
-      } catch {}
+      } catch {
+        // Playlist not written yet; keep polling.
+      }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     messaging.sendMessage({
@@ -379,7 +544,7 @@ export async function startRemoteMediaServer(
   contentType: string,
   port: number,
   audioUrl?: string,
-  requiredDuration = 0
+  startTime = 0
 ) {
   if (audioUrl) {
     await startDashRemuxServer(
@@ -388,7 +553,7 @@ export async function startRemoteMediaServer(
       audioUrl,
       referer,
       port,
-      requiredDuration
+      startTime
     );
     return;
   }

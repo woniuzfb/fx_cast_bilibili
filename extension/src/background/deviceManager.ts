@@ -221,7 +221,30 @@ export default new (class extends TypedEventTarget<EventMap> {
                 if (!device) break;
 
                 if (device.mediaStatus) {
+                    // Periodic MEDIA_STATUS broadcasts can carry a
+                    // stream-derived media object that lacks fields only
+                    // present at LOAD time (duration, customData, ...).
+                    // Without preserving them, a reopened popup loses the
+                    // seek bar (duration) and DASH remux metadata
+                    // (customData.pageDuration).
+                    const oldMedia = device.mediaStatus.media;
                     device.mediaStatus = { ...device.mediaStatus, ...status };
+                    const newMedia = device.mediaStatus.media;
+                    if (oldMedia && newMedia && oldMedia !== newMedia) {
+                        for (const key of [
+                            "duration",
+                            "customData",
+                            "metadata",
+                            "tracks",
+                        ] as const) {
+                            if (
+                                newMedia[key] == null &&
+                                oldMedia[key] != null
+                            ) {
+                                newMedia[key] = oldMedia[key];
+                            }
+                        }
+                    }
                     if (status.playerState === PlayerState.IDLE) {
                         delete device.mediaStatus.media;
                     }

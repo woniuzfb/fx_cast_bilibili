@@ -277,7 +277,7 @@ type BridgeMessageDefinitions = {
     referer: string;
     contentType: string;
     port: number;
-    requiredDuration?: number;
+    startTime?: number;
   };
   /**
    * Sent to media sender from bridge when the media server is ready
@@ -288,6 +288,10 @@ type BridgeMessageDefinitions = {
     subtitlePaths: string[];
     localAddress: string;
     mode?: "proxy" | "dash-remux";
+    /** DASH remux: requested seek target and the probed keyframe the
+     *  playlist is actually padded to (diagnostics). */
+    startTime?: number;
+    padBaseSeconds?: number;
   };
   /**
    * Sent to bridge to stop HTTP media server.

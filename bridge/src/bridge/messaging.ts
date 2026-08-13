@@ -167,7 +167,7 @@ type MessageDefinitions = {
         filePath: string;
         port: number;
     };
-    "bridge:startRemoteMediaServer": { mediaUrl: string; audioUrl?: string; referer: string; contentType: string; port: number; requiredDuration?: number; };
+    "bridge:startRemoteMediaServer": { mediaUrl: string; audioUrl?: string; referer: string; contentType: string; port: number; startTime?: number; };
     /**
      * Sent to media sender from bridge when the media server is ready
      * to serve files.
@@ -177,6 +177,10 @@ type MessageDefinitions = {
         subtitlePaths: string[];
         localAddress: string;
         mode?: "proxy" | "dash-remux";
+        /** DASH remux: requested seek target and the probed keyframe the
+         *  playlist is actually padded to (diagnostics). */
+        startTime?: number;
+        padBaseSeconds?: number;
     };
     /**
      * Sent to bridge to stop HTTP media server.
