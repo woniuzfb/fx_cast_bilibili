@@ -1198,6 +1198,22 @@ function createSelector() {
           logger.error("Failed to route popup seek to page sender", err);
         }
       }
+      // The page sender couldn't handle the seek (tab navigated or was
+      // refreshed). A DASH remux session must not fall through to a native
+      // receiver seek: the remuxed HLS only exists up to the ffmpeg
+      // download frontier, so the receiver would buffer forever.
+      const customData = deviceManager.getDeviceById(deviceId)?.mediaStatus
+        ?.media?.customData;
+      if (
+        customData &&
+        typeof customData === "object" &&
+        (customData as { dashRemux?: unknown }).dashRemux
+      ) {
+        logger.error(
+          "Suppressing popup seek: DASH remux page sender unavailable"
+        );
+        return;
+      }
     }
     deviceManager.sendMediaMessage(ev.detail.deviceId, ev.detail.message);
   };

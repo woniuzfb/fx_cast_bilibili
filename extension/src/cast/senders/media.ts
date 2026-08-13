@@ -188,6 +188,13 @@ export default class MediaSender {
   private dashSeekDebounceId?: number;
   private static DASH_SEEK_DEBOUNCE_MS = 800;
   /**
+   * Settle window for the post-seek/post-load tight sync. Keep in sync
+   * with SEEK_CONFIRM_WINDOW_MS in ui/popup/mediaTimeline.ts: the popup
+   * freezes its optimistic seek bar for the same duration, so a shorter
+   * popup window would snap back to the stale position mid-reload.
+   */
+  private static DASH_TIGHTEN_WINDOW_MS = 15000;
+  /**
    * Set while a DASH seek reload is completing; the next valid sync tick
    * performs a one-shot tight (0.25s) position snap to the receiver.
    */
@@ -528,13 +535,30 @@ export default class MediaSender {
 
     if (!this.session) {
       // No active session: nothing will bind new media, so a DASH seek
-      // reload would leave receiver->page sync held forever.
+      // reload would leave receiver->page sync held (and the tighten
+      // polling) forever.
       this.dashSyncHold = false;
+      this.dashTightenSync = false;
       this.debug?.("loadMedia skipped: no cast session");
       return;
     }
 
     const loadId = ++this.dashLoadId;
+    // Initial Cast and Bilibili item changes also start/restart the DASH remux
+    // at the page position. Arm the same one-shot receiver->page correction
+    // used after explicit seeks, but only after bridge preparation has
+    // completed so the 15-second settle deadline covers receiver loading.
+    const tightenAfterLoad =
+      this.isDashRemux && startTimeOverride === undefined;
+    if (tightenAfterLoad) {
+      this.dashTightenSync = true;
+      this.dashTightenDeadline =
+        Date.now() + MediaSender.DASH_TIGHTEN_WINDOW_MS;
+      this.debug?.("post-load sync armed", {
+        reason: this.media ? "media-update" : "initial-cast",
+        targetTime: dashStartTime,
+      });
+    }
 
     this.session.loadMedia(
       loadRequest,
@@ -560,9 +584,11 @@ export default class MediaSender {
           this.debug?.("media element synchronization enabled");
           this.addMediaElementListeners(this.mediaElement);
         } else if (!this.forwardPageControls) {
-          // Page controls are disabled (e.g. Bilibili). Keep the local
+          // Page controls are disabled for this sender. Keep the local
           // element parked and muted; the receiver is driven only by the
           // popup, so the page player's own events can't hijack it.
+          // (Bilibili no longer lands here: it forwards page controls with
+          // gesture gating — see cast/senders/bilibili.ts.)
           this.debug?.(
             "page control sync disabled; receiver controlled via popup"
           );
@@ -570,7 +596,15 @@ export default class MediaSender {
       },
       (err) => {
         this.debug?.("receiver media load rejected", err);
-        if (loadId === this.dashLoadId) this.dashSyncHold = false;
+        if (loadId === this.dashLoadId) {
+          this.dashSyncHold = false;
+          // A rejected LOAD arrives via this callback — loadMedia never
+          // throws for it — so this is the only place a failed seek reload
+          // clears the tighten. Otherwise it would linger until its
+          // deadline, polling GET_STATUS every second and suppressing
+          // normal drift correction.
+          this.dashTightenSync = false;
+        }
         logger.error("Failed to load media", err);
       }
     );
@@ -919,7 +953,8 @@ export default class MediaSender {
         // clears it, and a stale load callback may have released it early.
         this.dashSyncHold = true;
         this.dashTightenSync = true;
-        this.dashTightenDeadline = Date.now() + 15000;
+        this.dashTightenDeadline =
+          Date.now() + MediaSender.DASH_TIGHTEN_WINDOW_MS;
         try {
           await this.loadMedia(target);
         } catch (err) {

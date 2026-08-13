@@ -8,19 +8,28 @@ import { startMediaServer, startRemoteMediaServer, stopMediaServer } from "./com
 
 import { applicationVersion } from "../../config.json";
 
-process.on("SIGTERM", async () => {
-    deviceBrowser?.stop();
-    try {
-        await stopMediaServer();
-    } catch (err) {
-        console.error("Error stopping media server!", err);
-    } finally {
-        process.exit(1);
-    }
-});
-
 let deviceBrowser: CastDeviceBrowser | null = null;
 const remotes = new Map<string, Remote>();
+let shutdownPromise: Promise<void> | undefined;
+
+function shutdown(exitCode: number) {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+        deviceBrowser?.stop();
+        deviceBrowser = null;
+        for (const remote of remotes.values()) remote.disconnect();
+        remotes.clear();
+        try {
+            await stopMediaServer();
+        } catch (err) {
+            console.error("Error stopping media server!", err);
+        }
+    })().finally(() => process.exit(exitCode));
+    return shutdownPromise;
+}
+
+process.once("SIGTERM", () => void shutdown(0));
+process.once("SIGINT", () => void shutdown(0));
 
 /**
  * Handle incoming messages from the extension and forward them to the
@@ -30,6 +39,9 @@ const remotes = new Map<string, Remote>();
  * ones.
  */
 export function run(messaging: Messenger) {
+    // StdioMessenger emits this when Firefox closes native-messaging stdin.
+    // Websocket messengers do not emit it, so daemon clients are unaffected.
+    messaging.once("disconnect", () => void shutdown(0));
     messaging.on("message", (message: Message) => {
         switch (message.subject) {
             case "bridge:getInfo":

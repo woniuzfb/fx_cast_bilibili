@@ -222,6 +222,7 @@ export type Message = NarrowedMessage<Messages[keyof Messages]>;
 
 interface MessengerEvents {
     message: (message: Message) => void;
+    disconnect: () => void;
 }
 
 export abstract class Messenger extends TypedEmitter<MessengerEvents> {
@@ -254,6 +255,18 @@ export class StdioMessenger
         this.decodeTransform.on("data", (message: Message) => {
             this.emit("message", message);
         });
+
+        // Firefox closes the native host's stdin when the extension port or
+        // browser exits. Explicitly surface that lifecycle event so active
+        // HTTP/ffmpeg resources cannot keep an orphaned bridge alive.
+        let disconnected = false;
+        const emitDisconnect = () => {
+            if (disconnected) return;
+            disconnected = true;
+            this.emit("disconnect");
+        };
+        process.stdin.once("end", emitDisconnect);
+        process.stdin.once("close", emitDisconnect);
     }
 
     /** Sends a message to the extension. */

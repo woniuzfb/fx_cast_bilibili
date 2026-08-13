@@ -231,18 +231,32 @@ export default new (class extends TypedEventTarget<EventMap> {
                     device.mediaStatus = { ...device.mediaStatus, ...status };
                     const newMedia = device.mediaStatus.media;
                     if (oldMedia && newMedia && oldMedia !== newMedia) {
-                        for (const key of [
-                            "duration",
-                            "customData",
-                            "metadata",
-                            "tracks",
-                        ] as const) {
-                            if (
-                                newMedia[key] == null &&
-                                oldMedia[key] != null
-                            ) {
-                                newMedia[key] = oldMedia[key];
-                            }
+                        // Per-field copies (a keyed loop trips TS2322:
+                        // assigning the union of field types to the
+                        // intersection-typed target).
+                        if (
+                            newMedia.duration == null &&
+                            oldMedia.duration != null
+                        ) {
+                            newMedia.duration = oldMedia.duration;
+                        }
+                        if (
+                            newMedia.customData == null &&
+                            oldMedia.customData != null
+                        ) {
+                            newMedia.customData = oldMedia.customData;
+                        }
+                        if (
+                            newMedia.metadata == null &&
+                            oldMedia.metadata != null
+                        ) {
+                            newMedia.metadata = oldMedia.metadata;
+                        }
+                        if (
+                            newMedia.tracks == null &&
+                            oldMedia.tracks != null
+                        ) {
+                            newMedia.tracks = oldMedia.tracks;
                         }
                     }
                     if (status.playerState === PlayerState.IDLE) {

@@ -14,6 +14,8 @@ export let mediaServer: http.Server | undefined;
 let mediaServerStopPromise: Promise<void> | undefined;
 let dashRemuxProcess: ChildProcess | undefined;
 let dashTempDir: string | undefined;
+let dashServerGeneration = 0;
+const dashAuxProcesses = new Set<ChildProcess>();
 
 export async function startMediaServer(
   messaging: Messenger,
@@ -250,6 +252,9 @@ async function startDashRemuxServer(
     return;
   }
   await stopMediaServer();
+  const serverGeneration = ++dashServerGeneration;
+  const normalizedStartTime =
+    Number.isFinite(startTime) && startTime > 0 ? startTime : 0;
   const tempDir = await fs.promises.mkdtemp(
     path.join(os.tmpdir(), "fx-cast-dash-")
   );
@@ -260,7 +265,9 @@ async function startDashRemuxServer(
   // Segment URLs get a per-restart generation query so the receiver can never
   // serve a stale cached segment from before a seek restart (same filenames,
   // different content).
-  const generation = `${Date.now().toString(36)}`;
+  const generation = `${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
   // Pad entries cover [0, padBaseSeconds) so the receiver's playlist-derived
   // timeline matches the real video timeline: currentTime/duration displays
   // and seek math stay in absolute video time even though ffmpeg only
@@ -276,8 +283,8 @@ async function startDashRemuxServer(
   // keyframe position is probed with ffprobe below (padBaseSeconds falls
   // back to startTime when the probe fails).
   const padSegmentSeconds = 4;
-  let padBaseSeconds = startTime;
-  let keyframeResolved = !(startTime > 0.05);
+  let padBaseSeconds = normalizedStartTime;
+  let keyframeResolved = !(normalizedStartTime > 0.05);
   const rewritePlaylist = (raw: string) => {
     const padCount = Math.floor(padBaseSeconds / padSegmentSeconds);
     const padRemainder = padBaseSeconds - padCount * padSegmentSeconds;
@@ -303,16 +310,19 @@ async function startDashRemuxServer(
       .join("\n");
   };
   const inputHeaders = `Referer: ${referer}\r\nUser-Agent: Mozilla/5.0\r\n`;
+  // Abort a half-open/stalled CDN read instead of leaving ffmpeg and the
+  // receiver buffering forever. Value is microseconds.
+  const networkTimeoutArgs = ["-rw_timeout", "30000000"];
   // ffmpeg remuxes the DASH sources strictly sequentially, so a receiver
   // seek can never be served from not-yet-downloaded segments. The extension
   // therefore restarts the remux at the seek target instead: input seeking
   // (-ss before -i) uses HTTP range requests on the DASH CDN and lands on
   // the preceding keyframe, making seeks (and mid-video cast starts) fast.
-  const seekArgs = startTime > 0 ? ["-ss", startTime.toFixed(3)] : [];
+  const seekArgs = normalizedStartTime > 0 ? ["-ss", normalizedStartTime.toFixed(3)] : [];
   const args = [
     "-hide_banner", "-loglevel", "warning",
-    "-headers", inputHeaders, ...seekArgs, "-i", videoUrl,
-    "-headers", inputHeaders, ...seekArgs, "-i", audioUrl,
+    ...networkTimeoutArgs, "-headers", inputHeaders, ...seekArgs, "-i", videoUrl,
+    ...networkTimeoutArgs, "-headers", inputHeaders, ...seekArgs, "-i", audioUrl,
     "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
     // Default Media Receiver accepts traditional MPEG-TS HLS more reliably
     // than fragmented MP4 HLS on older Chromecast generations.
@@ -338,20 +348,23 @@ async function startDashRemuxServer(
     let probeStdout = "";
     const probeProcess = spawn(ffprobePath, [
       "-v", "error",
+      ...networkTimeoutArgs,
       "-headers", inputHeaders,
       "-select_streams", "v:0",
       "-show_entries", "packet=pts_time,flags",
       "-of", "csv=p=0",
-      "-read_intervals", `${Math.max(0, startTime - 8).toFixed(3)}%+12`,
+      "-read_intervals", `${Math.max(0, normalizedStartTime - 8).toFixed(3)}%+12`,
       videoUrl,
     ], { stdio: ["ignore", "pipe", "ignore"] });
+    dashAuxProcesses.add(probeProcess);
     const finishProbe = (keyframe?: number) => {
+      dashAuxProcesses.delete(probeProcess);
       if (keyframeResolved) return;
       if (
         keyframe !== undefined &&
         Number.isFinite(keyframe) &&
         keyframe >= 0 &&
-        keyframe <= startTime
+        keyframe <= normalizedStartTime
       ) {
         padBaseSeconds = keyframe;
       }
@@ -373,7 +386,7 @@ async function startDashRemuxServer(
         if (
           flags?.includes("K") &&
           Number.isFinite(pts) &&
-          pts <= startTime + 0.001
+          pts <= normalizedStartTime + 0.001
         ) {
           keyframe = keyframe === undefined ? pts : Math.max(keyframe, pts);
         }
@@ -388,9 +401,11 @@ async function startDashRemuxServer(
   // Generate the 4s black/silent pad segment in parallel. It backs the pad
   // playlist entries that cover [0, startTime) and is essentially never
   // fetched, so a tiny resolution keeps this cheap.
-  let padReady: Promise<void> | undefined;
-  if (startTime > 0.05) {
-    padReady = new Promise<void>((resolve) => {
+  let padReady: Promise<boolean> | undefined;
+  let padReadyResult = normalizedStartTime <= 0.05;
+  let padFailed = false;
+  if (normalizedStartTime > 0.05) {
+    padReady = new Promise<boolean>((resolve) => {
       const padProcess = spawn(ffmpegPath, [
         "-hide_banner", "-loglevel", "error", "-y",
         "-f", "lavfi", "-i", "color=c=black:s=320x180:r=5",
@@ -400,8 +415,20 @@ async function startDashRemuxServer(
         "-g", "5", "-c:a", "aac", "-shortest",
         "-f", "mpegts", padPath,
       ], { stdio: ["ignore", "ignore", "pipe"] });
-      padProcess.on("exit", () => resolve());
-      padProcess.on("error", () => resolve());
+      dashAuxProcesses.add(padProcess);
+      let settled = false;
+      const finishPad = (ready: boolean) => {
+        if (settled) return;
+        settled = true;
+        dashAuxProcesses.delete(padProcess);
+        padReadyResult = ready;
+        padFailed = !ready;
+        resolve(ready);
+      };
+      padProcess.on("exit", (code) =>
+        finishPad(code === 0 && fs.existsSync(padPath))
+      );
+      padProcess.on("error", () => finishPad(false));
     });
   }
   const remuxProcess = spawn(ffmpegPath, args, {
@@ -425,9 +452,12 @@ async function startDashRemuxServer(
         subject: "mediaCast:mediaServerError",
         data: `ffmpeg DASH remux failed (${code}): ${stderr}`,
       });
+      // A failed remux cannot recover while the old HTTP server remains up.
+      // Close it and remove the temp directory so the next cast starts clean.
+      void stopMediaServer();
     }
   });
-  mediaServer = http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const pathname = decodeURIComponent((req.url ?? "/").split("?", 1)[0]);
     const filename = path.basename(pathname);
     if (!filename || filename !== pathname.slice(1)) {
@@ -461,10 +491,16 @@ async function startDashRemuxServer(
       if (filename === "pad.ts" && padReady) {
         // Pad generation runs in parallel with the remux; wait briefly if
         // the receiver somehow requests a pad before it is ready.
-        await Promise.race([
+        const ready = await Promise.race([
           padReady,
-          new Promise((resolve) => setTimeout(resolve, 5000)),
+          new Promise<boolean>((resolve) =>
+            setTimeout(() => resolve(false), 5000)
+          ),
         ]);
+        if (!ready) {
+          res.writeHead(503, { "Retry-After": "1" }).end();
+          return;
+        }
       }
       const stat = await fs.promises.stat(filePath);
       const type = filename.endsWith(".ts")
@@ -482,6 +518,7 @@ async function startDashRemuxServer(
       res.writeHead(404).end();
     }
   });
+  mediaServer = server;
   mediaServer.on("error", (err) =>
     messaging.sendMessage({ subject: "mediaCast:mediaServerError", data: err.message })
   );
@@ -499,6 +536,17 @@ async function startDashRemuxServer(
     // receiver only needs the first couple of segments to begin playback.
     const minimumPlaylistDuration = 8;
     for (let attempt = 0; attempt < 900; attempt++) {
+      if (serverGeneration !== dashServerGeneration || mediaServer !== server) {
+        return;
+      }
+      if (padFailed) {
+        messaging.sendMessage({
+          subject: "mediaCast:mediaServerError",
+          data: "Unable to generate DASH timeline pad segment",
+        });
+        void stopMediaServer();
+        return;
+      }
       try {
         const playlist = await fs.promises.readFile(playlistPath, "utf8");
         const playlistDuration = [...playlist.matchAll(/^#EXTINF:([0-9.]+)/gm)]
@@ -507,9 +555,15 @@ async function startDashRemuxServer(
           // Wait for the keyframe probe so the served playlist is padded to
           // the probed keyframe, not the rough startTime.
           keyframeResolved &&
+          padReadyResult &&
           playlist.includes("segment-") &&
           playlist.includes(".ts") &&
-          playlistDuration >= minimumPlaylistDuration
+          // A seek into the final seconds of the video yields a complete
+          // but short playlist: ENDLIST marks readiness regardless of the
+          // accumulated duration (which would never reach the minimum and
+          // always end in the 90s poll timeout).
+          (playlistDuration >= minimumPlaylistDuration ||
+            playlist.includes("#EXT-X-ENDLIST"))
         ) {
           messaging.sendMessage({
             subject: "mediaCast:mediaServerStarted",
@@ -518,7 +572,7 @@ async function startDashRemuxServer(
               subtitlePaths: [],
               localAddress: address,
               mode: "dash-remux",
-              startTime,
+              startTime: normalizedStartTime,
               padBaseSeconds,
             },
           });
@@ -663,6 +717,9 @@ export async function startRemoteMediaServer(
 export function stopMediaServer() {
   if (mediaServerStopPromise) return mediaServerStopPromise;
 
+  dashServerGeneration++;
+  const auxiliaryProcesses = [...dashAuxProcesses];
+  dashAuxProcesses.clear();
   const server = mediaServer;
   const remuxProcess = dashRemuxProcess;
   const tempDir = dashTempDir;
@@ -671,6 +728,9 @@ export function stopMediaServer() {
   dashTempDir = undefined;
 
   mediaServerStopPromise = (async () => {
+    for (const process of auxiliaryProcesses) {
+      if (process.exitCode === null) process.kill("SIGKILL");
+    }
     if (remuxProcess && remuxProcess.exitCode === null) {
       await new Promise<void>((resolve) => {
         let settled = false;
@@ -692,16 +752,21 @@ export function stopMediaServer() {
 
     if (server) {
       await new Promise<void>((resolve, reject) => {
-        server.close((err) => {
+        let settled = false;
+        const finish = (err?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(closeTimeout);
           if (
             err &&
             (err as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
-          ) {
-            reject(err);
-          } else {
-            resolve();
-          }
-        });
+          ) reject(err);
+          else resolve();
+        };
+        // Node 22 (the packaged target) supports closeAllConnections, but keep
+        // a deadline for source builds running older Node or broken sockets.
+        const closeTimeout = setTimeout(() => finish(), 5000);
+        server.close(err => finish(err));
         server.closeAllConnections?.();
         server.closeIdleConnections?.();
       });

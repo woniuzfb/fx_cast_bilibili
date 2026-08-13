@@ -21,8 +21,14 @@ export interface PopupMediaSample {
     now: number;
 }
 
-/** How long to wait for the receiver to confirm an optimistic seek. */
-const SEEK_CONFIRM_WINDOW_MS = 9000;
+/**
+ * How long to wait for the receiver to confirm an optimistic seek. Keep in
+ * sync with DASH_TIGHTEN_WINDOW_MS in cast/senders/media.ts: this window
+ * starts at the user's click, so it must cover the seek debounce, the
+ * bridge remux restart (ffprobe keyframe probing can take seconds on a
+ * slow CDN) and the receiver reload.
+ */
+const SEEK_CONFIRM_WINDOW_MS = 15000;
 /** Receiver reports within this distance of the target confirm the seek. */
 const SEEK_CONFIRM_TOLERANCE_S = 1.5;
 
