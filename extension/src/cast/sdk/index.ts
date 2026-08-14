@@ -215,7 +215,8 @@ export default class {
                 const status = message.data;
                 const session = this.#sessions.get(status.sessionId);
                 if (!session) {
-                    logger.error(`Session not found (${status.sessionId})`);
+                    // A final update can race with sessionStopped, which
+                    // intentionally removes the terminal session from the map.
                     break;
                 }
 
@@ -244,6 +245,7 @@ export default class {
                             listener(false);
                         }
                     }
+                    this.#sessions.delete(message.data.sessionId);
                 }
 
                 break;
@@ -259,7 +261,7 @@ export default class {
                     const updateListeners = sessionUpdateListeners.get(session);
                     if (updateListeners) {
                         for (const listener of updateListeners) {
-                            listener(true);
+                            listener(false);
                         }
                     }
                 }

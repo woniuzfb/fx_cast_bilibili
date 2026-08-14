@@ -11,6 +11,7 @@ import type { Messenger } from "../messaging";
 import { convertSrtToVtt } from "../lib/subtitles";
 
 export let mediaServer: http.Server | undefined;
+export let mediaServerRequestId: string | undefined;
 let mediaServerStopPromise: Promise<void> | undefined;
 let dashRemuxProcess: ChildProcess | undefined;
 let dashTempDir: string | undefined;
@@ -19,12 +20,14 @@ const dashAuxProcesses = new Set<ChildProcess>();
 
 export async function startMediaServer(
   messaging: Messenger,
+  requestId: string,
   filePath: string,
   port: number
 ) {
   if (mediaServer?.listening) {
     await stopMediaServer();
   }
+  mediaServerRequestId = requestId;
 
   let fileDir: string;
   let fileName: string;
@@ -40,7 +43,7 @@ export async function startMediaServer(
     } else {
       messaging.sendMessage({
         subject: "mediaCast:mediaServerError",
-        data: "Media path is not a file.",
+        data: { requestId, message: "Media path is not a file." },
       });
 
       return;
@@ -48,7 +51,7 @@ export async function startMediaServer(
   } catch (err) {
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: "Failed to find media path.",
+      data: { requestId, message: "Failed to find media path." },
     });
 
     return;
@@ -58,7 +61,7 @@ export async function startMediaServer(
   if (!contentType) {
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: "Failed to find media type.",
+      data: { requestId, message: "Failed to find media type." },
     });
 
     return;
@@ -147,12 +150,13 @@ export async function startMediaServer(
   mediaServer.on("close", () => {
     messaging.sendMessage({
       subject: "mediaCast:mediaServerStopped",
+      data: { requestId },
     });
   });
   mediaServer.on("error", (err) => {
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: err.message,
+      data: { requestId, message: err.message },
     });
   });
 
@@ -170,7 +174,7 @@ export async function startMediaServer(
     if (!localAddresses.length) {
       messaging.sendMessage({
         subject: "mediaCast:mediaServerError",
-        data: "Failed to get local address.",
+        data: { requestId, message: "Failed to get local address." },
       });
       stopMediaServer();
       return;
@@ -179,6 +183,7 @@ export async function startMediaServer(
     messaging.sendMessage({
       subject: "mediaCast:mediaServerStarted",
       data: {
+        requestId,
         mediaPath: fileName,
         subtitlePaths: Array.from(subtitles.keys()),
         localAddress: localAddresses[0],
@@ -238,6 +243,7 @@ async function fetchRemoteMedia(
 
 async function startDashRemuxServer(
   messaging: Messenger,
+  requestId: string,
   videoUrl: string,
   audioUrl: string,
   referer: string,
@@ -247,11 +253,12 @@ async function startDashRemuxServer(
   if (!remoteHostAllowed(videoUrl) || !remoteHostAllowed(audioUrl)) {
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: "DASH media host not allowlisted",
+      data: { requestId, message: "DASH media host not allowlisted" },
     });
     return;
   }
   await stopMediaServer();
+  mediaServerRequestId = requestId;
   const serverGeneration = ++dashServerGeneration;
   const normalizedStartTime =
     Number.isFinite(startTime) && startTime > 0 ? startTime : 0;
@@ -284,7 +291,10 @@ async function startDashRemuxServer(
   // back to startTime when the probe fails).
   const padSegmentSeconds = 4;
   let padBaseSeconds = normalizedStartTime;
-  let keyframeResolved = !(normalizedStartTime > 0.05);
+  // Always run the probe, even from time zero: it also supplies the optional
+  // full source duration used when the page media element has no duration yet.
+  let keyframeResolved = false;
+  let probedDuration: number | undefined;
   const rewritePlaylist = (raw: string) => {
     const padCount = Math.floor(padBaseSeconds / padSegmentSeconds);
     const padRemainder = padBaseSeconds - padCount * padSegmentSeconds;
@@ -351,8 +361,8 @@ async function startDashRemuxServer(
       ...networkTimeoutArgs,
       "-headers", inputHeaders,
       "-select_streams", "v:0",
-      "-show_entries", "packet=pts_time,flags",
-      "-of", "csv=p=0",
+      "-show_entries", "packet=pts_time,flags:format=duration",
+      "-of", "json",
       "-read_intervals", `${Math.max(0, normalizedStartTime - 8).toFixed(3)}%+12`,
       videoUrl,
     ], { stdio: ["ignore", "pipe", "ignore"] });
@@ -380,16 +390,28 @@ async function startDashRemuxServer(
     probeProcess.on("exit", () => {
       clearTimeout(probeTimeout);
       let keyframe: number | undefined;
-      for (const line of probeStdout.split("\n")) {
-        const [ptsText, flags] = line.trim().split(",");
-        const pts = Number.parseFloat(ptsText);
-        if (
-          flags?.includes("K") &&
-          Number.isFinite(pts) &&
-          pts <= normalizedStartTime + 0.001
-        ) {
-          keyframe = keyframe === undefined ? pts : Math.max(keyframe, pts);
+      try {
+        const probe = JSON.parse(probeStdout) as {
+          packets?: Array<{ pts_time?: string; flags?: string }>;
+          format?: { duration?: string };
+        };
+        const duration = Number.parseFloat(probe.format?.duration ?? "");
+        if (Number.isFinite(duration) && duration > 0) {
+          probedDuration = duration;
         }
+        for (const packet of probe.packets ?? []) {
+          const pts = Number.parseFloat(packet.pts_time ?? "");
+          if (
+            packet.flags?.includes("K") &&
+            Number.isFinite(pts) &&
+            pts <= normalizedStartTime + 0.001
+          ) {
+            keyframe = keyframe === undefined ? pts : Math.max(keyframe, pts);
+          }
+        }
+      } catch {
+        // Keep the existing startTime fallback when ffprobe output is absent
+        // or malformed.
       }
       finishProbe(keyframe);
     });
@@ -443,14 +465,14 @@ async function startDashRemuxServer(
     if (dashRemuxProcess !== remuxProcess) return;
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: `Unable to start ffmpeg: ${err.message}`,
+      data: { requestId, message: `Unable to start ffmpeg: ${err.message}` },
     });
   });
   remuxProcess.on("exit", (code) => {
     if (code && dashRemuxProcess === remuxProcess && mediaServer) {
       messaging.sendMessage({
         subject: "mediaCast:mediaServerError",
-        data: `ffmpeg DASH remux failed (${code}): ${stderr}`,
+        data: { requestId, message: `ffmpeg DASH remux failed (${code}): ${stderr}` },
       });
       // A failed remux cannot recover while the old HTTP server remains up.
       // Close it and remove the temp directory so the next cast starts clean.
@@ -520,15 +542,24 @@ async function startDashRemuxServer(
   });
   mediaServer = server;
   mediaServer.on("error", (err) =>
-    messaging.sendMessage({ subject: "mediaCast:mediaServerError", data: err.message })
+    messaging.sendMessage({
+      subject: "mediaCast:mediaServerError",
+      data: { requestId, message: err.message },
+    })
   );
   mediaServer.on("close", () =>
-    messaging.sendMessage({ subject: "mediaCast:mediaServerStopped" })
+    messaging.sendMessage({
+      subject: "mediaCast:mediaServerStopped",
+      data: { requestId },
+    })
   );
   mediaServer.listen(port, async () => {
     const address = firstLocalAddress();
     if (!address) {
-      messaging.sendMessage({ subject: "mediaCast:mediaServerError", data: "No local IPv4 address" });
+      messaging.sendMessage({
+        subject: "mediaCast:mediaServerError",
+        data: { requestId, message: "No local IPv4 address" },
+      });
       void stopMediaServer();
       return;
     }
@@ -542,7 +573,7 @@ async function startDashRemuxServer(
       if (padFailed) {
         messaging.sendMessage({
           subject: "mediaCast:mediaServerError",
-          data: "Unable to generate DASH timeline pad segment",
+          data: { requestId, message: "Unable to generate DASH timeline pad segment" },
         });
         void stopMediaServer();
         return;
@@ -568,12 +599,14 @@ async function startDashRemuxServer(
           messaging.sendMessage({
             subject: "mediaCast:mediaServerStarted",
             data: {
+              requestId,
               mediaPath,
               subtitlePaths: [],
               localAddress: address,
               mode: "dash-remux",
               startTime: normalizedStartTime,
               padBaseSeconds,
+              ...(probedDuration !== undefined ? { pageDuration: probedDuration } : {}),
             },
           });
           return;
@@ -585,7 +618,7 @@ async function startDashRemuxServer(
     }
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: `Timed out preparing DASH stream through ${minimumPlaylistDuration}s: ${stderr}`,
+      data: { requestId, message: `Timed out preparing DASH stream through ${minimumPlaylistDuration}s: ${stderr}` },
     });
     void stopMediaServer();
   });
@@ -593,6 +626,7 @@ async function startDashRemuxServer(
 
 export async function startRemoteMediaServer(
   messaging: Messenger,
+  requestId: string,
   mediaUrl: string,
   referer: string,
   contentType: string,
@@ -603,6 +637,7 @@ export async function startRemoteMediaServer(
   if (audioUrl) {
     await startDashRemuxServer(
       messaging,
+      requestId,
       mediaUrl,
       audioUrl,
       referer,
@@ -622,12 +657,13 @@ export async function startRemoteMediaServer(
   if (!remoteHostAllowed(mediaUrl)) {
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: `Host not allowlisted: ${host}`,
+      data: { requestId, message: `Host not allowlisted: ${host}` },
     });
     return;
   }
 
   await stopMediaServer();
+  mediaServerRequestId = requestId;
   const mediaPath = "bilibili-media";
   mediaServer = http.createServer(async (req, res) => {
     console.error("[fx_cast_bilibili] receiver request", {
@@ -683,12 +719,13 @@ export async function startRemoteMediaServer(
   mediaServer.on("error", (err) =>
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
-      data: err.message,
+      data: { requestId, message: err.message },
     })
   );
   mediaServer.on("close", () =>
     messaging.sendMessage({
       subject: "mediaCast:mediaServerStopped",
+      data: { requestId },
     })
   );
   mediaServer.listen(port, () => {
@@ -697,7 +734,7 @@ export async function startRemoteMediaServer(
     if (!address) {
       messaging.sendMessage({
         subject: "mediaCast:mediaServerError",
-        data: "No local IPv4 address",
+        data: { requestId, message: "No local IPv4 address" },
       });
       void stopMediaServer();
       return;
@@ -705,6 +742,7 @@ export async function startRemoteMediaServer(
     messaging.sendMessage({
       subject: "mediaCast:mediaServerStarted",
       data: {
+        requestId,
         mediaPath,
         subtitlePaths: [],
         localAddress: address,
@@ -721,9 +759,11 @@ export function stopMediaServer() {
   const auxiliaryProcesses = [...dashAuxProcesses];
   dashAuxProcesses.clear();
   const server = mediaServer;
+  const stoppedRequestId = mediaServerRequestId;
   const remuxProcess = dashRemuxProcess;
   const tempDir = dashTempDir;
   mediaServer = undefined;
+  mediaServerRequestId = undefined;
   dashRemuxProcess = undefined;
   dashTempDir = undefined;
 

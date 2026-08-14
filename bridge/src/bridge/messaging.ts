@@ -164,15 +164,17 @@ type MessageDefinitions = {
      * path on the given port.
      */
     "bridge:startMediaServer": {
+        requestId: string;
         filePath: string;
         port: number;
     };
-    "bridge:startRemoteMediaServer": { mediaUrl: string; audioUrl?: string; referer: string; contentType: string; port: number; startTime?: number; };
+    "bridge:startRemoteMediaServer": { requestId: string; mediaUrl: string; audioUrl?: string; referer: string; contentType: string; port: number; startTime?: number; };
     /**
      * Sent to media sender from bridge when the media server is ready
      * to serve files.
      */
     "mediaCast:mediaServerStarted": {
+        requestId: string;
         mediaPath: string;
         subtitlePaths: string[];
         localAddress: string;
@@ -181,21 +183,23 @@ type MessageDefinitions = {
          *  playlist is actually padded to (diagnostics). */
         startTime?: number;
         padBaseSeconds?: number;
+    /** Full source duration reported by ffprobe when available. */
+    pageDuration?: number;
     };
     /**
      * Sent to bridge to stop HTTP media server.
      */
-    "bridge:stopMediaServer": undefined;
+    "bridge:stopMediaServer": { requestId?: string; force?: boolean };
     /**
      * Sent to media sender from bridge when the media server has
      * stopped.
      */
-    "mediaCast:mediaServerStopped": undefined;
+    "mediaCast:mediaServerStopped": { requestId: string };
     /**
      * Sent to media sender from bridge when the media server has
      * encountered an error.
      */
-    "mediaCast:mediaServerError": string;
+    "mediaCast:mediaServerError": { requestId: string; message: string };
 };
 
 interface MessageBase<K extends keyof MessageDefinitions> {

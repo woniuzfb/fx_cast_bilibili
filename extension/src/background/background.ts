@@ -154,7 +154,7 @@ async function init() {
     browser.runtime.onMessage.addListener(message => {
         if (message?.subject !== "action:castCurrentTab") return;
 
-        void (async () => {
+        return (async () => {
             const [tab] = await browser.tabs.query({
                 active: true,
                 currentWindow: true
@@ -174,7 +174,10 @@ async function init() {
             } else {
                 await castManager.triggerCast(tab.id);
             }
-        })().catch(err => logger.error("Browser-action Cast failed", err));
+        })().catch(err => {
+            logger.error("Browser-action Cast failed", err);
+            throw err;
+        });
     });
 
     browser.runtime.onMessage.addListener(message => {

@@ -91,6 +91,25 @@ export default class MediaSender {
     receiver: unknown,
     action: unknown
   ) => void;
+  private sessionUpdateListener?: (isAlive: boolean) => void;
+  private stopForUnload?: () => void;
+  private stopped = false;
+  private activeMediaServerRequestId?: string;
+
+  private nextMediaServerRequestId() {
+    return crypto.randomUUID();
+  }
+
+  private stopOwnedMediaServer(requestId = this.activeMediaServerRequestId) {
+    if (!requestId || !this.port) return;
+    this.port.postMessage({
+      subject: "bridge:stopMediaServer",
+      data: { requestId },
+    });
+    if (this.activeMediaServerRequestId === requestId) {
+      this.activeMediaServerRequestId = undefined;
+    }
+  }
 
   /**
    * DASH remux mode (Bilibili): the receiver cannot seek inside the
@@ -154,25 +173,40 @@ export default class MediaSender {
     });
   }
 
-  stop() {
-    this.removeMediaElementListeners?.();
-    this.removeMediaElementListeners = undefined;
-    this.onBleRemoteAction = undefined;
-    // Remove this sender's Stop listener from the reused SDK singleton so it
-    // doesn't accumulate across re-casts (a leaked listener would make one
-    // Stop click fire stop() once per past sender).
+  stop(stopReceiver = true) {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.dashLoadId++;
+    this.dashSeekTarget = undefined;
+    this.dashSyncHold = false;
+    this.dashTightenSync = false;
+    this.suspendMediaElementSync();
+
     if (this.receiverActionListener) {
       cast.removeReceiverActionListener(this.receiverActionListener);
       this.receiverActionListener = undefined;
+    }
+    if (this.sessionUpdateListener && this.session) {
+      this.session.removeUpdateListener(this.sessionUpdateListener);
+      this.sessionUpdateListener = undefined;
+    }
+    if (this.stopForUnload) {
+      window.removeEventListener("pagehide", this.stopForUnload);
+      window.removeEventListener("beforeunload", this.stopForUnload);
+      this.stopForUnload = undefined;
     }
     if (this.dashSeekDebounceId !== undefined) {
       window.clearTimeout(this.dashSeekDebounceId);
       this.dashSeekDebounceId = undefined;
     }
-    this.dashSeekTarget = undefined;
-    this.dashTightenSync = false;
-    this.port?.postMessage({ subject: "bridge:stopMediaServer" });
-    this.session?.stop();
+
+    this.stopOwnedMediaServer();
+    if (stopReceiver) this.session?.stop();
+    this.session = undefined;
+    this.media = undefined;
+    this.mediaElement = undefined;
+    this.syncElementEnabled = false;
+    this.forwardPageControls = false;
     this.onStopped?.();
   }
 
@@ -246,6 +280,7 @@ export default class MediaSender {
 
   /** Reload a new Bilibili item in the existing Cast session. */
   async updateMedia(opts: MediaSenderOpts) {
+    if (this.stopped) return;
     this.debug?.("updating cast media", {
       title: opts.mediaTitle,
       host: new URL(opts.mediaUrl).hostname,
@@ -276,15 +311,14 @@ export default class MediaSender {
       hasMediaElement: this.mediaElement instanceof HTMLMediaElement,
     });
 
-    const stopForUnload = () => {
+    this.stopForUnload = () => {
       if (!this.stopOnUnloadEnabled || this.hasStoppedForUnload) return;
       this.hasStoppedForUnload = true;
       this.debug?.("page unload: stopping receiver session");
-      this.port?.postMessage({ subject: "bridge:stopMediaServer" });
-      this.session?.stop();
+      this.stop();
     };
-    window.addEventListener("pagehide", stopForUnload, { once: true });
-    window.addEventListener("beforeunload", stopForUnload, { once: true });
+    window.addEventListener("pagehide", this.stopForUnload, { once: true });
+    window.addEventListener("beforeunload", this.stopForUnload, { once: true });
 
     // The popup "Stop" button reaches injected senders as a receiver action
     // (cast:receiverAction -> STOP). Without listening for it, only the bridge
@@ -338,9 +372,27 @@ export default class MediaSender {
     this.debug?.("cast.initialize returned");
   }
 
+  private bindSession(session: Session) {
+    if (this.stopped) {
+      session.stop();
+      return false;
+    }
+    if (this.sessionUpdateListener && this.session) {
+      this.session.removeUpdateListener(this.sessionUpdateListener);
+    }
+    this.session = session;
+    this.sessionUpdateListener = (isAlive) => {
+      if (isAlive || this.stopped) return;
+      this.debug?.("cast session ended externally");
+      this.stop(false);
+    };
+    session.addUpdateListener(this.sessionUpdateListener);
+    return true;
+  }
+
   private sessionListener(session: Session) {
     this.debug?.("session listener: session created", session.sessionId);
-    this.session = session;
+    if (!this.bindSession(session)) return;
     this.wasSessionRequested = true;
     void this.loadMedia().catch((err) => {
       this.debug?.("media load failed", String(err));
@@ -357,7 +409,7 @@ export default class MediaSender {
       cast.requestSession(
         (session) => {
           this.debug?.("cast session created", session.sessionId);
-          this.session = session;
+          if (!this.bindSession(session)) return;
           void this.loadMedia().catch((err) => {
             this.debug?.("media load failed", String(err));
             logger.error("Media load failed", err);
@@ -380,9 +432,12 @@ export default class MediaSender {
   }
 
   private async loadMedia(startTimeOverride?: number) {
+    if (this.stopped) return;
+    const loadId = ++this.dashLoadId;
     let mediaUrl = new URL(this.mediaUrl);
     const mediaTitle = this.mediaTitle ?? mediaUrl.pathname.slice(1);
     const subtitleUrls: URL[] = [];
+    let bridgePageDuration: number | undefined;
 
     // In DASH remux mode the bridge restarts ffmpeg at this position and
     // pads the playlist so the receiver timeline stays in absolute video
@@ -404,7 +459,10 @@ export default class MediaSender {
         expectedMode: this.remoteProxy.audioUrl ? "dash-remux" : "proxy",
         startTime: this.isDashRemux ? dashStartTime : undefined,
       });
+      const requestId = this.nextMediaServerRequestId();
+      this.activeMediaServerRequestId = requestId;
       const result = await this.startRemoteMediaServer(
+        requestId,
         this.mediaUrl,
         this.remoteProxy.referer,
         this.mediaContentType,
@@ -412,17 +470,33 @@ export default class MediaSender {
         this.remoteProxy.audioUrl,
         dashStartTime
       );
+      if (this.stopped || loadId !== this.dashLoadId) {
+        this.stopOwnedMediaServer(requestId);
+        return;
+      }
       mediaUrl = new URL(
         result.mediaPath,
         `http://${result.localAddress}:${port}/`
       );
       mediaUrl.searchParams.set("v", String(Date.now()));
+      if (
+        Number.isFinite(result.pageDuration) &&
+        Number(result.pageDuration) > 0
+      ) {
+        bridgePageDuration = Number(result.pageDuration);
+      }
       this.debug?.("bridge proxy ready", mediaUrl.href);
     } else if (this.isLocalMedia) {
       const port = await getOption("localMediaServerPort");
       try {
+        const requestId = this.nextMediaServerRequestId();
+        this.activeMediaServerRequestId = requestId;
         const { localAddress, mediaPath, subtitlePaths } =
-          await this.startMediaServer(mediaTitle, port);
+          await this.startMediaServer(requestId, mediaTitle, port);
+        if (this.stopped || loadId !== this.dashLoadId) {
+          this.stopOwnedMediaServer(requestId);
+          return;
+        }
 
         const baseUrl = new URL(`http://${localAddress}:${port}/`);
         mediaUrl = new URL(mediaPath, baseUrl);
@@ -452,11 +526,16 @@ export default class MediaSender {
       // The receiver may not report a duration for the live-style event
       // playlist; the popup falls back to this for its seek bar, and uses
       // the flag to route seeks back to the page sender.
+      const elementDuration =
+        this.mediaElement instanceof HTMLMediaElement &&
+        Number.isFinite(this.mediaElement.duration) &&
+        this.mediaElement.duration > 0
+          ? this.mediaElement.duration
+          : undefined;
+      const pageDuration = elementDuration ?? bridgePageDuration;
       mediaInfo.customData = {
         dashRemux: true,
-        pageDuration: this.mediaElement instanceof HTMLMediaElement
-          ? this.mediaElement.duration
-          : undefined,
+        ...(pageDuration !== undefined ? { pageDuration } : {}),
       };
     }
     mediaInfo.tracks = [];
@@ -574,7 +653,6 @@ export default class MediaSender {
       return;
     }
 
-    const loadId = ++this.dashLoadId;
     // Initial Cast and Bilibili item changes also start/restart the DASH remux
     // at the page position. Arm the same one-shot receiver->page correction
     // used after explicit seeks, but only after bridge preparation has
@@ -594,6 +672,10 @@ export default class MediaSender {
     this.session.loadMedia(
       loadRequest,
       (media) => {
+        if (this.stopped || loadId !== this.dashLoadId) {
+          this.debug?.("ignored stale receiver media load callback", { loadId });
+          return;
+        }
         this.debug?.("receiver media loaded");
         this.media = media;
         if (loadId === this.dashLoadId) this.dashSyncHold = false;
@@ -626,6 +708,7 @@ export default class MediaSender {
         }
       },
       (err) => {
+        if (this.stopped || loadId !== this.dashLoadId) return;
         this.debug?.("receiver media load rejected", err);
         if (loadId === this.dashLoadId) {
           this.dashSyncHold = false;
@@ -1107,13 +1190,21 @@ export default class MediaSender {
   }
 
   private startRemoteMediaServer(
+    requestId: string,
     mediaUrl: string,
     referer: string,
     contentType: string,
     port: number,
     audioUrl?: string,
     startTime = 0
-  ): Promise<{ mediaPath: string; localAddress: string }> {
+  ): Promise<{
+    mediaPath: string;
+    localAddress: string;
+    pageDuration?: number;
+    mode?: "proxy" | "dash-remux";
+    startTime?: number;
+    padBaseSeconds?: number;
+  }> {
     return new Promise((resolve, reject) => {
       if (!this.port) return reject("Cast bridge unavailable");
 
@@ -1124,7 +1215,10 @@ export default class MediaSender {
       const onMessage = (ev: MessageEvent<Message>) => {
         const message = ev.data;
         this.debug?.(`bridge: ${message.subject}`, message.data);
-        if (message.subject === "mediaCast:mediaServerStarted") {
+        if (
+          message.subject === "mediaCast:mediaServerStarted" &&
+          message.data.requestId === requestId
+        ) {
           this.debug?.("bridge media server reported ready", message.data);
           if (audioUrl && message.data.mode !== "dash-remux") {
             cleanup();
@@ -1136,11 +1230,23 @@ export default class MediaSender {
           }
           cleanup();
           resolve(message.data);
-        } else if (message.subject === "mediaCast:mediaServerError") {
+        } else if (
+          message.subject === "mediaCast:mediaServerError" &&
+          message.data.requestId === requestId
+        ) {
           cleanup();
-          reject(message.data);
+          reject(message.data.message);
+        } else if (
+          message.subject === "mediaCast:mediaServerStopped" &&
+          message.data.requestId === requestId
+        ) {
+          cleanup();
+          reject(new Error("Media server stopped before becoming ready"));
         } else if (message.subject === "mediaCast:mediaServerStopped") {
-          this.debug?.("previous bridge proxy stopped");
+          this.debug?.("previous bridge proxy stopped", {
+            stoppedRequestId: message.data.requestId,
+            pendingRequestId: requestId,
+          });
         }
       };
       const timeoutId = window.setTimeout(() => {
@@ -1161,6 +1267,7 @@ export default class MediaSender {
       this.port.postMessage({
         subject: "bridge:startRemoteMediaServer",
         data: {
+          requestId,
           mediaUrl,
           audioUrl,
           referer,
@@ -1173,6 +1280,7 @@ export default class MediaSender {
   }
 
   private startMediaServer(
+    requestId: string,
     filePath: string,
     port: number
   ): Promise<{
@@ -1189,6 +1297,7 @@ export default class MediaSender {
       this.port.postMessage({
         subject: "bridge:startMediaServer",
         data: {
+          requestId,
           filePath: decodeURI(filePath),
           port: port,
         },
@@ -1197,16 +1306,28 @@ export default class MediaSender {
       const onMessage = (ev: MessageEvent<Message>) => {
         const message = ev.data;
 
-        if (message.subject.startsWith("mediaCast:mediaServer")) {
+        const matchingRequest =
+          message.subject === "mediaCast:mediaServerStarted" ||
+          message.subject === "mediaCast:mediaServerError" ||
+          message.subject === "mediaCast:mediaServerStopped"
+            ? message.data.requestId === requestId
+            : false;
+        if (matchingRequest) {
           this.port?.removeEventListener("message", onMessage);
         }
 
         switch (message.subject) {
           case "mediaCast:mediaServerStarted":
+            if (message.data.requestId !== requestId) break;
             resolve(message.data);
             break;
           case "mediaCast:mediaServerError":
-            reject(message.data);
+            if (message.data.requestId !== requestId) break;
+            reject(message.data.message);
+            break;
+          case "mediaCast:mediaServerStopped":
+            if (message.data.requestId !== requestId) break;
+            reject(new Error("Media server stopped before becoming ready"));
             break;
         }
       };

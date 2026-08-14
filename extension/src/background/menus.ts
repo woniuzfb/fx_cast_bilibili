@@ -3,7 +3,7 @@ import options from "../lib/options";
 
 import { MenuId } from "../menuIds";
 
-import castManager from "./castManager";
+import castManager, { CastInstanceDestroyedError } from "./castManager";
 
 const _ = browser.i18n.getMessage;
 
@@ -223,6 +223,34 @@ async function onMenuClicked(
   }
 }
 
+async function reinjectBilibiliSender(tabId: number, seq: number) {
+  const [reinjectResult] = await browser.scripting.executeScript({
+    target: { tabId },
+    func: (() => (window as any).__fxCastBilibili?.reinject()) as any,
+  });
+  const result = reinjectResult?.result as
+    | { status?: "started" | "debounced"; retryAfterMs?: number }
+    | undefined;
+  if (result?.status === "debounced") {
+    const retryAfterMs = Math.max(0, Number(result.retryAfterMs) || 0) + 25;
+    void bilibiliDebug("Bilibili reinject debounced; retrying", {
+      seq,
+      tabId,
+      retryAfterMs,
+    });
+    await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+    await browser.scripting.executeScript({
+      target: { tabId },
+      func: (() => (window as any).__fxCastBilibili?.reinject()) as any,
+    });
+  }
+  void bilibiliDebug("Bilibili reinject dispatched", {
+    seq,
+    tabId,
+    status: result?.status,
+  });
+}
+
 export async function launchBilibiliSender(tabId: number, quality = 0) {
   const seq = ++bilibiliLaunchSeq;
   const debugEnabled = await options.get("bilibiliDebugEnabled");
@@ -268,15 +296,27 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
       // A cast is already running. Open the receiver selector so the popup can
       // show the running session with a Stop button. The Stop button depends on
       // the owned session id being sent to the popup (getReceiverSelection now
-      // includes connectedSessionIds in the selector's initial state), NOT on
+      // includes connectedTransportIds in the selector's initial state), NOT on
       // availableMediaTypes, so it appears even though the generic path exposes
       // no App media for Bilibili.
       void bilibiliDebug("Bilibili sender already casting; opening selector", {
         seq,
         tabId,
       });
-      await castManager.triggerCast(tabId);
-      void bilibiliDebug("Bilibili casting-branch triggerCast returned", { seq, tabId });
+      try {
+        await castManager.triggerCast(tabId);
+        void bilibiliDebug("Bilibili casting-branch triggerCast returned", {
+          seq,
+          tabId,
+        });
+      } catch (error) {
+        if (!(error instanceof CastInstanceDestroyedError)) throw error;
+        void bilibiliDebug(
+          "Bilibili cast instance disappeared; restarting page sender",
+          { seq, tabId }
+        );
+        await reinjectBilibiliSender(tabId, seq);
+      }
       return;
     }
 
@@ -287,13 +327,7 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
       // (a Cast button) for Bilibili. reinject() is debounced so a popup
       // auto-cast plus a manual click won't fight each other.
       void bilibiliDebug("Bilibili sender idle; re-casting", { seq, tabId });
-      await browser.scripting.executeScript({
-        target: { tabId },
-        func: (() => {
-          (window as any).__fxCastBilibili?.reinject();
-        }) as any,
-      });
-      void bilibiliDebug("Bilibili idle-branch reinject dispatched", { seq, tabId });
+      await reinjectBilibiliSender(tabId, seq);
       return;
     }
 

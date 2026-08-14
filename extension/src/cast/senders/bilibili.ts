@@ -3,8 +3,9 @@ import MediaSender, { type MediaSenderOpts } from "./media";
 
 declare global {
   interface Window {
+    __fxCastBilibiliNavigationInterval?: number;
     __fxCastBilibili?: {
-      reinject: () => void;
+      reinject: () => { status: "started" | "debounced"; retryAfterMs?: number };
       isCasting: () => boolean;
       setQuality: (quality: number) => void;
       setDebug: (enabled: boolean) => void;
@@ -392,8 +393,9 @@ window.__fxCastBilibili = {
       willDebounce: now - lastReinjectAt < 1200,
     });
     if (now - lastReinjectAt < 1200) {
-      debug("re-cast ignored; debounced");
-      return;
+      const retryAfterMs = 1200 - (now - lastReinjectAt);
+      debug("re-cast ignored; debounced", { retryAfterMs });
+      return { status: "debounced", retryAfterMs };
     }
     lastReinjectAt = now;
 
@@ -423,6 +425,7 @@ window.__fxCastBilibili = {
       );
       logger.error("Bilibili re-cast failed", err);
     });
+    return { status: "started" };
   },
 };
 
@@ -437,7 +440,10 @@ void loadCurrentItem(true).catch((err) => {
 
 // Bilibili changes BV/p inside a SPA. Reload the receiver only when the media
 // identity changes; ordinary seeks keep controlling the existing Cast item.
-window.setInterval(() => {
+if (window.__fxCastBilibiliNavigationInterval !== undefined) {
+  window.clearInterval(window.__fxCastBilibiliNavigationInterval);
+}
+window.__fxCastBilibiliNavigationInterval = window.setInterval(() => {
   try {
     const nextKey = pageIdentity().key;
     if (activeKey && nextKey !== activeKey) {
@@ -454,4 +460,14 @@ window.setInterval(() => {
     // Ignore temporary non-video URLs during SPA transitions.
   }
 }, 750);
+window.addEventListener(
+  "pagehide",
+  () => {
+    if (window.__fxCastBilibiliNavigationInterval !== undefined) {
+      window.clearInterval(window.__fxCastBilibiliNavigationInterval);
+      window.__fxCastBilibiliNavigationInterval = undefined;
+    }
+  },
+  { once: true }
+);
 }

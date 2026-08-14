@@ -4,13 +4,26 @@ import { handleCastMessage } from "./components/cast";
 import CastDeviceBrowser from "./components/cast/deviceBrowser";
 import Remote from "./components/cast/remote";
 
-import { startMediaServer, startRemoteMediaServer, stopMediaServer } from "./components/mediaServer";
+import {
+    mediaServerRequestId,
+    startMediaServer,
+    startRemoteMediaServer,
+    stopMediaServer
+} from "./components/mediaServer";
 
 import { applicationVersion } from "../../config.json";
 
 let deviceBrowser: CastDeviceBrowser | null = null;
 const remotes = new Map<string, Remote>();
 let shutdownPromise: Promise<void> | undefined;
+let mediaServerCommandQueue: Promise<void> = Promise.resolve();
+
+function queueMediaServerCommand(command: () => Promise<void>) {
+    mediaServerCommandQueue = mediaServerCommandQueue
+        .catch(err => console.error("Previous media server command failed", err))
+        .then(command);
+    return mediaServerCommandQueue;
+}
 
 function shutdown(exitCode: number) {
     if (shutdownPromise) return shutdownPromise;
@@ -129,31 +142,55 @@ export function run(messaging: Messenger) {
 
             // Media server
             case "bridge:startMediaServer": {
-                const { filePath, port } = message.data;
-                startMediaServer(messaging, filePath, port);
+                const { requestId, filePath, port } = message.data;
+                void queueMediaServerCommand(() =>
+                    startMediaServer(messaging, requestId, filePath, port)
+                );
                 break;
             }
             case "bridge:startRemoteMediaServer": {
-                const { mediaUrl, audioUrl, referer, contentType, port, startTime } = message.data;
+                const {
+                    requestId,
+                    mediaUrl,
+                    audioUrl,
+                    referer,
+                    contentType,
+                    port,
+                    startTime
+                } = message.data;
                 console.error("[fx_cast_bilibili] proxy requested", {
+                    requestId,
                     host: new URL(mediaUrl).hostname,
                     hasSeparateAudio: Boolean(audioUrl),
                     port,
                     startTime
                 });
-                startRemoteMediaServer(
-                    messaging,
-                    mediaUrl,
-                    referer,
-                    contentType,
-                    port,
-                    audioUrl,
-                    startTime
+                void queueMediaServerCommand(() =>
+                    startRemoteMediaServer(
+                        messaging,
+                        requestId,
+                        mediaUrl,
+                        referer,
+                        contentType,
+                        port,
+                        audioUrl,
+                        startTime
+                    )
                 );
                 break;
             }
             case "bridge:stopMediaServer": {
-                stopMediaServer();
+                const { requestId, force } = message.data;
+                void queueMediaServerCommand(async () => {
+                    if (!force && mediaServerRequestId !== requestId) {
+                        console.error(
+                            "[fx_cast_bilibili] ignored stale media server stop",
+                            { requestId, owner: mediaServerRequestId }
+                        );
+                        return;
+                    }
+                    await stopMediaServer();
+                });
                 break;
             }
 

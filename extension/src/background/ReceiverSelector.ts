@@ -55,19 +55,22 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
   private availableMediaTypes?: ReceiverSelectorMediaType;
 
   /**
-   * Session IDs currently connected/owned by this browser. Cached so the very
+   * Transport IDs currently connected/owned by this browser. Cached so the very
    * first popup:update (sent when the popup connects) can tell the popup which
    * receiver is an owned session — this is what makes the Stop button appear
    * immediately, instead of only after a later device-change refresh.
    */
-  private connectedSessionIds: string[] = [];
+  private connectedTransportIds: string[] = [];
 
   private wasReceiverSelected = false;
 
   appInfo?: ReceiverSelectorAppInfo;
   pageInfo?: ReceiverSelectorPageInfo;
 
-  constructor(private isBridgeCompatible: boolean) {
+  constructor(
+    private isBridgeCompatible: boolean,
+    public readonly tabId: number
+  ) {
     super();
 
     this.onConnect = this.onConnect.bind(this);
@@ -96,35 +99,38 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
     availableMediaTypes: ReceiverSelectorMediaType;
     appInfo?: ReceiverSelectorAppInfo;
     pageInfo?: ReceiverSelectorPageInfo;
-    connectedSessionIds?: string[];
+    connectedTransportIds?: string[];
   }) {
     this.appInfo = opts.appInfo;
     this.pageInfo = opts.pageInfo;
     this.devices = opts.devices;
     this.defaultMediaType = opts.defaultMediaType;
     this.availableMediaTypes = opts.availableMediaTypes;
-    this.connectedSessionIds = opts.connectedSessionIds ?? [];
+    this.connectedTransportIds = opts.connectedTransportIds ?? [];
     this.wasReceiverSelected = false;
     this.messagePortDisconnected = true;
     this.messagePort = undefined;
     this.opening = true;
     logger.info("Receiver selector ready in the open extension popup");
-    void browser.runtime.sendMessage({ subject: "receiverSelector:ready" });
+    void browser.runtime.sendMessage({
+      subject: "receiverSelector:ready",
+      data: { tabId: this.tabId },
+    });
   }
 
   /** Updates receiver devices displayed in the receiver selector. */
   public update(
     devices: ReceiverDevice[],
     isBridgeCompatible: boolean,
-    connectedSessionIds: string[]
+    connectedTransportIds: string[]
   ) {
     this.devices = devices;
-    this.connectedSessionIds = connectedSessionIds;
+    this.connectedTransportIds = connectedTransportIds;
     if (!this.messagePort || this.messagePortDisconnected) return;
     try {
       this.messagePort.postMessage({
         subject: "popup:update",
-        data: { devices, isBridgeCompatible, connectedSessionIds },
+        data: { devices, isBridgeCompatible, connectedTransportIds },
       });
     } catch (err) {
       this.messagePortDisconnected = true;
@@ -153,12 +159,12 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
    * sends init data.
    */
   private onConnect(port: Port) {
-    // Keep history state clean
-    browser.history.deleteUrl({ url: POPUP_URL });
-
-    if (port.name !== "popup") {
+    if (port.name !== `popup:${this.tabId}`) {
       return;
     }
+
+    // Keep history state clean only for this selector's matching popup.
+    void browser.history.deleteUrl({ url: POPUP_URL });
 
     this.messagePort?.disconnect();
 
@@ -197,19 +203,14 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
     this.messagePort.postMessage({
       subject: "popup:init",
       data: {
+        tabId: this.tabId,
         appInfo: this.appInfo,
         pageInfo: this.pageInfo,
-      },
-    });
-
-    this.messagePort.postMessage({
-      subject: "popup:update",
-      data: {
         devices: this.devices,
         isBridgeCompatible: this.isBridgeCompatible,
         defaultMediaType: this.defaultMediaType,
         availableMediaTypes: this.availableMediaTypes,
-        connectedSessionIds: this.connectedSessionIds,
+        connectedTransportIds: this.connectedTransportIds,
       },
     });
   }

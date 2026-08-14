@@ -33,8 +33,8 @@
 
     /** Devices to display. */
     let devices: ReceiverDevice[] = [];
-    /** IDs of sessions connected by this extension. */
-    let connectedSessionIds: string[] = [];
+    /** Transport IDs of sessions connected by this extension. */
+    let connectedTransportIds: string[] = [];
 
     /** Sender app info (if available). */
     let appInfo: Optional<ReceiverSelectorAppInfo>;
@@ -111,6 +111,7 @@
     }
 
     let port: Nullable<Port> = null;
+    let popupTabId: number | undefined;
     let hasSelectorContext = false;
     let isPreparingSelector = false;
     let selectionRequiresRefresh = false;
@@ -178,15 +179,28 @@
     }
 
     function connectPopupPort() {
+        if (popupTabId === undefined) return;
         port?.disconnect();
-        port = messaging.connect({ name: "popup" });
+        port = messaging.connect({ name: `popup:${popupTabId}` });
         port.onMessage.addListener(onMessage);
     }
 
-    function onRuntimeMessage(message: { subject?: string }) {
+    function onRuntimeMessage(message: {
+        subject?: string;
+        data?: { tabId?: number };
+    }) {
         popupLog("runtime message", { subject: message?.subject });
         if (message?.subject !== "receiverSelector:ready") return;
-        popupLog("receiverSelector:ready -> reconnecting port");
+        if (message.data?.tabId !== popupTabId) {
+            popupLog("ignored receiverSelector:ready for another tab", {
+                popupTabId,
+                selectorTabId: message.data?.tabId
+            });
+            return;
+        }
+        popupLog("receiverSelector:ready -> reconnecting matching port", {
+            tabId: popupTabId
+        });
         connectPopupPort();
     }
     let resizeObserver = new ResizeObserver(() => fitWindowHeight());
@@ -194,18 +208,34 @@
     window.addEventListener("resize", fitWindowHeight);
 
     onMount(async () => {
-        const stored = await browser.storage.local.get("bilibiliQuality");
-        bilibiliQuality = Number(stored.bilibiliQuality) || 0;
+        // Register before the first await so receiverSelector:ready cannot be
+        // lost while storage or tab state is being read.
         browser.runtime.onMessage.addListener(onRuntimeMessage);
+        const [activeTab, stored] = await Promise.all([
+            browser.tabs.query({ active: true, currentWindow: true }).then(
+                tabs => tabs[0]
+            ),
+            browser.storage.local.get("bilibiliQuality")
+        ]);
+        popupTabId = activeTab?.id;
+        bilibiliQuality = Number(stored.bilibiliQuality) || 0;
         connectPopupPort();
         autoCastTimeoutId = window.setTimeout(() => {
             autoCastTimeoutId = undefined;
             popupLog("auto-cast timer fired", {
                 hasSelectorContext,
                 isPreparingSelector,
-                willAutoCast: !hasSelectorContext && !isPreparingSelector
+                hasConnectedSession: connectedTransportIds.length > 0,
+                willAutoCast:
+                    !hasSelectorContext &&
+                    !isPreparingSelector &&
+                    connectedTransportIds.length === 0
             });
-            if (!hasSelectorContext && !isPreparingSelector) {
+            if (
+                !hasSelectorContext &&
+                !isPreparingSelector &&
+                connectedTransportIds.length === 0
+            ) {
                 void castCurrentTab();
             }
         }, 500);
@@ -265,6 +295,13 @@
     function onMessage(message: Message) {
         switch (message.subject) {
             case "popup:init":
+                if (message.data.tabId !== popupTabId) {
+                    popupLog("ignored popup:init for another tab", {
+                        popupTabId,
+                        selectorTabId: message.data.tabId
+                    });
+                    break;
+                }
                 if (autoCastTimeoutId !== undefined) {
                     window.clearTimeout(autoCastTimeoutId);
                     autoCastTimeoutId = undefined;
@@ -277,6 +314,18 @@
                 hasSelectorContext = true;
                 appInfo = message.data.appInfo;
                 pageInfo = message.data.pageInfo;
+                isBridgeCompatible = message.data.isBridgeCompatible;
+                availableMediaTypes = message.data.availableMediaTypes ?? 0;
+                if (
+                    message.data.defaultMediaType !== undefined &&
+                    availableMediaTypes & message.data.defaultMediaType
+                ) {
+                    mediaType = message.data.defaultMediaType;
+                }
+                devices = message.data.devices;
+                connectedTransportIds = message.data.connectedTransportIds ?? [];
+                if (connectedTransportIds.length > 0) isConnecting = false;
+                updateKnownApp();
                 break;
 
             case "popup:update": {
@@ -284,7 +333,7 @@
                     availableMediaTypes: message.data.availableMediaTypes,
                     defaultMediaType: message.data.defaultMediaType,
                     deviceCount: message.data.devices?.length,
-                    connectedSessionIds: message.data.connectedSessionIds
+                    connectedTransportIds: message.data.connectedTransportIds
                 });
                 isBridgeCompatible = message.data.isBridgeCompatible;
 
@@ -303,9 +352,9 @@
 
                 devices = message.data.devices;
 
-                if (message.data.connectedSessionIds) {
-                    connectedSessionIds = message.data.connectedSessionIds;
-                    if (connectedSessionIds.length > 0) {
+                if (message.data.connectedTransportIds) {
+                    connectedTransportIds = message.data.connectedTransportIds;
+                    if (connectedTransportIds.length > 0) {
                         isConnecting = false;
                     }
                 }
@@ -612,7 +661,7 @@
                         {port}
                         {device}
                         {result}
-                        {connectedSessionIds}
+                        {connectedTransportIds}
                         isMediaTypeAvailable={selectionRequiresRefresh ||
                             isMediaTypeAvailable}
                         isAnyMediaTypeAvailable={(selectionRequiresRefresh ||
@@ -636,7 +685,7 @@
                     {opts}
                     {port}
                     {device}
-                    {connectedSessionIds}
+                    {connectedTransportIds}
                     isMediaTypeAvailable={selectionRequiresRefresh ||
                         isMediaTypeAvailable}
                     isAnyMediaTypeAvailable={(selectionRequiresRefresh ||

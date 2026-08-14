@@ -31,6 +31,16 @@ import { ActionState, updateActionState } from "./action";
 
 type AnyPort = Port | TypedMessagePort<Message>;
 
+export class CastInstanceDestroyedError extends Error {
+  constructor(
+    public readonly tabId: number,
+    public readonly frameId: number
+  ) {
+    super(`Cast instance was destroyed for tab ${tabId}, frame ${frameId}`);
+    this.name = "CastInstanceDestroyedError";
+  }
+}
+
 export interface ContentContext {
   tabId: number;
   frameId: number;
@@ -304,7 +314,7 @@ const allowedContentMessages: Array<Message["subject"]> = [
 /** Chromecast base config to check compatibility with audio devices. */
 let baseConfig: BaseConfig;
 /** Shared receiver selector. */
-let receiverSelector: Optional<ReceiverSelector>;
+const receiverSelectors = new Map<number, ReceiverSelector>();
 
 interface QueuedReceiverSelection {
   selection: ReceiverSelection;
@@ -511,6 +521,7 @@ const castManager = new (class {
     try {
       selection = await getReceiverSelection({ tabId, frameId });
     } catch (err) {
+      if (err instanceof CastInstanceDestroyedError) throw err;
       logger.error("Failed to get receiver selection (triggerCast)", err);
       return;
     }
@@ -639,8 +650,11 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
 
       // Handle trusted instance receiver selection bypass
       if (receiverDevice) {
-        if (receiverSelector?.isOpen && instance.contentContext) {
-          receiverSelector.pageInfo = {
+        const contextSelector = instance.contentContext
+          ? receiverSelectors.get(instance.contentContext.tabId)
+          : undefined;
+        if (contextSelector?.isOpen && instance.contentContext) {
+          contextSelector.pageInfo = {
             ...instance.contentContext,
             url: (
               await browser.webNavigation.getFrame({
@@ -900,31 +914,34 @@ async function getReceiverSelection(selectionOpts: {
   frameId?: number;
   castInstance?: CastInstance;
 }): Promise<ReceiverSelection | null> {
+  // Normalize the context before the first await and remember whether this
+  // request started with a live page Cast instance. If that instance vanishes
+  // while options/frame data is loading, do not open a generic selector.
+  const initialInstance = selectionOpts.castInstance;
+  if (
+    selectionOpts.tabId === undefined &&
+    initialInstance?.contentContext
+  ) {
+    selectionOpts.tabId = initialInstance.contentContext.tabId;
+    selectionOpts.frameId = initialInstance.contentContext.frameId;
+  }
+  if (selectionOpts.frameId === undefined) selectionOpts.frameId = 0;
+  const instanceAtEntry =
+    initialInstance ??
+    (selectionOpts.tabId !== undefined
+      ? castManager.getInstanceAt(selectionOpts.tabId, selectionOpts.frameId)
+      : undefined);
+
   /**
    * If the current context is running the mirroring app, pretend
    * it doesn't exist because it shouldn't be launched like this.
    */
-  if (
-    selectionOpts.castInstance?.apiConfig?.sessionRequest.appId ===
-    (await options.get("mirroringAppId"))
-  ) {
-    selectionOpts.castInstance = undefined;
-  }
+  const ignorePageInstance =
+    initialInstance?.apiConfig?.sessionRequest.appId ===
+    (await options.get("mirroringAppId"));
 
   let defaultMediaType = ReceiverSelectorMediaType.Screen;
   let availableMediaTypes = ReceiverSelectorMediaType.Screen;
-
-  // Default frame ID
-  if (selectionOpts.frameId === undefined) selectionOpts.frameId = 0;
-
-  // Fallback to instance context
-  if (
-    selectionOpts.tabId === undefined &&
-    selectionOpts.castInstance?.contentContext
-  ) {
-    selectionOpts.tabId = selectionOpts.castInstance.contentContext.tabId;
-    selectionOpts.frameId = selectionOpts.castInstance.contentContext.frameId;
-  }
 
   const opts = await options.getAll();
 
@@ -933,7 +950,6 @@ async function getReceiverSelection(selectionOpts: {
    * that context.
    */
   if (
-    !selectionOpts.castInstance &&
     selectionOpts.tabId !== undefined &&
     selectionOpts.frameId !== undefined
   ) {
@@ -941,11 +957,19 @@ async function getReceiverSelection(selectionOpts: {
       selectionOpts.tabId,
       selectionOpts.frameId
     );
-
-    // Ignore extension senders
-    if (!contextInstance?.isTrusted) {
-      selectionOpts.castInstance = contextInstance;
+    if (instanceAtEntry && contextInstance !== instanceAtEntry) {
+      throw new CastInstanceDestroyedError(
+        selectionOpts.tabId,
+        selectionOpts.frameId
+      );
     }
+
+    // Preserve the exact active instance that initiated requestSession,
+    // including trusted page senders such as Bilibili. Trust only controls
+    // receiver-selection bypass; it does not make an App selector generic.
+    selectionOpts.castInstance = ignorePageInstance
+      ? undefined
+      : contextInstance;
   }
 
   let pageInfo: Optional<ReceiverSelectorPageInfo>;
@@ -1039,36 +1063,42 @@ async function getReceiverSelection(selectionOpts: {
       appInfoPresent: Boolean(appInfo),
       t: Date.now(),
     };
-    if (receiverSelector?.isOpen) {
+    const selectorTabId = selectionOpts.tabId ?? -1;
+    const previousSelector = receiverSelectors.get(selectorTabId);
+    if (previousSelector?.isOpen) {
       logger.info(
-        "getReceiverSelection: CLOSING already-open selector before opening a new one",
+        "getReceiverSelection: closing selector for the same tab before replacement",
         selectionContext
       );
-      await receiverSelector.close();
+      await previousSelector.close();
     } else {
-      logger.info("getReceiverSelection: no open selector to close", selectionContext);
+      logger.info("getReceiverSelection: no same-tab selector to close", selectionContext);
     }
-    receiverSelector = createSelector();
+    const selector = createSelector(selectorTabId);
+    receiverSelectors.set(selectorTabId, selector);
 
     // Handle selected return value
     const onSelected = (ev: CustomEvent<ReceiverSelection>) =>
       resolve(ev.detail);
-    receiverSelector.addEventListener("selected", onSelected);
+    selector.addEventListener("selected", onSelected);
 
     // Handle cancelled return value
     const onCancelled = () => resolve(null);
-    receiverSelector.addEventListener("cancelled", onCancelled);
+    selector.addEventListener("cancelled", onCancelled);
 
     const onError = (ev: CustomEvent<string>) => reject(ev.detail);
-    receiverSelector.addEventListener("error", onError);
+    selector.addEventListener("error", onError);
 
-    // Cleanup listeners
-    receiverSelector.addEventListener(
+    // Cleanup listeners and remove only this tab's exact selector instance.
+    selector.addEventListener(
       "close",
       () => {
-        receiverSelector?.removeEventListener("selected", onSelected);
-        receiverSelector?.removeEventListener("cancelled", onCancelled);
-        receiverSelector?.removeEventListener("error", onError);
+        selector.removeEventListener("selected", onSelected);
+        selector.removeEventListener("cancelled", onCancelled);
+        selector.removeEventListener("error", onError);
+        if (receiverSelectors.get(selectorTabId) === selector) {
+          receiverSelectors.delete(selectorTabId);
+        }
       },
       { once: true }
     );
@@ -1089,20 +1119,22 @@ async function getReceiverSelection(selectionOpts: {
     // Include currently-owned session IDs so the popup can show the Stop
     // button for an active session as soon as it connects (e.g. clicking the
     // extension while a Bilibili cast is already running).
-    const connectedSessionIds: string[] = [];
+    const connectedTransportIds: string[] = [];
     for (const instance of activeInstances) {
+      // CastSession exposes sessionId; the current receiver protocol uses
+      // that same value as the application's transportId.
       if (instance.session?.sessionId) {
-        connectedSessionIds.push(instance.session.sessionId);
+        connectedTransportIds.push(instance.session.sessionId);
       }
     }
-    void receiverSelector
+    void selector
       .open({
         devices,
         defaultMediaType,
         availableMediaTypes,
         appInfo,
         pageInfo,
-        connectedSessionIds,
+        connectedTransportIds,
       })
       .then(() => logger.info("Receiver selector opened"))
       .catch((err) => {
@@ -1118,28 +1150,33 @@ async function getReceiverSelection(selectionOpts: {
 
 /** Pushes the current device/session state to the receiver selector. */
 function refreshReceiverSelector() {
-  if (!receiverSelector) return;
-  const connectedSessionIds: string[] = [];
+  if (receiverSelectors.size === 0) return;
+  const connectedTransportIds: string[] = [];
   for (const instance of activeInstances) {
+    // CastSession exposes sessionId; the current receiver protocol uses
+    // that same value as the application's transportId.
     if (instance.session?.sessionId) {
-      connectedSessionIds.push(instance.session.sessionId);
+      connectedTransportIds.push(instance.session.sessionId);
     }
   }
-  receiverSelector.update(
-    deviceManager.getDevices(),
-    deviceManager.getBridgeInfo()?.isVersionCompatible ?? false,
-    connectedSessionIds
-  );
+  for (const selector of receiverSelectors.values()) {
+    selector.update(
+      deviceManager.getDevices(),
+      deviceManager.getBridgeInfo()?.isVersionCompatible ?? false,
+      connectedTransportIds
+    );
+  }
 }
 
 /**
  * Creates new ReceiverSelector object and adds listeners for
  * updates/messages.
  */
-function createSelector() {
-  // Get a new selector for each selection
+function createSelector(tabId: number) {
+  // Get a new selector for each tab-scoped selection.
   const selector = new ReceiverSelector(
-    deviceManager.getBridgeInfo()?.isVersionCompatible ?? false
+    deviceManager.getBridgeInfo()?.isVersionCompatible ?? false,
+    tabId
   );
 
   /**
@@ -1147,14 +1184,26 @@ function createSelector() {
    * (if applicable).
    */
   const onStop = (ev: CustomEvent<{ deviceId: string }>) => {
-    const castInstance = castManager.getInstanceByDeviceId(ev.detail.deviceId);
+    const tabInstance = castManager.getInstanceAt(selector.tabId);
+    const castInstance =
+      tabInstance?.session?.deviceId === ev.detail.deviceId
+        ? tabInstance
+        : castManager.getInstanceByDeviceId(ev.detail.deviceId);
     if (!castInstance) return;
+
+    logger.info("Routing receiver Stop", {
+      selectorTabId: selector.tabId,
+      instanceTabId: castInstance.contentContext?.tabId,
+      deviceId: ev.detail.deviceId,
+      usedDeviceFallback: castInstance !== tabInstance,
+    });
 
     const device = deviceManager.getDeviceById(ev.detail.deviceId);
     if (!device) return;
 
     castInstance.session?.bridgePort.postMessage({
       subject: "bridge:stopMediaServer",
+      data: { force: true },
     });
     castInstance.contentPort.postMessage({
       subject: "cast:receiverAction",

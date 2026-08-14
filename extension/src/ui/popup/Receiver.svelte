@@ -35,7 +35,7 @@
 
   /** Device to display. */
   export let device: ReceiverDevice;
-  export let connectedSessionIds: string[];
+  export let connectedTransportIds: string[];
 
   /** Result object if this receiver is displayed in a search results list. */
   export let result: Nullable<Fuzzysort.KeyResult<ReceiverDevice>> = null;
@@ -47,7 +47,7 @@
   /** Current media status (if available) */
   $: mediaStatus = device.mediaStatus;
   $: isOwnedSession = Boolean(
-    application && connectedSessionIds.includes(application.transportId)
+    application && connectedTransportIds.includes(application.transportId)
   );
 
   /**
@@ -126,7 +126,7 @@
     // And auto-expansion is enabled
     opts?.receiverSelectorExpandActive
   ) {
-    isExpanded = connectedSessionIds.includes(application.transportId);
+    isExpanded = connectedTransportIds.includes(application.transportId);
   }
 
   /** Whether a session request is in progress for this receiver. */
@@ -172,7 +172,7 @@
       isIdleScreen: application?.isIdleScreen ?? null,
       isOwnedSession,
       transportId: application?.transportId ?? null,
-      connectedSessionIds,
+      connectedTransportIds,
       playerState: mediaStatus?.playerState ?? null,
       isConnecting,
       isAnyMediaTypeAvailable,

@@ -44,14 +44,20 @@ import type { ReceiverAction } from "./cast/sdk/enums";
 type ExtensionMessageDefinitions = {
   /** Initial data to send to selector popup. */
   "popup:init": {
+    tabId: number;
     appInfo?: ReceiverSelectorAppInfo;
     pageInfo?: ReceiverSelectorPageInfo;
+    devices: ReceiverDevice[];
+    isBridgeCompatible: boolean;
+    connectedTransportIds?: string[];
+    defaultMediaType?: ReceiverSelectorMediaType;
+    availableMediaTypes?: ReceiverSelectorMediaType;
   };
   /** Updates selector popup with new data. */
   "popup:update": {
     devices: ReceiverDevice[];
     isBridgeCompatible: boolean;
-    connectedSessionIds?: string[];
+    connectedTransportIds?: string[];
     defaultMediaType?: ReceiverSelectorMediaType;
     availableMediaTypes?: ReceiverSelectorMediaType;
   };
@@ -268,10 +274,12 @@ type BridgeMessageDefinitions = {
    * path on the given port.
    */
   "bridge:startMediaServer": {
+    requestId: string;
     filePath: string;
     port: number;
   };
   "bridge:startRemoteMediaServer": {
+    requestId: string;
     mediaUrl: string;
     audioUrl?: string;
     referer: string;
@@ -284,6 +292,7 @@ type BridgeMessageDefinitions = {
    * to serve files.
    */
   "mediaCast:mediaServerStarted": {
+    requestId: string;
     mediaPath: string;
     subtitlePaths: string[];
     localAddress: string;
@@ -292,21 +301,23 @@ type BridgeMessageDefinitions = {
      *  playlist is actually padded to (diagnostics). */
     startTime?: number;
     padBaseSeconds?: number;
+    /** Full source duration reported by ffprobe when available. */
+    pageDuration?: number;
   };
   /**
    * Sent to bridge to stop HTTP media server.
    */
-  "bridge:stopMediaServer": undefined;
+  "bridge:stopMediaServer": { requestId?: string; force?: boolean };
   /**
    * Sent to media sender from bridge when the media server has
    * stopped.
    */
-  "mediaCast:mediaServerStopped": undefined;
+  "mediaCast:mediaServerStopped": { requestId: string };
   /**
    * Sent to media sender from bridge when the media server has
    * encountered an error.
    */
-  "mediaCast:mediaServerError": string;
+  "mediaCast:mediaServerError": { requestId: string; message: string };
 };
 
 type MessageDefinitions = ExtensionMessageDefinitions &

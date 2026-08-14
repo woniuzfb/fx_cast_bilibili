@@ -11,7 +11,7 @@ import CastSDK from "./sdk";
 
 export type CastPort = TypedMessagePort<Message>;
 
-let existingPort: CastPort;
+let existingPort: CastPort | undefined;
 let existingInstance = new CastSDK();
 
 export default existingInstance;
@@ -69,14 +69,25 @@ export function ensureInit(opts?: EnsureInitOpts): Promise<CastPort> {
         }
 
         const managerPort = messaging.connect({ name: "trusted-cast" });
+        let initSettled = false;
+        const resolveInit = () => {
+            if (initSettled) return;
+            initSettled = true;
+            resolve(pageMessaging.page.messagePort);
+        };
+        const rejectInit = (error?: unknown) => {
+            if (initSettled) return;
+            initSettled = true;
+            reject(error);
+        };
 
         // Cast manager -> cast instance
         managerPort.onMessage.addListener(message => {
             if (message.subject === "cast:instanceCreated") {
                 if (message.data.isAvailable) {
-                    resolve(pageMessaging.page.messagePort);
+                    resolveInit();
                 } else {
-                    reject();
+                    rejectInit(new Error("Cast instance unavailable"));
                 }
             }
 
@@ -96,11 +107,16 @@ export function ensureInit(opts?: EnsureInitOpts): Promise<CastPort> {
             managerPort.postMessage(message);
         });
 
+        const openedPort = pageMessaging.page.messagePort;
         managerPort.onDisconnect.addListener(() => {
             pageMessaging.extension.close();
+            if (existingPort === openedPort) existingPort = undefined;
+            rejectInit(
+                new Error("Cast background connection closed during initialization")
+            );
         });
 
-        existingPort = pageMessaging.page.messagePort;
+        existingPort = openedPort;
     });
 }
 
