@@ -197,10 +197,15 @@ type MessageListener = (namespace: string, message: string) => void;
 type UpdateListener = (isAlive: boolean) => void;
 type SendMessageCallback = [(() => void)?, ((err: CastError) => void)?];
 
+interface PendingMediaLoad {
+    previousMediaSessionIds: Set<number>;
+    successCallback?: (media: Media) => void;
+    errorCallback?: (err: CastError) => void;
+    accepted: boolean;
+}
+
 export default class Session {
-    #loadMediaRequest?: LoadRequest;
-    #loadMediaSuccessCallback?: (media: Media) => void;
-    #loadMediaErrorCallback?: (err: CastError) => void;
+    #pendingMediaLoad?: PendingMediaLoad;
 
     get #messageListeners() {
         const messageListeners = sessionMessageListeners.get(this);
@@ -262,6 +267,19 @@ export default class Session {
         this.addMessageListener(NS_MEDIA, this.#mediaMessageListener);
     }
 
+    #resolvePendingMediaLoad() {
+        const pending = this.#pendingMediaLoad;
+        if (!pending?.accepted) return;
+
+        const newMedia = this.media.find(
+            media => !pending.previousMediaSessionIds.has(media.mediaSessionId)
+        );
+        if (!newMedia) return;
+
+        this.#pendingMediaLoad = undefined;
+        pending.successCallback?.(newMedia);
+    }
+
     #mediaMessageListener = (namespace: string, messageString: string) => {
         if (namespace !== NS_MEDIA) return;
         const message: ReceiverMediaMessage = JSON.parse(messageString);
@@ -284,11 +302,15 @@ export default class Session {
             }
         }
 
-        // Handle media request responses
+        // A LOAD response can first carry only the old media session's
+        // INTERRUPTED status. Marking the transport request accepted is not
+        // enough to resolve Session#loadMedia; wait until a genuinely new
+        // mediaSessionId has appeared.
         const mediaRequest = this.#mediaRequests.get(message.requestId);
         if (mediaRequest) {
             mediaRequest.successCallback();
         }
+        this.#resolvePendingMediaLoad();
 
         for (const status of message.status) {
             const media = this.media.find(
@@ -377,15 +399,28 @@ export default class Session {
             return;
         }
 
-        this.#loadMediaSuccessCallback = successCallback;
-        this.#loadMediaErrorCallback = errorCallback;
+        const pending: PendingMediaLoad = {
+            previousMediaSessionIds: new Set(
+                this.media.map(media => media.mediaSessionId)
+            ),
+            successCallback,
+            errorCallback,
+            accepted: false
+        };
+        this.#pendingMediaLoad = pending;
 
         loadRequest.sessionId = this.sessionId;
         this.#sendMediaMessage(loadRequest)
             .then(() => {
-                successCallback?.(this.media[this.media.length - 1]);
+                if (this.#pendingMediaLoad !== pending) return;
+                pending.accepted = true;
+                this.#resolvePendingMediaLoad();
             })
-            .catch(errorCallback);
+            .catch(err => {
+                if (this.#pendingMediaLoad !== pending) return;
+                this.#pendingMediaLoad = undefined;
+                errorCallback?.(err);
+            });
     }
 
     queueLoad(

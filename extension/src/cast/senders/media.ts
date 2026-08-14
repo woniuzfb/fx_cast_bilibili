@@ -669,7 +669,8 @@ export default class MediaSender {
       });
     }
 
-    this.session.loadMedia(
+    const activeSession = this.session;
+    activeSession.loadMedia(
       loadRequest,
       (media) => {
         if (this.stopped || loadId !== this.dashLoadId) {
@@ -694,6 +695,18 @@ export default class MediaSender {
           // for DASH seek reloads, and re-attaching without detaching would
           // stack duplicate listeners and sync intervals.
           this.suspendMediaElementSync();
+          if (this.isDashRemux && activeSession.media.length > 2) {
+            // Session#loadMedia now resolves only after the new mediaSessionId
+            // appears. Keep that current Media plus one generation of history
+            // for late receiver statuses, and let WeakMap state follow normal
+            // garbage collection once older objects become unreachable.
+            activeSession.media = activeSession.media.slice(-2);
+            this.debug?.("compacted DASH media history", {
+              retainedMediaSessionIds: activeSession.media.map(
+                item => item.mediaSessionId
+              ),
+            });
+          }
           this.debug?.("media element synchronization enabled");
           this.addMediaElementListeners(this.mediaElement);
         } else if (!this.forwardPageControls) {
@@ -1149,8 +1162,13 @@ export default class MediaSender {
         window.removeEventListener("pointerup", markGesture, true);
         window.removeEventListener("keydown", markGesture, true);
       }
-      listenerMedia?.removeUpdateListener(onMediaUpdate);
-      window.clearInterval(syncIntervalId);
+      try {
+        listenerMedia?.removeUpdateListener(onMediaUpdate);
+      } catch (err) {
+        logger.error("Failed to detach media update listener", err);
+      } finally {
+        window.clearInterval(syncIntervalId);
+      }
       this.debug?.("old page controls detached");
     };
     this.debug?.("page-to-receiver controls attached");
