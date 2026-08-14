@@ -75,7 +75,7 @@ export default class CastClient {
                 } else {
                     try {
                         this.client.close();
-                    } catch {}
+                    } catch { /* already closed */ }
                 }
             });
 

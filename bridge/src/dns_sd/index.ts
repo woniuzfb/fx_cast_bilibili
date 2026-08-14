@@ -13,6 +13,7 @@ if ((process as any).pkg) {
     );
     native = native.exports;
 } else {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- conditional CJS load
     native = require("bindings")("dns_sd");
 }
 

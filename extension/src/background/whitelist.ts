@@ -246,7 +246,7 @@ async function registerSiteWhitelist() {
         await browser.scripting.unregisterContentScripts({
             ids: ["whitelist-content"]
         });
-    } catch {}
+    } catch { /* not registered yet */ }
     await browser.scripting.registerContentScripts([
         {
             id: "whitelist-content",
@@ -270,5 +270,5 @@ async function unregisterSiteWhitelist() {
         await browser.scripting.unregisterContentScripts({
             ids: ["whitelist-content"]
         });
-    } catch {}
+    } catch { /* not registered yet */ }
 }

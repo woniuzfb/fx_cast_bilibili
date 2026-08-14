@@ -13,8 +13,6 @@ import type {
 } from "../cast/sdk/types";
 import { PlayerState } from "../cast/sdk/media/enums";
 
-import { ActionState, updateActionState } from "./action";
-
 interface EventMap {
     deviceUp: { deviceInfo: ReceiverDevice };
     deviceDown: { deviceId: string };

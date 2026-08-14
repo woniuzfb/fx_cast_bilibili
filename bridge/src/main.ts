@@ -6,7 +6,7 @@ import yargs from "yargs";
 import type { DaemonOpts } from "./daemon";
 
 import { applicationName, applicationVersion } from "../config.json";
-import { Messenger, StdioMessenger } from "./bridge/messaging";
+import { StdioMessenger } from "./bridge/messaging";
 
 const argv = yargs()
     .scriptName(applicationName)

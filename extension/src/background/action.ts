@@ -1,5 +1,4 @@
 import logger from "../lib/logger";
-import castManager from "./castManager";
 
 const _ = browser.i18n.getMessage;
 

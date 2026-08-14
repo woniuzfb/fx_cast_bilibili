@@ -99,7 +99,7 @@ export class LoadRequest {
     media: MediaInfo;
     requestId = 0;
     sessionId: Nullable<string> = null;
-    type: "LOAD" = "LOAD";
+    type = "LOAD" as const;
 
     constructor(mediaInfo: MediaInfo) {
         this.media = mediaInfo;

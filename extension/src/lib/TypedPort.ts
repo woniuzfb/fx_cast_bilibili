@@ -4,8 +4,10 @@
 export interface TypedPort<T>
     extends Omit<
         browser.runtime.Port,
-        "onDisconnect" | "onMessage" | "postMessage"
+        "onDisconnect" | "onMessage" | "postMessage" | "error"
     > {
+    // The runtime delivers a plain object, not an Error instance.
+    error?: { message: string };
     onDisconnect: {
         addListener(cb: (port: TypedPort<T>) => void): void | Promise<void>;
         removeListener(cb: (port: TypedPort<T>) => void): void | Promise<void>;

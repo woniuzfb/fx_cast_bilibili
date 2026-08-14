@@ -1,7 +1,6 @@
 import logger from "../lib/logger";
 import options from "../lib/options";
 
-import * as menuIds from "../menuIds";
 import { MenuId } from "../menuIds";
 
 import castManager from "./castManager";

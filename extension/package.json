@@ -5,7 +5,7 @@
         "package": "node bin/build.js --package",
         "watch": "node bin/build.js --watch",
         "start": "web-ext run -s ../dist/extension/",
-        "lint": "eslint src --ext .ts,.tsx"
+        "lint": "node ../node_modules/eslint/bin/eslint.js src --ext .ts,.js,.svelte"
     },
     "devDependencies": {
         "@types/firefox-webext-browser": "^143.0.0",

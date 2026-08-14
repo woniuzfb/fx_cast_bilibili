@@ -1,13 +1,10 @@
 import http from "http";
 import https from "https";
-import { ChildProcess, spawn } from "child_process";
-import { Readable, Writable } from "stream";
 import * as bridge from "./bridge";
 
 import chalk from "chalk";
 import WebSocket from "ws";
 
-import { DecodeTransform, EncodeTransform } from "./transforms.js";
 import { WebsocketMessenger } from "./bridge/messaging";
 
 // Ensure child processes are killed on exit

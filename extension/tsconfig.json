@@ -2,6 +2,7 @@
     "extends": "../tsconfig",
     "compilerOptions": {
         "lib": ["ESNext", "DOM", "DOM.Iterable"],
+        "skipLibCheck": true,
         "moduleResolution": "node",
         "sourceMap": true,
         "module": "esnext"

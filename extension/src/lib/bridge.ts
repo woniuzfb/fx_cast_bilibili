@@ -65,8 +65,6 @@ const getInfo = () =>
 
         let applicationVersion: string;
         try {
-            const { version } = browser.runtime.getManifest();
-
             applicationVersion = await nativeMessaging.sendNativeMessage(
                 applicationName,
                 { subject: "bridge:/getInfo" }

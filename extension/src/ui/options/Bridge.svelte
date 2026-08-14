@@ -140,6 +140,8 @@
     async function checkUpdate() {
         updateStatus = _("optionsBridgeUpdateStatusNoUpdates");
         return;
+        // Update check disabled for this fork; logic kept for reference.
+        // eslint-disable-next-line no-unreachable
         isCheckingUpdate = true;
 
         try {

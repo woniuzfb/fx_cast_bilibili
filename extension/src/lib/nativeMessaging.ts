@@ -151,14 +151,14 @@ export function connectNative(application: string): Port {
         }
     });
 
-    port.onMessage.addListener((message: Message) => {
+    port.onMessage.addListener(message => {
         if (!isNativeHostReady) {
             isNativeHostReady = true;
             backupMessageQueue = [];
         }
 
         for (const listener of messageListeners) {
-            listener(message);
+            listener(message as Message);
         }
     });
 

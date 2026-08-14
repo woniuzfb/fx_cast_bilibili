@@ -181,7 +181,7 @@ export default class Session extends CastClient {
                     appId: this.appId
                 });
             })
-            .catch(() => {});
+            .catch(() => { /* launch retried on next connect */ });
 
         // Handle client connection closed
         this.client.on("close", () => {

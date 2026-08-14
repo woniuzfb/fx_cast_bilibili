@@ -1,6 +1,5 @@
 import logger from "../lib/logger";
 import messaging, { type Port, type Message } from "../messaging";
-import options from "../lib/options";
 import { TypedEventTarget } from "../lib/TypedEventTarget";
 
 import type { SenderMediaMessage, SenderMessage } from "../cast/sdk/types";

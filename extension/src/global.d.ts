@@ -1,5 +1,16 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
+// Svelte components are compiled separately by esbuild-svelte.
+declare module "*.svelte" {
+    import type { SvelteComponent } from "svelte";
+
+    const Component: new (options: {
+        target: Element | ShadowRoot;
+    }) => SvelteComponent;
+
+    export default Component;
+}
+
 declare const BRIDGE_VERSION: string;
 declare const BRIDGE_NAME: string;
 declare const MIRRORING_APP_ID: string;

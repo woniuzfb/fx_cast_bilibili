@@ -189,7 +189,6 @@
         popupLog("receiverSelector:ready -> reconnecting port");
         connectPopupPort();
     }
-    let browserWindow: Nullable<browser.windows.Window> = null;
     let resizeObserver = new ResizeObserver(() => fitWindowHeight());
 
     window.addEventListener("resize", fitWindowHeight);
@@ -210,8 +209,6 @@
                 void castCurrentTab();
             }
         }, 500);
-
-        browserWindow = await browser.windows.getCurrent();
 
         opts = await options.getAll();
         options.addEventListener("changed", async ev => {

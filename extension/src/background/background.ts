@@ -13,7 +13,7 @@ import { initAction } from "./action";
 import { initMenus, launchBilibiliSender } from "./menus";
 import { initWhitelist } from "./whitelist";
 import { initBleRemote } from "./bleRemote";
-import { cacheUaInfo, getChromeUserAgentString } from "../lib/userAgents";
+import { cacheUaInfo } from "../lib/userAgents";
 
 const _ = browser.i18n.getMessage;
 

@@ -34,54 +34,63 @@ async function controlActiveBilibiliTab(action: BleRemoteAction) {
         1,
         Number(await options.get("bleRemoteSeekForwardSeconds")) || 30
     );
+    // @types/firefox-webext-browser types the injected func as returning
+    // void, but Firefox delivers its return value via InjectionResult.
+    const injectedControl = (
+        remoteAction: BleRemoteAction,
+        seekBackwardSeconds: number,
+        seekForwardSeconds: number
+    ): {
+        target: string;
+        result: string;
+        currentTime?: number;
+        paused?: boolean;
+    } => {
+        const castApi = (window as any).__fxCastBilibili;
+        if (castApi?.isCasting?.()) {
+            return {
+                target: "page-sync",
+                result: castApi.controlFromBleRemote?.(
+                    remoteAction,
+                    seekBackwardSeconds,
+                    seekForwardSeconds
+                )
+                    ? "applied"
+                    : "rejected"
+            };
+        }
+
+        const videos = Array.from(document.querySelectorAll("video"));
+        const video = videos.sort((left, right) => {
+            const l = left.getBoundingClientRect();
+            const r = right.getBoundingClientRect();
+            return r.width * r.height - l.width * l.height;
+        })[0];
+        if (!video) return { target: "page", result: "no-video" };
+        switch (remoteAction) {
+            case "seek_backward":
+                video.currentTime = Math.max(0, video.currentTime - seekBackwardSeconds);
+                break;
+            case "seek_forward": {
+                const target = video.currentTime + seekForwardSeconds;
+                video.currentTime = Number.isFinite(video.duration)
+                    ? Math.min(video.duration, target) : target;
+                break;
+            }
+            case "pause": video.pause(); break;
+            case "play": void video.play(); break;
+        }
+        return {
+            target: "page",
+            result: "applied",
+            currentTime: video.currentTime,
+            paused: video.paused
+        };
+    };
+
     const results = await browser.scripting.executeScript({
         target: { tabId: tab.id },
-        func: (
-            remoteAction: BleRemoteAction,
-            seekBackwardSeconds: number,
-            seekForwardSeconds: number
-        ) => {
-            const castApi = (window as any).__fxCastBilibili;
-            if (castApi?.isCasting?.()) {
-                return {
-                    target: "page-sync",
-                    result: castApi.controlFromBleRemote?.(
-                        remoteAction,
-                        seekBackwardSeconds,
-                        seekForwardSeconds
-                    )
-                        ? "applied"
-                        : "rejected"
-                };
-            }
-
-            const videos = Array.from(document.querySelectorAll("video"));
-            const video = videos.sort((left, right) => {
-                const l = left.getBoundingClientRect();
-                const r = right.getBoundingClientRect();
-                return r.width * r.height - l.width * l.height;
-            })[0];
-            if (!video) return { target: "page", result: "no-video" };
-            switch (remoteAction) {
-                case "seek_backward":
-                    video.currentTime = Math.max(0, video.currentTime - seekBackwardSeconds);
-                    break;
-                case "seek_forward": {
-                    const target = video.currentTime + seekForwardSeconds;
-                    video.currentTime = Number.isFinite(video.duration)
-                        ? Math.min(video.duration, target) : target;
-                    break;
-                }
-                case "pause": video.pause(); break;
-                case "play": void video.play(); break;
-            }
-            return {
-                target: "page",
-                result: "applied",
-                currentTime: video.currentTime,
-                paused: video.paused
-            };
-        },
+        func: injectedControl as unknown as (...args: unknown[]) => void,
         args: [action, backwardSeconds, forwardSeconds]
     });
     await debugLog("action handled", { action, tabId: tab.id, results });
