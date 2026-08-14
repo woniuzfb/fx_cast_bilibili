@@ -3,7 +3,7 @@
      align="right"
      width="462">
 
-# fx_cast
+# fx_cast_bilibili
 
 A Firefox extension that implements the Chromecast API and exposes it to web apps to enable cast support. Communication with receiver devices is handled by a companion application (bridge).
 
@@ -25,7 +25,7 @@ The bridge application is currently supported on Windows, macOS and Linux.
 > These packages are maintained by third parties and any issues specfic to these packages should be directed to the respective package maintainers.
 
 -   **macOS (Homebrew cask)**
-    -   `fx-cast-bridge` — https://formulae.brew.sh/cask/fx-cast-bridge  
+    -   `fx-cast-bridge` — https://formulae.brew.sh/cask/fx-cast-bridge
         Install by running `brew install --cask fx-cast-bridge`.
 -   **Arch Linux (AUR)**
     -   `fx_cast-bin` — https://aur.archlinux.org/packages/fx_cast-bin
@@ -100,9 +100,9 @@ $ npm run remove-manifest
 
 This will build the extension and bridge, outputting to `dist/`:
 
--   `dist/bridge/`  
+-   `dist/bridge/`
      ... contains the built bridge with launcher script and manifest (with the path pointing that script). The `install-manifest` npm script copies this manifest to the proper location (or adds its current location to the registry on Windows).
--   `dist/extension/`  
+-   `dist/extension/`
      ... contains the unpacked extension.
 
 Watching extension changes:
@@ -135,22 +135,22 @@ $ npm run package:bridge -- -- --arch=x86
 
 Extension build script (`build:extension`) arguments:
 
--   `--watch`  
+-   `--watch`
      Rebuild on changes. Incompatible with `--package`.
--   `--package`  
+-   `--package`
      Package with web-ext.
--   `--mode` `"development"`, `"production"`  
+-   `--mode` `"development"`, `"production"`
      Sets build mode. Defaults to `development` unless packaging.
 
 Bridge build script (`build:bridge`) arguments:
 
--   `--package`  
+-   `--package`
     Builds and creates installer packages for distribution.
--   `--package-type` `"deb"`, `"rpm"`  
+-   `--package-type` `"deb"`, `"rpm"`
      Linux installer package type.
--   `--use-pkg`  
+-   `--use-pkg`
      Create single binary with pkg.
--   `--arch` `"x64"`, `"x86"`, `"arm64"`  
+-   `--arch` `"x64"`, `"x86"`, `"arm64"`
      Select platform arch to build for. Defaults to current arch.
 
     | Platform  | Supported Architectures |
@@ -167,9 +167,9 @@ Build and package extension and bridge application for current platform:
 $ npm run package
 ```
 
--   `dist/bridge/`  
-     ... contains the installer package: `fx_cast_bridge-<version>-<arch>.(pkg|deb|rpm|exe)`
--   `dist/extension/`  
+-   `dist/bridge/`
+     ... contains the installer package: `fx_cast_bilibili_bridge-<version>-<arch>.(pkg|deb|rpm|exe)`
+-   `dist/extension/`
      ... contains the built extension archive: `fx_cast-<version>.xpi`.
 
 Packaging examples:

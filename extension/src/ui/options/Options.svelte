@@ -329,6 +329,48 @@
             </div>
         </OptionsCategory>
 
+        <OptionsCategory
+            name={_("optionsBleRemoteCategoryName")}
+            description={_("optionsBleRemoteCategoryDescription")}
+        >
+            <Option
+                id="bleRemoteEnabled"
+                label={_("optionsBleRemoteEnabled")}
+                description={_("optionsBleRemoteEnabledDescription")}
+                type="checkbox"
+                bind:checked={opts.bleRemoteEnabled}
+                inline
+            />
+            <Option
+                id="bleRemoteUrl"
+                label={_("optionsBleRemoteUrl")}
+                description={_("optionsBleRemoteUrlDescription")}
+                type="url"
+                required
+                bind:value={opts.bleRemoteUrl}
+            />
+            <Option
+                id="bleRemoteSeekBackwardSeconds"
+                label={_("optionsBleRemoteSeekBackwardSeconds")}
+                description={_("optionsBleRemoteSeekBackwardSecondsDescription")}
+                type="number"
+                required
+                min="1"
+                step="1"
+                bind:value={opts.bleRemoteSeekBackwardSeconds}
+            />
+            <Option
+                id="bleRemoteSeekForwardSeconds"
+                label={_("optionsBleRemoteSeekForwardSeconds")}
+                description={_("optionsBleRemoteSeekForwardSecondsDescription")}
+                type="number"
+                required
+                min="1"
+                step="1"
+                bind:value={opts.bleRemoteSeekForwardSeconds}
+            />
+        </OptionsCategory>
+
         <div class="form__footer">
             <Option
                 id="bilibiliDebugEnabled"

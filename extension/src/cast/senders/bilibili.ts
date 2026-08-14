@@ -15,6 +15,11 @@ declare global {
        * sequentially-remuxed stream).
        */
       dashSeek: (time: number) => boolean;
+      controlFromBleRemote: (
+        action: "seek_backward" | "seek_forward" | "pause" | "play",
+        seekBackwardSeconds: number,
+        seekForwardSeconds: number
+      ) => boolean;
     };
     __fxCastBilibiliInitialQuality?: number;
     __fxCastBilibiliInitialDebug?: boolean;
@@ -36,7 +41,7 @@ if (window.__fxCastBilibili) {
 
 function initBilibiliSender() {
 
-const logger = new Logger("fx_cast [bilibili sender]");
+const logger = new Logger("fx_cast_bilibili [sender]");
 const MAX_DEBUG_LINES = 200;
 const DEBUG_PANEL_ID = "fx-cast-bilibili-debug";
 const lines: string[] = [];
@@ -87,9 +92,9 @@ function debug(message: string, data?: unknown) {
   if (lines.length > MAX_DEBUG_LINES) {
     lines.splice(0, lines.length - MAX_DEBUG_LINES);
   }
-  console.info("[fx_cast Bilibili]", message, data ?? "");
+  console.info("[fx_cast_bilibili]", message, data ?? "");
   const panel = ensureDebugPanel();
-  panel.textContent = `fx_cast Bilibili debug (double-click to close)\n${lines.join(
+  panel.textContent = `fx_cast_bilibili debug (double-click to close)\n${lines.join(
     "\n"
   )}`;
 }
@@ -335,6 +340,23 @@ window.__fxCastBilibili = {
     debug("popup seek routed to page sender", { time });
     sender.seekDashRemux(time);
     return true;
+  },
+  controlFromBleRemote: (
+    action,
+    seekBackwardSeconds,
+    seekForwardSeconds
+  ) => {
+    if (!sender) return false;
+    debug("BLE remote routed through page synchronization", {
+      action,
+      seekBackwardSeconds,
+      seekForwardSeconds,
+    });
+    return sender.controlFromBleRemote(
+      action,
+      seekBackwardSeconds,
+      seekForwardSeconds
+    );
   },
   setDebug: (enabled: boolean) => {
     debugEnabled = Boolean(enabled);

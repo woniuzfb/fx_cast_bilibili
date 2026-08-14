@@ -29,7 +29,7 @@ import Media, {
     NS_MEDIA
 } from "./media/Media";
 
-const logger = new Logger("fx_cast [sdk :: cast.Session]");
+const logger = new Logger("fx_cast_bilibili [sdk :: cast.Session]");
 
 /**
  * Takes a media object and a media status object and merges the status

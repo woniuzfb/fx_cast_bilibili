@@ -10,7 +10,7 @@ import type Media from "../sdk/media/Media";
 
 import cast, { ensureInit, type CastPort } from "../export";
 
-const logger = new Logger("fx_cast [media sender]");
+const logger = new Logger("fx_cast_bilibili [media sender]");
 
 /**
  * Read options directly in an injected sender. The shared options singleton
@@ -121,6 +121,16 @@ export default class MediaSender {
    * receiver.
    */
   private onDashSeekStart?: (target: number) => void;
+  /**
+   * Routes a trusted BLE action through the page media event pipeline. The
+   * listener closure arms exactly one matching event so gesture gating accepts
+   * it, while normal receiver-to-page suppression remains unchanged.
+   */
+  private onBleRemoteAction?: (
+    action: "seek_backward" | "seek_forward" | "pause" | "play",
+    seekBackwardSeconds: number,
+    seekForwardSeconds: number
+  ) => boolean;
 
   private get isDashRemux() {
     return Boolean(this.remoteProxy?.audioUrl);
@@ -147,6 +157,7 @@ export default class MediaSender {
   stop() {
     this.removeMediaElementListeners?.();
     this.removeMediaElementListeners = undefined;
+    this.onBleRemoteAction = undefined;
     // Remove this sender's Stop listener from the reused SDK singleton so it
     // doesn't accumulate across re-casts (a leaked listener would make one
     // Stop click fire stop() once per past sender).
@@ -163,6 +174,25 @@ export default class MediaSender {
     this.port?.postMessage({ subject: "bridge:stopMediaServer" });
     this.session?.stop();
     this.onStopped?.();
+  }
+
+  /** Route a trusted BLE action through page-to-receiver synchronization. */
+  controlFromBleRemote(
+    action: "seek_backward" | "seek_forward" | "pause" | "play",
+    seekBackwardSeconds: number,
+    seekForwardSeconds: number
+  ) {
+    if (!this.session || !this.onBleRemoteAction) {
+      this.debug?.("BLE remote ignored: sender controls are not ready", {
+        action,
+      });
+      return false;
+    }
+    return this.onBleRemoteAction(
+      action,
+      seekBackwardSeconds,
+      seekForwardSeconds
+    );
   }
 
   /** Seek a DASH remux session by restarting the remux at the target. */
@@ -211,6 +241,7 @@ export default class MediaSender {
   suspendMediaElementSync() {
     this.removeMediaElementListeners?.();
     this.removeMediaElementListeners = undefined;
+    this.onBleRemoteAction = undefined;
   }
 
   /** Reload a new Bilibili item in the existing Cast session. */
@@ -638,6 +669,28 @@ export default class MediaSender {
     let suppressPlay = 0;
     let suppressPause = 0;
     let suppressSeek = 0;
+    const BLE_EVENT_WINDOW_MS = 2000;
+    const BLE_SEEK_ARM_WINDOW_MS = 10000;
+    let blePlayArmedUntil = 0;
+    let blePauseArmedUntil = 0;
+    let bleSeekArmedUntil = 0;
+
+    const consumeBleArm = (kind: "play" | "pause" | "seek") => {
+      const now = Date.now();
+      if (kind === "play") {
+        const armed = now < blePlayArmedUntil;
+        blePlayArmedUntil = 0;
+        return armed;
+      }
+      if (kind === "pause") {
+        const armed = now < blePauseArmedUntil;
+        blePauseArmedUntil = 0;
+        return armed;
+      }
+      const armed = now < bleSeekArmedUntil;
+      bleSeekArmedUntil = 0;
+      return armed;
+    };
 
     // Gesture gating: when enabled, only forward page media events that
     // happen shortly after a real user gesture. This lets the site's own
@@ -679,12 +732,15 @@ export default class MediaSender {
         suppressPlay--;
         return;
       }
-      if (!fromGesture()) {
+      const fromBleRemote = consumeBleArm("play");
+      if (!fromBleRemote && !fromGesture()) {
         this.debug?.("ignored autonomous page play");
         return;
       }
-      this.debug?.("page control: play");
-      // A user-driven play/pause ends the post-seek settle window.
+      this.debug?.(
+        fromBleRemote ? "BLE remote page control: play" : "page control: play"
+      );
+      // A trusted BLE or user-driven play/pause ends the settle window.
       this.dashTightenSync = false;
       currentMedia()?.play(undefined, undefined, sendError("play"));
     };
@@ -693,12 +749,17 @@ export default class MediaSender {
         suppressPause--;
         return;
       }
-      if (!fromGesture()) {
+      const fromBleRemote = consumeBleArm("pause");
+      if (!fromBleRemote && !fromGesture()) {
         this.debug?.("ignored autonomous page pause");
         return;
       }
-      this.debug?.("page control: pause");
-      // A user-driven play/pause ends the post-seek settle window.
+      this.debug?.(
+        fromBleRemote
+          ? "BLE remote page control: pause"
+          : "page control: pause"
+      );
+      // A trusted BLE or user-driven play/pause ends the settle window.
       this.dashTightenSync = false;
       currentMedia()?.pause(undefined, undefined, sendError("pause"));
     };
@@ -728,9 +789,16 @@ export default class MediaSender {
       // gesture-adjacent `seeking` legitimizes exactly one `seeked`.
       const seekArmed = Date.now() < seekArmedUntil;
       seekArmedUntil = 0;
-      if (!seekArmed && !fromGesture()) {
+      const fromBleRemote = consumeBleArm("seek");
+      if (!fromBleRemote && !seekArmed && !fromGesture()) {
         this.debug?.("ignored autonomous page seek");
         return;
+      }
+      if (fromBleRemote) {
+        this.debug?.("BLE remote page control: seek", {
+          currentTime: mediaElement.currentTime,
+          dashRemux: this.isDashRemux,
+        });
       }
       if (this.isDashRemux) {
         // The receiver cannot seek inside the sequentially-remuxed HLS:
@@ -746,6 +814,73 @@ export default class MediaSender {
       this.debug?.("page control: seek", request.currentTime);
       boundMedia.seek(request, undefined, sendError("seek"));
     };
+    this.onBleRemoteAction = (
+      action,
+      seekBackwardSeconds,
+      seekForwardSeconds
+    ) => {
+      const now = Date.now();
+      if (action === "pause") {
+        if (mediaElement.paused) {
+          this.debug?.("BLE remote pause already reflected on page");
+          currentMedia()?.pause(undefined, undefined, sendError("BLE pause"));
+          return true;
+        }
+        blePauseArmedUntil = now + BLE_EVENT_WINDOW_MS;
+        mediaElement.pause();
+        return true;
+      }
+      if (action === "play") {
+        if (!mediaElement.paused) {
+          this.debug?.("BLE remote play already reflected on page");
+          currentMedia()?.play(undefined, undefined, sendError("BLE play"));
+          return true;
+        }
+        blePlayArmedUntil = now + BLE_EVENT_WINDOW_MS;
+        void mediaElement.play().catch((error) => {
+          blePlayArmedUntil = 0;
+          sendError("BLE page play")(error);
+        });
+        return true;
+      }
+
+      const backwardSeconds = Math.max(1, Number(seekBackwardSeconds) || 30);
+      const forwardSeconds = Math.max(1, Number(seekForwardSeconds) || 30);
+      const delta = action === "seek_backward"
+        ? -backwardSeconds
+        : forwardSeconds;
+      const duration = Number(mediaElement.duration);
+      const target = Math.max(
+        0,
+        Number.isFinite(duration)
+          ? Math.min(duration, mediaElement.currentTime + delta)
+          : mediaElement.currentTime + delta
+      );
+      if (Math.abs(target - mediaElement.currentTime) <= 0.01) {
+        this.debug?.("BLE remote seek already at boundary", {
+          action,
+          currentTime: mediaElement.currentTime,
+        });
+        return true;
+      }
+      this.debug?.("BLE remote synchronized seek", {
+        action,
+        from: mediaElement.currentTime,
+        target,
+        dashRemux: this.isDashRemux,
+      });
+      if (this.isDashRemux) {
+        // Enter the existing DASH seek transaction synchronously. It sets
+        // dashSyncHold and suppresses the local page seek before the periodic
+        // receiver sync can overwrite the requested target.
+        this.seekDashRemux(target);
+        return true;
+      }
+      bleSeekArmedUntil = now + BLE_SEEK_ARM_WINDOW_MS;
+      mediaElement.currentTime = target;
+      return true;
+    };
+
     const gated = this.gestureGatedControls;
     let lastSyncDebugAt = 0;
     let lastGetStatusPollAt = 0;
@@ -925,6 +1060,7 @@ export default class MediaSender {
       mediaElement.removeEventListener("seeking", onSeeking);
       mediaElement.removeEventListener("seeked", onSeeked);
       this.onDashSeekStart = undefined;
+      this.onBleRemoteAction = undefined;
       if (this.gestureGatedControls) {
         window.removeEventListener("pointerdown", markGesture, true);
         window.removeEventListener("pointerup", markGesture, true);
@@ -994,7 +1130,7 @@ export default class MediaSender {
             cleanup();
             reject(
               "The installed native bridge does not support DASH remux. " +
-                "Rebuild, reinstall, and restart the fx_cast native bridge."
+                "Rebuild, reinstall, and restart the fx_cast_bilibili native bridge."
             );
             return;
           }

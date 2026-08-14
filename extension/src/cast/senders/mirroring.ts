@@ -8,9 +8,9 @@ import type Session from "../sdk/Session";
 
 import cast, { ensureInit } from "../export";
 
-const logger = new Logger("fx_cast [mirroring sender]");
+const logger = new Logger("fx_cast_bilibili [mirroring sender]");
 
-const NS_FX_CAST = "urn:x-cast:fx_cast";
+const NS_FX_CAST_BILIBILI = "urn:x-cast:fx_cast_bilibili";
 
 type MirroringAppMessage =
     | { subject: "peerConnectionOffer"; data: RTCSessionDescriptionInit }
@@ -108,7 +108,7 @@ export default class MirroringSender {
 
     private sendMirroringAppMessage(message: MirroringAppMessage) {
         if (!this.session) return;
-        this.session.sendMessage(NS_FX_CAST, message);
+        this.session.sendMessage(NS_FX_CAST_BILIBILI, message);
     }
 
     stop() {
@@ -122,7 +122,7 @@ export default class MirroringSender {
         const pc = new RTCPeerConnection();
         this.peerConnection = pc;
 
-        this.session?.addMessageListener(NS_FX_CAST, async (_ns, message) => {
+        this.session?.addMessageListener(NS_FX_CAST_BILIBILI, async (_ns, message) => {
             const parsedMessage = JSON.parse(message) as MirroringAppMessage;
             switch (parsedMessage.subject) {
                 case "peerConnectionAnswer":

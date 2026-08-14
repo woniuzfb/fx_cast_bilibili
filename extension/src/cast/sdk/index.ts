@@ -44,7 +44,7 @@ import Session, {
 import * as media from "./media";
 import { createMedia } from "./media/Media";
 
-const logger = new Logger("fx_cast [sdk]");
+const logger = new Logger("fx_cast_bilibili [sdk]");
 
 type ReceiverActionListener = (
     receiver: Receiver,

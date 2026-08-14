@@ -315,7 +315,7 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
     logger.error("Failed to execute Bilibili sender", err);
     await browser.notifications.create({
       type: "basic",
-      title: "fx_cast Bilibili",
+      title: "fx_cast_bilibili",
       message: `Injection failed: ${
         err instanceof Error ? err.message : String(err)
       }`,

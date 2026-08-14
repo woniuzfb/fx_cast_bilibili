@@ -106,7 +106,7 @@
         >;
     }
     interface UpdateManifest {
-        fx_cast_bridge: {
+        fx_cast_bilibili_bridge: {
             updates: UpdateManifestUpdate[];
         };
     }
@@ -123,10 +123,11 @@
             );
         }
 
-        const latestUpdate = updateManifest?.fx_cast_bridge?.updates?.reduce(
-            (latest, next) =>
-                semver.gt(next.version, latest.version) ? next : latest
-        );
+        const latestUpdate =
+            updateManifest?.fx_cast_bilibili_bridge?.updates?.reduce(
+                (latest, next) =>
+                    semver.gt(next.version, latest.version) ? next : latest
+            );
         if (!latestUpdate) {
             throw new Error(
                 "Failed to check for updates due to invalid update manifest!"
@@ -137,6 +138,8 @@
     }
 
     async function checkUpdate() {
+        updateStatus = _("optionsBridgeUpdateStatusNoUpdates");
+        return;
         isCheckingUpdate = true;
 
         try {
@@ -325,7 +328,6 @@
                 {backupMessageEnd}
             </svelte:fragment>
         </Option>
-
 
         {#if opts.showAdvancedOptions}
             <fieldset

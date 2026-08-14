@@ -1,6 +1,6 @@
 {
     "extensionName": {
-        "message": "fx_cast",
+        "message": "fx_cast_bilibili",
         "description": "Name of the extension and the native receiver selector window title."
     },
     "extensionDescription": {
@@ -8,15 +8,15 @@
         "description": "Description of the extension shown in the add-ons manager."
     },
     "actionTitleDefault": {
-        "message": "fx_cast",
+        "message": "fx_cast_bilibili",
         "description": "Title for toolbar button in default state."
     },
     "actionTitleConnecting": {
-        "message": "fx_cast: Connecting",
+        "message": "fx_cast_bilibili: Connecting",
         "description": "Title for toolbar button whilst connecting."
     },
     "actionTitleConnected": {
-        "message": "fx_cast: Connected",
+        "message": "fx_cast_bilibili: Connected",
         "description": "Title for toolbar button whilst connected."
     },
     "popupBridgeErrorBanner": {
@@ -79,7 +79,7 @@
     },
     "popupCastingButtonTitle": {
         "message": "Casting$ellipsis$",
-        "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. \u2192 .. \u2192 ...) as loading indicator.",
+        "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
             "ellipsis": {
                 "content": "$1",
@@ -299,7 +299,7 @@
     },
     "optionsBridgeUpdateChecking": {
         "message": "Checking for Updates$ellipsis$",
-        "description": "Update check button title while in progress. Ellipsis cycles (. \u2192 .. \u2192 ...) as loading indicator.",
+        "description": "Update check button title while in progress. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
             "ellipsis": {
                 "content": "$1",
@@ -627,5 +627,35 @@
     },
     "optionsBilibiliDebugEnabledDescription": {
         "message": "Show the in-page debug panel and verbose Bilibili popup/background logs."
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "BLE remote"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "Receive decrypted MiBeacon button events from Voice Edge."
+    },
+    "optionsBleRemoteUrl": {
+        "message": "Event stream URL:"
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Voice Edge newline-delimited JSON event stream endpoint."
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "Left button seek backward (seconds):"
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "Number of seconds the left BLE remote button seeks backward."
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "Right button seek forward (seconds):"
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "Number of seconds the right BLE remote button seeks forward."
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "Enable BLE remote"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "Connect to the Voice Edge BLE remote event stream."
     }
 }

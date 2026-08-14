@@ -135,7 +135,7 @@ export function run(messaging: Messenger) {
             }
             case "bridge:startRemoteMediaServer": {
                 const { mediaUrl, audioUrl, referer, contentType, port, startTime } = message.data;
-                console.error("[fx_cast Bilibili] proxy requested", {
+                console.error("[fx_cast_bilibili] proxy requested", {
                     host: new URL(mediaUrl).hostname,
                     hasSeparateAudio: Boolean(audioUrl),
                     port,

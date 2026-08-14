@@ -39,4 +39,4 @@ export class Logger {
     }
 }
 
-export default new Logger("fx_cast");
+export default new Logger("fx_cast_bilibili");

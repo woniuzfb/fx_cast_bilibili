@@ -11,7 +11,7 @@
         "package": "npm run package:bridge && npm run package:extension",
         "package:bridge": "cd bridge && npm run package",
         "package:extension": "cd extension && npm run package",
-        "package:source": "tar -C .. --exclude='fx_cast/fx_cast-source.tar.gz' --exclude='node_modules' --exclude='dist' --exclude='build' --exclude='.git' --exclude='.idea' --exclude='*.iml' --exclude='.DS_Store' --exclude='test/ChromeProfile' -czf \"$(pwd)/fx_cast-source.tar.gz\" fx_cast",
+        "package:source": "tar -C .. --exclude='fx_cast_bilibili/fx_cast_bilibili-source.tar.gz' --exclude='node_modules' --exclude='dist' --exclude='build' --exclude='.git' --exclude='.idea' --exclude='*.iml' --exclude='.DS_Store' --exclude='test/ChromeProfile' -czf \"$(pwd)/fx_cast_bilibili-source.tar.gz\" fx_cast_bilibili",
         "test": "node test/driver.js",
         "install-manifest": "cd bridge && npm run install-manifest",
         "remove-manifest": "cd bridge && npm run remove-manifest",

@@ -12,8 +12,8 @@ import webExt from "web-ext";
 
 import copyFilesPlugin from "./lib/copyFilesPlugin.js";
 
-const BRIDGE_NAME = "fx_cast_bridge";
-const BRIDGE_VERSION = "0.1.1";
+const BRIDGE_NAME = "fx_cast_bilibili_bridge";
+const BRIDGE_VERSION = "0.1.2";
 
 const MIRRORING_APP_ID = "19A6F4AE";
 
@@ -164,18 +164,24 @@ if (argv.watch) {
                         shouldExitProgram: false
                     }
                 )
-                .then(result => {
-                    const outputName = path.basename(result.extensionPath);
+                .then(
+                    /** @param {{ extensionPath: string }} result */
+                    result => {
+                        const outputName = path.basename(result.extensionPath);
 
-                    // Rename output extension to XPI
-                    fs.moveSync(
-                        path.join(distPath, outputName),
-                        path.join(distPath, outputName.replace("zip", "xpi"))
-                    );
+                        // Rename output extension to XPI
+                        fs.moveSync(
+                            path.join(distPath, outputName),
+                            path.join(
+                                distPath,
+                                outputName.replace("zip", "xpi")
+                            )
+                        );
 
-                    // Only need the built extension archive
-                    fs.remove(unpackedPath);
-                });
+                        // Only need the built extension archive
+                        fs.remove(unpackedPath);
+                    }
+                );
         }
     });
 }

@@ -6,7 +6,7 @@
             "type": "node",
             "request": "launch",
             "program": "${workspaceFolder}/dist/bridge/src/main.js",
-            "args": ["--__name", "fx_cast_bridge", "--daemon"],
+            "args": ["--__name", "fx_cast_bilibili_bridge", "--daemon"],
             "env": {
                 "NODE_PATH": "${workspaceFolder}/bridge/node_modules"
             },

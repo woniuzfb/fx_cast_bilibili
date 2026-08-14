@@ -36,7 +36,7 @@ jobs:
             - uses: actions/upload-artifact@v4
               if: ${{ matrix.os == 'windows-2022' }}
               with:
-                  name: fx_cast_bridge-win64
+                  name: fx_cast_bilibili_bridge-win64
                   path: dist/bridge/*
 
             - name: Package (macOS)
@@ -45,7 +45,7 @@ jobs:
             - uses: actions/upload-artifact@v4
               if: ${{ matrix.os == 'macos-latest' }}
               with:
-                  name: fx_cast_bridge-macos
+                  name: fx_cast_bilibili_bridge-macos
                   path: dist/bridge/*
 
             - name: Package (macOS Intel)
@@ -54,7 +54,7 @@ jobs:
             - uses: actions/upload-artifact@v4
               if: ${{ matrix.os == 'macos-15-intel' }}
               with:
-                  name: fx_cast_bridge-macos-intel
+                  name: fx_cast_bilibili_bridge-macos-intel
                   path: dist/bridge/*
 
             - name: Package (Ubuntu, deb)
@@ -63,7 +63,7 @@ jobs:
             - uses: actions/upload-artifact@v4
               if: ${{ matrix.os == 'ubuntu-latest' }}
               with:
-                  name: fx_cast_bridge-linux-deb
+                  name: fx_cast_bilibili_bridge-linux-deb
                   path: dist/bridge/*
 
             - name: Package (Ubuntu, rpm)
@@ -72,5 +72,5 @@ jobs:
             - uses: actions/upload-artifact@v4
               if: ${{ matrix.os == 'ubuntu-latest' }}
               with:
-                  name: fx_cast_bridge-linux-rpm
+                  name: fx_cast_bilibili_bridge-linux-rpm
                   path: dist/bridge/*

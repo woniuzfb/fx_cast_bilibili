@@ -333,7 +333,7 @@ async function startDashRemuxServer(
     playlistPath,
   ];
   const ffmpegPath = [
-    process.env.FX_CAST_FFMPEG,
+    process.env.FX_CAST_BILIBILI_FFMPEG,
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
     "/usr/bin/ffmpeg",
@@ -618,7 +618,7 @@ export async function startRemoteMediaServer(
       return "invalid";
     }
   })();
-  console.error("[fx_cast Bilibili] validating", { host, port });
+  console.error("[fx_cast_bilibili] validating", { host, port });
   if (!remoteHostAllowed(mediaUrl)) {
     messaging.sendMessage({
       subject: "mediaCast:mediaServerError",
@@ -630,7 +630,7 @@ export async function startRemoteMediaServer(
   await stopMediaServer();
   const mediaPath = "bilibili-media";
   mediaServer = http.createServer(async (req, res) => {
-    console.error("[fx_cast Bilibili] receiver request", {
+    console.error("[fx_cast_bilibili] receiver request", {
       method: req.method,
       url: req.url,
       range: req.headers.range,
@@ -652,7 +652,7 @@ export async function startRemoteMediaServer(
         method: req.method === "HEAD" ? "HEAD" : "GET",
         headers,
       });
-      console.error("[fx_cast Bilibili] upstream", {
+      console.error("[fx_cast_bilibili] upstream", {
         status: upstream.status,
         type: upstream.headers.get("content-type"),
       });
@@ -675,7 +675,7 @@ export async function startRemoteMediaServer(
       }
       stream.Readable.fromWeb(upstream.body as any).pipe(res);
     } catch (err) {
-      console.error("[fx_cast Bilibili] proxy failed", err);
+      console.error("[fx_cast_bilibili] proxy failed", err);
       if (!res.headersSent) res.writeHead(502);
       res.end();
     }
@@ -693,7 +693,7 @@ export async function startRemoteMediaServer(
   );
   mediaServer.listen(port, () => {
     const address = firstLocalAddress();
-    console.error("[fx_cast Bilibili] listening", { address, port });
+    console.error("[fx_cast_bilibili] listening", { address, port });
     if (!address) {
       messaging.sendMessage({
         subject: "mediaCast:mediaServerError",

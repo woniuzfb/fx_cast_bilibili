@@ -30,7 +30,7 @@ import {
 } from "./classes";
 import { PlayerState, RepeatMode } from "./enums";
 
-const logger = new Logger("fx_cast [sdk :: cast.Media]");
+const logger = new Logger("fx_cast_bilibili [sdk :: cast.Media]");
 
 export const NS_MEDIA = "urn:x-cast:com.google.cast.media";
 

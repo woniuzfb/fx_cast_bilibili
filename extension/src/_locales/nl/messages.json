@@ -1,6 +1,6 @@
 {
     "extensionName": {
-        "message": "fx_cast",
+        "message": "fx_cast_bilibili",
         "description": "Name of the extension and the native receiver selector window title.",
         "hash": "1815c8a66588365bd16519dfc1cb3ea2"
     },
@@ -10,17 +10,17 @@
         "hash": "28e706bff5afebcbea0771d2fefce33c"
     },
     "actionTitleDefault": {
-        "message": "fx_cast",
+        "message": "fx_cast_bilibili",
         "description": "Title for toolbar button in default state.",
         "hash": "1815c8a66588365bd16519dfc1cb3ea2"
     },
     "actionTitleConnecting": {
-        "message": "fx_cast: Aan het verbinden",
+        "message": "fx_cast_bilibili: Aan het verbinden",
         "description": "Title for toolbar button whilst connecting.",
         "hash": "c09ff6e51063941fd2f028f7d6eb1d95"
     },
     "actionTitleConnected": {
-        "message": "fx_cast: Verbonden",
+        "message": "fx_cast_bilibili: Verbonden",
         "description": "Title for toolbar button whilst connected.",
         "hash": "5945eeeaf7bb83f9fba000df92446d12"
     },
@@ -224,7 +224,10 @@
         "message": "Voeg $matchPattern$ toe (Aanbevolen)",
         "description": "Context menu item title for recomended match pattern.",
         "placeholders": {
-            "matchPattern": { "content": "$1", "example": "https://example.com/*" }
+            "matchPattern": {
+                "content": "$1",
+                "example": "https://example.com/*"
+            }
         },
         "hash": "395caf736ead76c1a7340850424e2c5b"
     },
@@ -232,7 +235,10 @@
         "message": "Voeg $matchPattern$ toe",
         "description": "Context menu item title for all other match patterns.",
         "placeholders": {
-            "matchPattern": { "content": "$1", "example": "*://*.example.com/*" }
+            "matchPattern": {
+                "content": "$1",
+                "example": "*://*.example.com/*"
+            }
         },
         "hash": "a79d67f700965693261f2f38f97fd870"
     },

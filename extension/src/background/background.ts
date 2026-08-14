@@ -12,6 +12,7 @@ import deviceManager from "./deviceManager";
 import { initAction } from "./action";
 import { initMenus, launchBilibiliSender } from "./menus";
 import { initWhitelist } from "./whitelist";
+import { initBleRemote } from "./bleRemote";
 import { cacheUaInfo, getChromeUserAgentString } from "../lib/userAgents";
 
 const _ = browser.i18n.getMessage;
@@ -77,7 +78,7 @@ async function notifyBridgeCompat() {
             }
 
             browser.tabs.create({
-                url: `https://github.com/hensm/fx_cast/releases/tag/v${info.expectedVersion}`
+                url: `https://github.com/woniuzfb/fx_cast_bilibili`
             });
         });
     }
@@ -134,6 +135,7 @@ async function init() {
     await initAction();
     await initMenus();
     await initWhitelist();
+    initBleRemote();
 
     // Surface popup debug logs in the background console. The browser-action
     // popup can't be inspected directly, so Popup.svelte forwards its debug

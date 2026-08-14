@@ -1,9 +1,9 @@
 {
     "author": "Matt Hensman <m@matt.tf>",
-    "homepageUrl": "https://hensm.github.io/fx_cast",
-    "applicationName": "fx_cast_bridge",
-    "applicationVersion": "0.1.1",
-    "applicationDirectoryName": "fx_cast",
-    "applicationExecutableName": "fx_cast_bridge",
+    "homepageUrl": "https://github.com/woniuzfb/fx_cast_bilibili",
+    "applicationName": "fx_cast_bilibili_bridge",
+    "applicationVersion": "0.1.2",
+    "applicationDirectoryName": "fx_cast_bilibili",
+    "applicationExecutableName": "fx_cast_bilibili_bridge",
     "extensionId": "bilibili-cast@local"
 }
