@@ -1,7 +1,7 @@
 {
     "name": "bilibili cast",
     "description": "cast bilibili videos to a chromecast",
-    "version": "0.1.2",
+    "version": "0.1.3",
 
     "browser_specific_settings": {
         "gecko": {
@@ -37,7 +37,6 @@
         "page": "ui/options/index.html"
     },
     "permissions": [
-        "history",
         "menus",
         "menus.overrideContext",
         "nativeMessaging",

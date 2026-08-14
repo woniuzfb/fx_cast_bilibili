@@ -163,9 +163,6 @@ export default class ReceiverSelector extends TypedEventTarget<ReceiverSelectorE
       return;
     }
 
-    // Keep history state clean only for this selector's matching popup.
-    void browser.history.deleteUrl({ url: POPUP_URL });
-
     this.messagePort?.disconnect();
 
     this.opening = false;
