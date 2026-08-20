@@ -161,6 +161,19 @@ body {
 }
 .receiver__status {
     color: var(--secondary-color);
+    /*
+     * Pin the status line's box to a constant height. Its text changes on every
+     * media update (the app name alone vs "app name · statusText"), and without
+     * an explicit line-height the line box height flipped ~16<->13.5px. That
+     * ~2.5px change propagated up through .receiver and — because Firefox owns
+     * browser-action popup sizing and re-fits the popup to content on every
+     * layout change — re-sized the whole popup once or twice per second (the
+     * persistent popup flicker; diagnostics confirmed .receiver__status was the
+     * only element whose height moved). A fixed line box makes it deterministic
+     * whatever the status text is; ellipsis/nowrap above prevent any wrapping.
+     */
+    line-height: 16px;
+    min-height: 16px;
 }
 .receiver__app-name {
     font-weight: 600;
@@ -189,6 +202,28 @@ body {
     display: flex;
     flex-direction: column;
     width: 100%;
+    /*
+     * Pin the expanded media panel to a stable width.
+     *
+     * Firefox owns browser-action popup sizing and re-fits the popup window to
+     * its content on every layout change. The media panel's intrinsic width
+     * fluctuates by ~90-100px during casting (a control/text momentarily
+     * changing width as the DASH stream reloads and player state flaps), so the
+     * popup width oscillated ~589<->686px and Firefox fired a continuous flood
+     * of window `resize` events — repainting the whole popup and producing the
+     * persistent flicker (visible mostly on the left/filled side). Diagnostics
+     * confirmed it was NOT focus loss / hide / re-mount / message flooding, but
+     * this width re-fit loop.
+     *
+     * Flooring the panel width removes the oscillation: the popup settles at
+     * the stable maximum and stays there, so Firefox stops re-fitting. This is
+     * a floor only (min-width), so longer content can still grow the panel and
+     * nothing is ever clipped; the panel only fills more when the popup is
+     * wider. The rule is scoped to `.media`, which exists only while a receiver
+     * is expanded, so the idle device-picker width is unaffected. Adjust the
+     * value if your controls/locale need a different stable width.
+     */
+    min-width: 660px;
 }
 
 .media__metadata,
@@ -212,10 +247,21 @@ body {
 .media__metadata-text {
     display: flex;
     flex-direction: column;
+    /* Allow the title/subtitle ellipsis to engage instead of forcing width. */
+    min-width: 0;
 }
 
 .media__title {
     font-weight: 600;
+    /*
+     * Clamp the title like the subtitle. It was the only text node in the
+     * media panel with no ellipsis, so its raw length fed the panel's intrinsic
+     * width and could re-fit the popup. Ellipsizing it removes that as a width
+     * driver (belt-and-suspenders with the .media min-width floor above).
+     */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .media__subtitle {
     color: var(--secondary-color);

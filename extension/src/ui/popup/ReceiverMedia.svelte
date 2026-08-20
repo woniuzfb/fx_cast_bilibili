@@ -35,6 +35,13 @@
     export let device: ReceiverDevice;
     export let textTracks: Track[] = [];
     export let showImage = false;
+    /**
+     * Whether Bilibili debug logging is enabled. Used to gate the seek-bar
+     * diagnostic below so that, with debug off, this component does NO work per
+     * status tick (previously it stringified state and fired a runtime message
+     * on every change even when debug was off — dozens/sec during a seek).
+     */
+    export let debugEnabled = false;
 
     $: isPlayingOrPaused =
         status.playerState === PlayerState.PLAYING ||
@@ -78,7 +85,15 @@
             mediaId,
             currentTime: device.mediaStatus?.currentTime,
             duration: reportedDuration,
-            now: Date.now()
+            now: Date.now(),
+            // Raw contentId (cache-buster intact) flags DASH remux reloads that
+            // the popup did not initiate (BLE remote / page seek). A settled
+            // player state releases the reload hold once the new stream reports
+            // its real position.
+            contentId: status.media?.contentId,
+            playerSettled:
+                status.playerState === PlayerState.PLAYING ||
+                status.playerState === PlayerState.PAUSED
         });
         if (nextTimeline !== timeline) timeline = nextTimeline;
     }
@@ -88,12 +103,108 @@
         Boolean(dashRemuxData.dashRemux);
     $: isLive = status.media?.streamType === StreamType.LIVE;
 
+    // Whether the live receiver status currently backs a usable seek bar.
+    $: liveSeekBarReady = Boolean(status.media) && hasDuration && isSeekable;
+
+    /**
+     * Once the seek bar has been usable this cast session, keep it shown for as
+     * long as we still have a known duration. Every seek (popup click, the
+     * ±5s / BLE-remote skip, or the page progress bar) triggers a DASH remux
+     * restart on Bilibili: the receiver drops to IDLE and `status.media` blinks
+     * away for a beat before the new stream reports PLAYING, so
+     * `status.media && hasDuration && isSeekable` momentarily flips false.
+     *
+     * A *timed* visibility hold proved fragile: across stacked/rapid seeks the
+     * window could lapse between a fresh seek and the receiver's recovery
+     * (a popup seek also jumps the hold clock forward), hiding the bar and
+     * making the whole row flicker in and out. Latch instead — visibility
+     * becomes monotonic (false -> true, never bouncing back mid-reload). The
+     * duration is sticky (mediaTimeline only overwrites it with positive values
+     * / the DASH pageDuration), and when playback truly ends the parent
+     * unmounts this whole component (device.mediaStatus clears), so the latch
+     * can never keep a stale bar on screen. On a genuine media change the
+     * duration briefly resets to 0, which hides the bar until the new
+     * duration arrives — the correct "new video loading" behaviour.
+     */
+    let seekBarEverReady = false;
+    $: if (liveSeekBarReady) seekBarEverReady = true;
+
+    // Show the bar whenever we have a duration and it has been ready at least
+    // once this session — spanning every reload gap without a timer.
+    $: showSeekBar = hasDuration && (liveSeekBarReady || seekBarEverReady);
+
+    /**
+     * True while a seek is settling — either the popup's optimistic confirm
+     * window (seekTarget) or the external BLE/page reload hold (reloadHoldTime)
+     * is active. Both are set the instant a seek starts and cleared once the
+     * receiver settles at the new position (see mediaTimeline). During a DASH
+     * remux restart the receiver rapidly flaps PLAYING -> IDLE -> BUFFERING ->
+     * PLAYING several times; without this guard the buffering shimmer on the
+     * seek bar strobes on and off with each flap, which is the residual popup
+     * flicker after the seek-bar-visibility and title fixes. We keep the bar
+     * calm (position already frozen at the target) until the seek settles;
+     * genuine, non-seek buffering still shows the shimmer.
+     */
+    $: seekSettling =
+        timeline.seekTarget !== undefined ||
+        timeline.reloadHoldTime !== undefined;
+
+    /**
+     * Buffering shimmer with both-edge debounce (hysteresis). A Bilibili
+     * DASH-remux stream flaps PLAYING <-> BUFFERING frequently, so binding the
+     * shimmer straight to `playerState === BUFFERING` either strobes or (with a
+     * long single-shot delay) never shows because each burst is short. Instead:
+     *  - show only after buffering persists SHOW_DELAY ms (ignores brief blips);
+     *  - once shown, keep it until buffering has been gone HIDE_DELAY ms, so the
+     *    constant flapping during genuine buffering keeps it steadily ON.
+     * This is a pure repaint of the bar's filled portion; it changes no layout,
+     * so it cannot cause the popup resize flicker. Seeks are covered by
+     * seekSettling.
+     */
+    const BUFFERING_SHOW_DELAY_MS = 250;
+    const BUFFERING_HIDE_DELAY_MS = 600;
+    let showBufferingShimmer = false;
+    let bufShowTimer: number | undefined;
+    let bufHideTimer: number | undefined;
+    function updateBufferingShimmer(
+        playerState: PlayerState,
+        settling: boolean
+    ) {
+        const buffering = playerState === PlayerState.BUFFERING && !settling;
+        if (buffering) {
+            if (bufHideTimer !== undefined) {
+                window.clearTimeout(bufHideTimer);
+                bufHideTimer = undefined;
+            }
+            if (!showBufferingShimmer && bufShowTimer === undefined) {
+                bufShowTimer = window.setTimeout(() => {
+                    bufShowTimer = undefined;
+                    showBufferingShimmer = true;
+                }, BUFFERING_SHOW_DELAY_MS);
+            }
+        } else {
+            if (bufShowTimer !== undefined) {
+                window.clearTimeout(bufShowTimer);
+                bufShowTimer = undefined;
+            }
+            if (showBufferingShimmer && bufHideTimer === undefined) {
+                bufHideTimer = window.setTimeout(() => {
+                    bufHideTimer = undefined;
+                    showBufferingShimmer = false;
+                }, BUFFERING_HIDE_DELAY_MS);
+            }
+        }
+    }
+    $: updateBufferingShimmer(status.playerState, seekSettling);
+
     // Diagnose seek bar visibility across popup reopens (gated behind the
     // Bilibili debug option by the background popup:debugLog listener).
     let lastSeekBarDebug = "";
-    $: {
+    $: if (debugEnabled) {
         const seekBarDebug = JSON.stringify({
-            showsSeekBar: Boolean(status.media && hasDuration && isSeekable),
+            showsSeekBar: showSeekBar,
+            liveSeekBarReady: liveSeekBarReady,
+            heldThroughReload: showSeekBar && !liveSeekBarReady,
             hasMedia: Boolean(status.media),
             mediaDuration: status.media?.duration,
             pageDuration: dashRemuxData.pageDuration,
@@ -122,10 +233,17 @@
     $: {
         const metadata = status?.media?.metadata;
 
-        mediaTitle = metadata?.title;
-        mediaSubtitle = undefined;
-
+        // During a DASH remux reload `status.media` (and thus its metadata)
+        // briefly disappears, then returns. Recomputing unconditionally would
+        // blank mediaTitle for that gap and unmount the whole `{#if mediaTitle}`
+        // metadata row — the title (e.g. "第四季") flickers out and back in.
+        // Only refresh from a present metadata payload; otherwise retain the
+        // last-known values through the gap. A genuine stop unmounts this whole
+        // component (parent gates on device.mediaStatus), so nothing lingers.
         if (metadata) {
+            mediaTitle = metadata?.title;
+            mediaSubtitle = undefined;
+
             switch (metadata.metadataType) {
                 case MetadataType.AUDIOBOOK_CHAPTER:
                     if (metadata.bookTitle) {
@@ -147,18 +265,18 @@
                 case MetadataType.GENERIC:
                     mediaSubtitle = metadata.subtitle;
             }
-        }
 
-        if (showImage && metadata?.images?.length) {
-            let imageSet: string[] = [];
-            for (const image of metadata.images) {
-                let sizeString = image.url;
-                if (image.width) sizeString += ` ${image.width}w`;
-                imageSet.push(sizeString);
+            if (showImage && metadata.images?.length) {
+                let imageSet: string[] = [];
+                for (const image of metadata.images) {
+                    let sizeString = image.url;
+                    if (image.width) sizeString += ` ${image.width}w`;
+                    imageSet.push(sizeString);
+                }
+                mediaImageSet = imageSet.join(",");
+            } else {
+                mediaImageSet = undefined;
             }
-            mediaImageSet = imageSet.join(",");
-        } else {
-            mediaImageSet = undefined;
         }
     }
 
@@ -168,13 +286,18 @@
     // Update estimated time every second
     onMount(() => {
         const intervalId = window.setInterval(() => {
-            if (currentTime !== getEstimatedMediaTime()) {
-                currentTime = getEstimatedMediaTime();
+            // Keep the displayed position ticking during normal playback and
+            // refreshing as reload holds expire.
+            const estimate = getEstimatedMediaTime();
+            if (currentTime !== estimate) {
+                currentTime = estimate;
             }
         }, 1000);
 
         return () => {
             window.clearInterval(intervalId);
+            if (bufShowTimer !== undefined) window.clearTimeout(bufShowTimer);
+            if (bufHideTimer !== undefined) window.clearTimeout(bufHideTimer);
         };
     });
 
@@ -195,7 +318,8 @@
         // Optimistic update with a confirmation window: the receiver keeps
         // reporting old-stream positions during the debounce + remux
         // restart, and plain optimistic updates would bounce back.
-        timeline = createSeekedTimeline(timeline, target, Date.now());
+        const seekedAt = Date.now();
+        timeline = createSeekedTimeline(timeline, target, seekedAt);
         currentTime = target;
         dispatch("seek", { position: target });
     }
@@ -263,7 +387,7 @@
 
     <div class="media__controls">
         <!-- Seek bar -->
-        {#if status.media && hasDuration && isSeekable}
+        {#if showSeekBar}
             <div class="media__seek">
                 {#if isLive}
                     <span class="media__live">
@@ -277,8 +401,7 @@
                     <input
                         type="range"
                         class="slider media__seek-bar"
-                        class:slider--indeterminate={status.playerState ===
-                            PlayerState.BUFFERING}
+                        class:slider--indeterminate={showBufferingShimmer}
                         aria-label={_("popupMediaSeek")}
                         max={timeline.duration}
                         value={currentTime}
@@ -292,7 +415,8 @@
                         on:click={() => {
                             if (seekHoverPosition && timeline.duration) {
                                 seekTo(
-                                    timeline.duration * (seekHoverPosition / 100)
+                                    timeline.duration *
+                                        (seekHoverPosition / 100)
                                 );
                             }
                         }}
@@ -304,8 +428,7 @@
                             style:--seek-hover-position="{seekHoverPosition}%"
                         >
                             {formatTime(
-                                timeline.duration *
-                                    (seekHoverPosition / 100)
+                                timeline.duration * (seekHoverPosition / 100)
                             )}
                         </div>
                     {/if}
@@ -328,9 +451,9 @@
                 <button
                     class="media__backward-button ghost"
                     title={_("popupMediaSeekBackward")}
-                    disabled={status.playerState === PlayerState.IDLE}
-                    on:click={() =>
-                        seekTo(currentTime - 5)}
+                    disabled={status.playerState === PlayerState.IDLE &&
+                        !seekSettling}
+                    on:click={() => seekTo(currentTime - 5)}
                 />
             {/if}
 
@@ -338,7 +461,8 @@
                 <button
                     class={`ghost ${
                         status.playerState === PlayerState.PLAYING ||
-                        status.playerState === PlayerState.BUFFERING
+                        status.playerState === PlayerState.BUFFERING ||
+                        seekSettling
                             ? "media__pause-button"
                             : "media__play-button"
                     }`}
@@ -353,10 +477,10 @@
             {#if isSeekable}
                 <button
                     class="media__forward-button ghost"
-                    disabled={status.playerState === PlayerState.IDLE}
+                    disabled={status.playerState === PlayerState.IDLE &&
+                        !seekSettling}
                     title={_("popupMediaSeekForward")}
-                    on:click={() =>
-                        seekTo(currentTime + 5)}
+                    on:click={() => seekTo(currentTime + 5)}
                 />
             {/if}
             {#if status.supportedMediaCommands & _MediaCommand.QUEUE_NEXT}

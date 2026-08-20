@@ -82,6 +82,26 @@ let changeGeneration = 0;
 /** Debounce timestamp so rapid/auto re-cast clicks don't fight each other. */
 let lastReinjectAt = 0;
 
+let debugPanelFlushScheduled = false;
+/**
+ * Flush the accumulated debug lines into the panel at most once per animation
+ * frame. A single seek fires ~15-20 debug() calls in a burst (dash seek
+ * requested, bridge start/stop, post-seek sync state xN, media loaded, controls
+ * attached, drift correction...), and the continuous sync loop logs steadily
+ * during ordinary playback too. Rewriting the whole <pre> (a fixed-position,
+ * overflow:auto, max-height:45vh, up-to-200-line element) synchronously on
+ * every call forced that many layout+paint passes per burst — a repaint storm
+ * on top of an already heavy Bilibili page. Coalescing to one paint per frame
+ * removes the storm while keeping the panel visually live.
+ */
+function flushDebugPanel() {
+  debugPanelFlushScheduled = false;
+  const panel = ensureDebugPanel();
+  panel.textContent = `fx_cast_bilibili debug (double-click to close)\n${lines.join(
+    "\n"
+  )}`;
+}
+
 function debug(message: string, data?: unknown) {
   if (!debugEnabled) return;
   const suffix =
@@ -94,10 +114,10 @@ function debug(message: string, data?: unknown) {
     lines.splice(0, lines.length - MAX_DEBUG_LINES);
   }
   console.info("[fx_cast_bilibili]", message, data ?? "");
-  const panel = ensureDebugPanel();
-  panel.textContent = `fx_cast_bilibili debug (double-click to close)\n${lines.join(
-    "\n"
-  )}`;
+  if (!debugPanelFlushScheduled) {
+    debugPanelFlushScheduled = true;
+    requestAnimationFrame(flushDebugPanel);
+  }
 }
 
 interface PageInfo {
