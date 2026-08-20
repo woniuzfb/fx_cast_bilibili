@@ -100,9 +100,10 @@ export default class Remote extends CastClient {
             clearTimeout(this.transportRetryTimeoutId);
             this.transportRetryTimeoutId = undefined;
         }
-        this.transportClient?.disconnect();
+        const transportClient = this.transportClient;
         this.transportClient = undefined;
         this.transportId = undefined;
+        transportClient?.disconnect();
     }
 
     private connectTransport(transportId: string, attempt = 0) {
@@ -114,7 +115,18 @@ export default class Remote extends CastClient {
         this.transportId = transportId;
 
         transportClient
-            .connect(this.host, { port: this.options?.port })
+            .connect(this.host, {
+                port: this.options?.port,
+                onClose: () => {
+                    if (this.transportClient !== transportClient) return;
+
+                    this.transportClient = undefined;
+                    console.warn("Cast media transport closed unexpectedly", {
+                        transportId
+                    });
+                    this.scheduleTransportRetry(transportId, 0);
+                }
+            })
             .then(() => {
                 if (this.transportClient !== transportClient) return;
 
@@ -142,16 +154,35 @@ export default class Remote extends CastClient {
                     return;
                 }
 
-                this.transportRetryTimeoutId = setTimeout(() => {
-                    this.transportRetryTimeoutId = undefined;
-                    if (
-                        this.transportId === transportId &&
-                        !this.transportClient
-                    ) {
-                        this.connectTransport(transportId, attempt + 1);
-                    }
-                }, retryDelay);
+                this.scheduleTransportRetry(
+                    transportId,
+                    attempt + 1,
+                    retryDelay
+                );
             });
+    }
+
+    private scheduleTransportRetry(
+        transportId: string,
+        attempt: number,
+        delay = TRANSPORT_RETRY_DELAYS_MS[0]
+    ) {
+        if (
+            this.transportRetryTimeoutId ||
+            this.transportId !== transportId
+        ) {
+            return;
+        }
+
+        this.transportRetryTimeoutId = setTimeout(() => {
+            this.transportRetryTimeoutId = undefined;
+            if (
+                this.transportId === transportId &&
+                !this.transportClient
+            ) {
+                this.connectTransport(transportId, attempt);
+            }
+        }, delay);
     }
 
     /**
@@ -160,9 +191,15 @@ export default class Remote extends CastClient {
      * results in a `MEDIA_STATUS` response.
      */
     private onMediaMessage(message: ReceiverMediaMessage) {
-        if (message.type !== "MEDIA_STATUS") {
+        if (message.type === "INVALID_REQUEST") {
+            console.warn("Cast media request rejected", {
+                requestId: message.requestId,
+                mediaSessionId: message.mediaSessionId
+            });
             return;
         }
+
+        if (message.type !== "MEDIA_STATUS") return;
 
         this.options?.onMediaStatusUpdate?.(message.status[0]);
     }

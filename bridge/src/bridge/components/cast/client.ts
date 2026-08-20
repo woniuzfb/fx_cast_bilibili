@@ -13,6 +13,7 @@ interface CastClientConnectOptions {
     port?: number;
     onReceiverMessage?: (message: ReceiverMessage) => void;
     onHeartbeat?: () => void;
+    onClose?: () => void;
 }
 
 export default class CastClient {
@@ -80,9 +81,11 @@ export default class CastClient {
             });
 
             this.client.on("close", () => {
-                if (this.heartbeatChannel && this.heartbeatIntervalId) {
+                if (this.heartbeatIntervalId) {
                     clearInterval(this.heartbeatIntervalId);
+                    this.heartbeatIntervalId = undefined;
                 }
+                options?.onClose?.();
             });
 
             this.client.connect(
