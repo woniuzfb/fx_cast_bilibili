@@ -125,7 +125,7 @@ export default {
     bilibiliDefaultsVersion: 1,
     bilibiliDebugEnabled: false,
     bleRemoteEnabled: true,
-    bleRemoteUrl: "http://127.0.0.1:5000/ble-remote/events",
+    bleRemoteUrl: "http://127.0.0.1:5002/ble-remote/events",
     bleRemoteSeekBackwardSeconds: 30,
     bleRemoteSeekForwardSeconds: 30,
     showAdvancedOptions: false

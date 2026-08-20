@@ -58,6 +58,7 @@ interface CastSession {
   deviceId: string;
   appId: string;
   sessionId?: string;
+  transportId?: string;
   autoJoinContexts: Set<ContentContext>;
 }
 
@@ -562,7 +563,9 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
       }
 
       instance.session.sessionId = message.data.sessionId;
+      instance.session.transportId = message.data.transportId;
       activeSessions.set(message.data.sessionId, instance.session);
+      refreshReceiverSelector();
 
       const device = deviceManager.getDeviceById(deviceId);
       if (!device) {
@@ -1121,10 +1124,10 @@ async function getReceiverSelection(selectionOpts: {
     // extension while a Bilibili cast is already running).
     const connectedTransportIds: string[] = [];
     for (const instance of activeInstances) {
-      // CastSession exposes sessionId; the current receiver protocol uses
-      // that same value as the application's transportId.
-      if (instance.session?.sessionId) {
-        connectedTransportIds.push(instance.session.sessionId);
+      // Popup ownership is keyed by the receiver application's transportId,
+      // which is distinct from the Cast sessionId.
+      if (instance.session?.transportId) {
+        connectedTransportIds.push(instance.session.transportId);
       }
     }
     void selector
@@ -1153,10 +1156,10 @@ function refreshReceiverSelector() {
   if (receiverSelectors.size === 0) return;
   const connectedTransportIds: string[] = [];
   for (const instance of activeInstances) {
-    // CastSession exposes sessionId; the current receiver protocol uses
-    // that same value as the application's transportId.
-    if (instance.session?.sessionId) {
-      connectedTransportIds.push(instance.session.sessionId);
+    // Popup ownership is keyed by the receiver application's transportId,
+    // which is distinct from the Cast sessionId.
+    if (instance.session?.transportId) {
+      connectedTransportIds.push(instance.session.transportId);
     }
   }
   for (const selector of receiverSelectors.values()) {

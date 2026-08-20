@@ -82,7 +82,7 @@ export default class Session extends CastClient {
                                 receiverId: this.receiverDevice.id,
                                 receiverFriendlyName:
                                     this.receiverDevice.friendlyName,
-                                transportId: this.sessionId,
+                                transportId: this.transportId,
 
                                 // TODO: Fix this
                                 senderApps: [],

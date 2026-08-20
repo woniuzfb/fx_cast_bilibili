@@ -136,7 +136,14 @@
     isConnecting = true;
     if (connectTimeoutId !== undefined) window.clearTimeout(connectTimeoutId);
     connectTimeoutId = window.setTimeout(() => {
-      if (!isOwnedSession) isConnecting = false;
+      if (!isOwnedSession) {
+        isConnecting = false;
+        // Probe the app media namespace even when MEDIA_STATUS has not arrived
+        // yet. GET_STATUS does not require a mediaSessionId.
+        if (application && !application.isIdleScreen) {
+          sendMediaMessage({ type: "GET_STATUS" });
+        }
+      }
       connectTimeoutId = undefined;
     }, 20_000);
   }
@@ -204,12 +211,15 @@
       "requestId" | "mediaSessionId"
     >
   ) {
-    if (!device.mediaStatus) return;
+    const isStatusProbe = partialMessage.type === "GET_STATUS";
+    if (!device.mediaStatus && !isStatusProbe) return;
 
     const message: SenderMediaMessage = {
       ...(partialMessage as any),
       requestId: 0,
-      mediaSessionId: device.mediaStatus.mediaSessionId,
+      ...(device.mediaStatus
+        ? { mediaSessionId: device.mediaStatus.mediaSessionId }
+        : {}),
     };
 
     port?.postMessage({
