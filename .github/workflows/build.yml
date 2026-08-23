@@ -1,13 +1,10 @@
 name: Build bridge & extension (Windows, macOS & Linux)
 
 on:
+    push:
+        tags:
+            - "v*"
     workflow_dispatch:
-        inputs:
-            release_tag:
-                description: >-
-                    Tag of an existing release to republish with the signed
-                    xpi. Leave empty to only build and upload artifacts.
-                type: string
 
 jobs:
     build:
@@ -47,18 +44,17 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-win64
                   path: dist/bridge/*
-
             - name: Publish to release (Windows)
-              if: ${{ matrix.os == 'windows-2022' && inputs.release_tag != '' }}
+              if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-2022' }}
+              shell: bash
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_TAG: ${{ inputs.release_tag }}
+                  RELEASE_TAG: ${{ github.ref_name }}
               run: |
-                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
-                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
-                    exit 1
-                  fi
-                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+                  gh release create "$RELEASE_TAG" --draft --generate-notes \
+                      -R "$GITHUB_REPOSITORY" || true
+                  gh release upload "$RELEASE_TAG" dist/bridge/* \
+                      --clobber -R "$GITHUB_REPOSITORY"
 
             - name: Package (macOS)
               if: ${{ matrix.os == 'macos-latest' }}
@@ -68,18 +64,17 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-macos
                   path: dist/bridge/*
-
             - name: Publish to release (macOS)
-              if: ${{ matrix.os == 'macos-latest' && inputs.release_tag != '' }}
+              if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.os == 'macos-latest' }}
+              shell: bash
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_TAG: ${{ inputs.release_tag }}
+                  RELEASE_TAG: ${{ github.ref_name }}
               run: |
-                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
-                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
-                    exit 1
-                  fi
-                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+                  gh release create "$RELEASE_TAG" --draft --generate-notes \
+                      -R "$GITHUB_REPOSITORY" || true
+                  gh release upload "$RELEASE_TAG" dist/bridge/* \
+                      --clobber -R "$GITHUB_REPOSITORY"
 
             - name: Package (macOS Intel)
               if: ${{ matrix.os == 'macos-15-intel' }}
@@ -89,18 +84,17 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-macos-intel
                   path: dist/bridge/*
-
             - name: Publish to release (macOS Intel)
-              if: ${{ matrix.os == 'macos-15-intel' && inputs.release_tag != '' }}
+              if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.os == 'macos-15-intel' }}
+              shell: bash
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_TAG: ${{ inputs.release_tag }}
+                  RELEASE_TAG: ${{ github.ref_name }}
               run: |
-                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
-                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
-                    exit 1
-                  fi
-                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+                  gh release create "$RELEASE_TAG" --draft --generate-notes \
+                      -R "$GITHUB_REPOSITORY" || true
+                  gh release upload "$RELEASE_TAG" dist/bridge/* \
+                      --clobber -R "$GITHUB_REPOSITORY"
 
             - name: Package (Ubuntu, deb)
               if: ${{ matrix.os == 'ubuntu-latest' }}
@@ -110,20 +104,18 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-linux-deb
                   path: dist/bridge/*
-
             # Bridge packaging wipes dist/bridge between runs, so the deb
             # must be published before the rpm build starts.
             - name: Publish to release (deb)
-              if: ${{ matrix.os == 'ubuntu-latest' && inputs.release_tag != '' }}
+              if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.os == 'ubuntu-latest' }}
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_TAG: ${{ inputs.release_tag }}
+                  RELEASE_TAG: ${{ github.ref_name }}
               run: |
-                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
-                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
-                    exit 1
-                  fi
-                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+                  gh release create "$RELEASE_TAG" --draft --generate-notes \
+                      -R "$GITHUB_REPOSITORY" || true
+                  gh release upload "$RELEASE_TAG" dist/bridge/* \
+                      --clobber -R "$GITHUB_REPOSITORY"
 
             - name: Package (Ubuntu, rpm)
               if: ${{ matrix.os == 'ubuntu-latest' }}
@@ -133,18 +125,16 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-linux-rpm
                   path: dist/bridge/*
-
             - name: Publish to release (rpm)
-              if: ${{ matrix.os == 'ubuntu-latest' && inputs.release_tag != '' }}
+              if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.os == 'ubuntu-latest' }}
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_TAG: ${{ inputs.release_tag }}
+                  RELEASE_TAG: ${{ github.ref_name }}
               run: |
-                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
-                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
-                    exit 1
-                  fi
-                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+                  gh release create "$RELEASE_TAG" --draft --generate-notes \
+                      -R "$GITHUB_REPOSITORY" || true
+                  gh release upload "$RELEASE_TAG" dist/bridge/* \
+                      --clobber -R "$GITHUB_REPOSITORY"
 
     build-extension:
         runs-on: ubuntu-latest
@@ -167,7 +157,19 @@ jobs:
                   name: bilibili_cast-extension
                   path: dist/extension/*.xpi
 
+            # AMO refuses to sign the same version twice, so a mismatched tag
+            # must be rejected before signing consumes the version.
+            - name: Verify tag matches manifest version
+              if: startsWith(github.ref, 'refs/tags/')
+              run: |
+                  VERSION=$(node -p "require('./extension/src/manifest.json').version")
+                  if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+                    echo "::error::Tag $GITHUB_REF_NAME does not match extension version v$VERSION"
+                    exit 1
+                  fi
+
             - name: Sign extension (AMO)
+              if: startsWith(github.ref, 'refs/tags/')
               env:
                   WEB_EXT_API_KEY: ${{ secrets.AMO_API_KEY }}
                   WEB_EXT_API_SECRET: ${{ secrets.AMO_API_SECRET }}
@@ -178,21 +180,22 @@ jobs:
                   fi
                   npm run sign:extension
 
+            # Signing consumes the AMO version, so it only runs for tag
+            # pushes (manual dispatch is a build-only test path).
             - uses: actions/upload-artifact@v4
+              if: startsWith(github.ref, 'refs/tags/')
               with:
                   name: bilibili_cast-extension-signed
                   path: dist/extension/signed/*.xpi
 
             - name: Publish signed xpi to release
-              if: ${{ inputs.release_tag != '' }}
+              if: startsWith(github.ref, 'refs/tags/')
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_TAG: ${{ inputs.release_tag }}
+                  RELEASE_TAG: ${{ github.ref_name }}
               run: |
-                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
-                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
-                    exit 1
-                  fi
+                  gh release create "$RELEASE_TAG" --draft --generate-notes \
+                      -R "$GITHUB_REPOSITORY" || true
 
                   # AMO names signed files after the add-on's internal ID;
                   # publish under the project name instead.
@@ -216,3 +219,17 @@ jobs:
                           gh release delete-asset "$RELEASE_TAG" "$asset" \
                               --yes -R "$GITHUB_REPOSITORY"
                       done
+
+    publish:
+        needs: [build, build-extension]
+        if: startsWith(github.ref, 'refs/tags/')
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            # Assets are uploaded to a draft while builds run; publish it
+            # once everything has succeeded.
+            - env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: gh release edit "${{ github.ref_name }}" --draft=false -R "$GITHUB_REPOSITORY"
