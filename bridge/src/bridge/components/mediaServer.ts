@@ -759,7 +759,6 @@ export function stopMediaServer() {
   const auxiliaryProcesses = [...dashAuxProcesses];
   dashAuxProcesses.clear();
   const server = mediaServer;
-  const stoppedRequestId = mediaServerRequestId;
   const remuxProcess = dashRemuxProcess;
   const tempDir = dashTempDir;
   mediaServer = undefined;
