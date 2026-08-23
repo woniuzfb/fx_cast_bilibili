@@ -99,7 +99,7 @@ async function createCastSession(opts: {
     destroyCastInstance(opts.instance)
   );
 
-  if (opts.instance.contentContext?.tabId) {
+  if (opts.instance.contentContext?.tabId !== undefined) {
     updateActionState(
       ActionState.Connecting,
       opts.instance.contentContext?.tabId
@@ -153,7 +153,7 @@ function joinSession(instance: CastInstance, session: CastSession) {
     },
   });
 
-  if (instance.contentContext?.tabId) {
+  if (instance.contentContext?.tabId !== undefined) {
     updateActionState(ActionState.Connected, instance.contentContext?.tabId);
   }
 }
@@ -167,7 +167,7 @@ function leaveSession(instance: CastInstance) {
   });
 
   delete instance.session;
-  if (instance.contentContext?.tabId) {
+  if (instance.contentContext?.tabId !== undefined) {
     updateActionState(ActionState.Default, instance.contentContext.tabId);
   }
 }
@@ -245,7 +245,8 @@ function destroyCastInstance(instance: CastInstance) {
     );
   }
 
-  if (instance.contentContext?.tabId) {
+  // tabId 0 is a valid value and must not be skipped by a truthiness check.
+  if (instance.contentContext?.tabId !== undefined) {
     updateActionState(ActionState.Default, instance.contentContext?.tabId);
   }
 
@@ -376,7 +377,7 @@ const castManager = new (class {
 
           delete instance.session;
 
-          if (instance.contentContext?.tabId) {
+          if (instance.contentContext?.tabId !== undefined) {
             updateActionState(
               ActionState.Default,
               instance.contentContext.tabId
@@ -584,7 +585,7 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
         },
       });
 
-      if (instance.contentContext?.tabId) {
+      if (instance.contentContext?.tabId !== undefined) {
         updateActionState(
           ActionState.Connected,
           instance.contentContext?.tabId

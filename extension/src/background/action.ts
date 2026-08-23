@@ -37,8 +37,11 @@ export function updateActionState(state: ActionState, tabId?: number) {
       break;
   }
 
-  void browser.action.setTitle({ title, tabId });
-  void browser.action.setIcon({ path, tabId });
+  // The tab may already be closed (e.g. action state restored on content
+  // port disconnect); the update then rejects with "Invalid tab ID",
+  // which is expected and must not surface as an uncaught rejection.
+  browser.action.setTitle({ title, tabId }).catch(() => undefined);
+  browser.action.setIcon({ path, tabId }).catch(() => undefined);
 }
 
 export function initAction() {

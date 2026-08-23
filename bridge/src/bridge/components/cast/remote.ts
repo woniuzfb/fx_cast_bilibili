@@ -11,6 +11,13 @@ import type {
 const NS_MEDIA = "urn:x-cast:com.google.cast.media";
 const TRANSPORT_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
 
+// How long to wait for a RECEIVER_STATUS reply before considering the
+// platform connection half-dead (e.g. silently broken by system sleep).
+const STATUS_PROBE_TIMEOUT_MS = 2500;
+// No PONG for this long means the connection is half-dead; the socket
+// never closed, so only a watchdog can detect it.
+const HEARTBEAT_STALE_MS = 15000;
+
 interface CastRemoteOptions {
     onApplicationFound?: () => void;
     onApplicationClose?: () => void;
@@ -27,28 +34,235 @@ export default class Remote extends CastClient {
     private transportId?: string;
     private transportRetryTimeoutId?: NodeJS.Timeout;
 
+    // Platform connection (RECEIVER_STATUS watcher) state. This
+    // connection is long-lived and can silently die during idle
+    // periods (system sleep, receiver dropping idle TCP), so it is:
+    //   1. reconnected with a bounded backoff when closed,
+    //   2. probed on demand before casting (`ensureConnected`),
+    //   3. watched by a PONG watchdog for half-dead states.
+    private destroyed = false;
+    private platformConnecting = false;
+    private platformConnected = false;
+    private platformRetryTimeoutId?: NodeJS.Timeout;
+    private lastPongAt = Date.now();
+    private statusProbeResolve?: () => void;
+    /**
+     * Generation token for the platform connection. Incremented on every
+     * connectPlatform() so that late-arriving callbacks (the connect
+     * Promise's then/catch, or an onClose/onHeartbeat from a superseded
+     * socket) can detect they belong to a stale connection and no-op.
+     *
+     * Defense in depth: today resetClient() calls removeAllListeners() on
+     * the old castv2 client, which structurally prevents its callbacks
+     * from firing at all — resolve, reject, and close are all registered
+     * as EventEmitter listeners ('connect'/'error'/'close') and the
+     * socket is destroyed afterwards. The token is not fixing a race
+     * that currently exists; it guards against future regressions in
+     * that listener cleanup (e.g. if connect()/resetClient() ever stop
+     * detaching every entry point).
+     */
+    private platformGen = 0;
+
     constructor(private host: string, private options?: CastRemoteOptions) {
         super();
-        super
-            .connect(host, {
-                port: options?.port,
-                onReceiverMessage: message => {
-                    this.onReceiverMessage(message);
-                }
-            })
-            .then(() => {
-                this.sendReceiverMessage({ type: "GET_STATUS" });
-            })
-            .catch(() => { /* connection retries itself */ });
+        this.connectPlatform();
     }
 
     disconnect() {
+        this.destroyed = true;
+        if (this.platformRetryTimeoutId) {
+            clearTimeout(this.platformRetryTimeoutId);
+            this.platformRetryTimeoutId = undefined;
+        }
+        this.resolveStatusProbe();
         super.disconnect();
         this.clearTransport();
     }
 
+    /**
+     * Ensure the platform connection is alive, healing it if it died
+     * or went stale. Intended to be called right before casting so
+     * the popup reliably receives RECEIVER_STATUS updates.
+     */
+    ensureConnected() {
+        if (this.destroyed || this.platformConnecting) return;
+
+        if (this.platformConnected) {
+            this.probeStatus();
+            return;
+        }
+
+        // A reconnect is already scheduled — let the backoff run.
+        if (this.platformRetryTimeoutId) return;
+
+        // Dead with no pending retry (backoff exhausted or initial
+        // connection lost) — revive immediately.
+        console.warn(
+            "[fx_cast_bilibili] Remote platform connection is dead; reconnecting on demand",
+            { host: this.host }
+        );
+        this.connectPlatform();
+    }
+
     sendMediaMessage(message: SenderMediaMessage) {
         this.transportClient?.sendMediaMessage(message);
+    }
+
+    private connectPlatform(attempt = 0) {
+        if (this.destroyed) return;
+
+        // Supersede any prior connection: bump the generation so its in-flight
+        // callbacks become no-ops.
+        const gen = ++this.platformGen;
+
+        this.platformConnecting = true;
+        this.platformConnected = false;
+        this.resolveStatusProbe();
+
+        // castv2 clients cannot be reused across connections — rebuild
+        // the underlying client and channels on every attempt.
+        this.resetClient();
+
+        this.connect(this.host, {
+            port: this.options?.port,
+            onReceiverMessage: message => {
+                if (gen !== this.platformGen) return;
+                this.onReceiverMessage(message);
+            },
+            onHeartbeat: () => {
+                if (gen !== this.platformGen) return;
+                this.checkHeartbeat();
+            },
+            onPong: () => {
+                if (gen !== this.platformGen) return;
+                this.lastPongAt = Date.now();
+            },
+            onClose: () => {
+                if (gen !== this.platformGen) return;
+                this.onPlatformClose();
+            }
+        })
+            .then(() => {
+                if (gen !== this.platformGen) return;
+                this.platformConnecting = false;
+                this.platformConnected = true;
+                this.lastPongAt = Date.now();
+
+                this.sendReceiverMessage({ type: "GET_STATUS" });
+            })
+            .catch(err => {
+                if (gen !== this.platformGen) return;
+                this.platformConnecting = false;
+
+                const retryDelay = TRANSPORT_RETRY_DELAYS_MS[attempt];
+                console.warn(
+                    "[fx_cast_bilibili] Remote platform connection failed",
+                    {
+                        host: this.host,
+                        attempt: attempt + 1,
+                        retryDelay,
+                        error:
+                            err instanceof Error
+                                ? err.message
+                                : String(err)
+                    }
+                );
+
+                if (retryDelay === undefined) {
+                    console.warn(
+                        "[fx_cast_bilibili] Remote platform connection retries exhausted; will retry on next cast",
+                        { host: this.host }
+                    );
+                    return;
+                }
+
+                this.schedulePlatformRetry(attempt + 1, retryDelay);
+            });
+    }
+
+    private onPlatformClose() {
+        if (this.destroyed) return;
+
+        this.platformConnected = false;
+        this.resolveStatusProbe();
+
+        console.warn(
+            "[fx_cast_bilibili] Remote platform connection closed unexpectedly; reconnecting",
+            { host: this.host }
+        );
+        this.schedulePlatformRetry(0);
+    }
+
+    private schedulePlatformRetry(
+        attempt: number,
+        delay = TRANSPORT_RETRY_DELAYS_MS[0]
+    ) {
+        if (this.destroyed || this.platformRetryTimeoutId) return;
+
+        this.platformRetryTimeoutId = setTimeout(() => {
+            this.platformRetryTimeoutId = undefined;
+            if (
+                !this.destroyed &&
+                !this.platformConnected &&
+                !this.platformConnecting
+            ) {
+                this.connectPlatform(attempt);
+            }
+        }, delay);
+    }
+
+    /**
+     * Probe a connected platform connection with `GET_STATUS`. If no
+     * `RECEIVER_STATUS` arrives in time, the connection is half-dead
+     * and gets rebuilt.
+     */
+    private probeStatus() {
+        if (this.statusProbeResolve) return;
+
+        const timer = setTimeout(() => {
+            this.statusProbeResolve = undefined;
+
+            // Connection already dropped or a reconnect is underway —
+            // existing logic handles it.
+            if (
+                this.destroyed ||
+                !this.platformConnected ||
+                this.platformConnecting ||
+                this.platformRetryTimeoutId
+            ) {
+                return;
+            }
+
+            console.warn(
+                "[fx_cast_bilibili] Remote status probe timed out; rebuilding platform connection",
+                { host: this.host }
+            );
+            this.connectPlatform();
+        }, STATUS_PROBE_TIMEOUT_MS);
+
+        this.statusProbeResolve = () => {
+            clearTimeout(timer);
+            this.statusProbeResolve = undefined;
+        };
+
+        this.sendReceiverMessage({ type: "GET_STATUS" });
+    }
+
+    private resolveStatusProbe() {
+        this.statusProbeResolve?.();
+    }
+
+    private checkHeartbeat() {
+        if (this.destroyed) return;
+
+        const staleMs = Date.now() - this.lastPongAt;
+        if (staleMs < HEARTBEAT_STALE_MS) return;
+
+        console.warn(
+            "[fx_cast_bilibili] Remote heartbeat watchdog fired (no PONG); rebuilding platform connection",
+            { host: this.host, staleMs }
+        );
+        this.connectPlatform();
     }
 
     /**
@@ -62,6 +276,10 @@ export default class Remote extends CastClient {
         if (message.type !== "RECEIVER_STATUS") {
             return;
         }
+
+        // A RECEIVER_STATUS reply proves the platform connection is
+        // alive — release any pending liveness probe.
+        this.resolveStatusProbe();
 
         const application = message.status.applications?.[0];
         if (!application || application.isIdleScreen) {

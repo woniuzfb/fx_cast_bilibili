@@ -13,6 +13,7 @@ interface CastClientConnectOptions {
     port?: number;
     onReceiverMessage?: (message: ReceiverMessage) => void;
     onHeartbeat?: () => void;
+    onPong?: () => void;
     onClose?: () => void;
 }
 
@@ -62,6 +63,34 @@ export default class CastClient {
     }
 
     /**
+     * Replace the underlying castv2 client and drop stale channels.
+     * castv2 clients cannot safely be reused across connections
+     * (socket/PacketStreamWrapper are swapped in place and listeners
+     * would accumulate), so reconnection requires a fresh client —
+     * subclasses must recreate any channels they hold themselves.
+     */
+    protected resetClient() {
+        const oldClient = this.client;
+        this.client = new Client();
+
+        if (this.heartbeatIntervalId) {
+            clearInterval(this.heartbeatIntervalId);
+            this.heartbeatIntervalId = undefined;
+        }
+
+        this.connectionChannel = undefined;
+        this.heartbeatChannel = undefined;
+        this.receiverChannel = undefined;
+
+        // Detach handlers before closing so the old client's `close`
+        // event cannot re-trigger connection logic.
+        oldClient.removeAllListeners();
+        try {
+            oldClient.close();
+        } catch { /* never connected */ }
+    }
+
+    /**
      * Connects to a cast receiver at a given host, returning a
      * promise that resolves once the client is connected.
      */
@@ -108,6 +137,13 @@ export default class CastClient {
                         options?.onReceiverMessage?.(message);
                     });
 
+                    // Track PONG replies for connection liveness checks
+                    this.heartbeatChannel.on("message", (message: { type?: string }) => {
+                        if (message?.type === "PONG") {
+                            options?.onPong?.();
+                        }
+                    });
+
                     this.connectionChannel.send({ type: "CONNECT" });
                     this.heartbeatChannel.send({ type: "PING" });
 
@@ -127,7 +163,11 @@ export default class CastClient {
             clearInterval(this.heartbeatIntervalId);
         }
 
-        this.connectionChannel?.send({ type: "CLOSE" });
-        this.client.close();
+        // Sends throw once the underlying connection is gone, so a
+        // disconnect on a dead client must not propagate.
+        try {
+            this.connectionChannel?.send({ type: "CLOSE" });
+            this.client.close();
+        } catch { /* already closed */ }
     }
 }

@@ -131,12 +131,57 @@ export function run(messaging: Messenger) {
 
             case "bridge:sendReceiverMessage": {
                 const { deviceId, message: receiverMessage } = message.data;
-                remotes.get(deviceId)?.sendReceiverMessage(receiverMessage);
+                try {
+                    remotes
+                        .get(deviceId)
+                        ?.sendReceiverMessage(receiverMessage);
+                } catch (err) {
+                    // Sends throw once the underlying connection is gone.
+                    console.warn(
+                        "[fx_cast_bilibili] Failed to send receiver message",
+                        {
+                            deviceId,
+                            type: receiverMessage.type,
+                            error:
+                                err instanceof Error
+                                    ? err.message
+                                    : String(err)
+                        }
+                    );
+                }
                 break;
             }
             case "bridge:sendMediaMessage": {
                 const { deviceId, message: mediaMessage } = message.data;
-                remotes.get(deviceId)?.sendMediaMessage(mediaMessage);
+                try {
+                    remotes.get(deviceId)?.sendMediaMessage(mediaMessage);
+                } catch (err) {
+                    console.warn(
+                        "[fx_cast_bilibili] Failed to send media message",
+                        {
+                            deviceId,
+                            type: mediaMessage.type,
+                            error:
+                                err instanceof Error
+                                    ? err.message
+                                    : String(err)
+                        }
+                    );
+                }
+                break;
+            }
+
+            case "bridge:createCastSession": {
+                // Heal the device's status watcher before creating the
+                // session: after long idle periods (system sleep, dropped
+                // idle TCP) the platform connection can be dead, which
+                // would leave the popup stuck at "casting..." with no
+                // RECEIVER_STATUS updates.
+                remotes
+                    .get(message.data.receiverDevice.id)
+                    ?.ensureConnected();
+
+                handleCastMessage(messaging, message);
                 break;
             }
 

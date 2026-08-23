@@ -10,8 +10,6 @@ import type {
   ReceiverSelectorPageInfo,
 } from "../types";
 
-const POPUP_URL = browser.runtime.getURL("ui/popup/index.html");
-
 export interface ReceiverSelection {
   device: ReceiverDevice;
   mediaType: ReceiverSelectorMediaType;
