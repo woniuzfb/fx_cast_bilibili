@@ -152,6 +152,67 @@ if (argv.mode === "production") {
 // Clean
 fs.removeSync(distPath);
 
+const SIGN_RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
+
+/**
+ * AMO signing failures come in two flavors: transient server/network
+ * trouble (HTTP 429/5xx, connection resets) worth a backed-off retry,
+ * and permanent rejections (auth, validation, ID ownership, version
+ * conflicts) where retrying would only spam AMO — and for a submitted
+ * version can never succeed ("Version already exists"). web-ext wraps
+ * every error in WebExtError, so classify by message.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isTransientSigningError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+
+    // Node network-layer errors are always worth retrying.
+    if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EPIPE/.test(message)) {
+        return true;
+    }
+
+    // AMO embeds "status: <code>" in its error messages.
+    const statusMatch = message.match(/status: (\d{3})/);
+    if (statusMatch) {
+        const status = Number(statusMatch[1]);
+        return status === 429 || status >= 500;
+    }
+
+    return /too many requests/i.test(message);
+}
+
+/**
+ * @param {import("web-ext").SignOptions} options
+ */
+async function signWithRetry(options) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await webExt.cmd.sign(options, {
+                // Prevent auto-exit
+                shouldExitProgram: false
+            });
+        } catch (err) {
+            const delay = SIGN_RETRY_DELAYS_MS[attempt];
+            if (delay === undefined || !isTransientSigningError(err)) {
+                throw err;
+            }
+
+            console.warn(
+                `Signing failed with a transient error; retrying in ${
+                    delay / 1000
+                }s`,
+                {
+                    attempt: attempt + 1,
+                    error: err instanceof Error ? err.message : String(err)
+                }
+            );
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
 if (argv.watch) {
     const ctx = await esbuild.context(buildOpts);
     await ctx.watch();
@@ -162,26 +223,21 @@ if (argv.watch) {
             const signedPath = path.join(distPath, "signed");
             fs.ensureDirSync(signedPath);
 
-            webExt.cmd
-                .sign(
-                    {
-                        sourceDir: unpackedPath,
-                        artifactsDir: signedPath,
-                        // Self-distributed add-on, not listed on AMO
-                        channel: "unlisted",
-                        overwriteDest: true
-                    },
-                    {
-                        // Prevent auto-exit
-                        shouldExitProgram: false
-                    }
-                )
+            signWithRetry({
+                sourceDir: unpackedPath,
+                artifactsDir: signedPath,
+                // Self-distributed add-on, not listed on AMO
+                channel: "unlisted",
+                overwriteDest: true
+            })
                 .then(
-                    /** @param {{ extensionPath: string }} result */
+                    /** @param {{ downloadedFiles: string[] }} result */
                     result => {
-                        console.info(
-                            `Signed extension: ${result.extensionPath}`
-                        );
+                        for (const file of result.downloadedFiles ?? []) {
+                            console.info(
+                                `Signed extension: ${path.join(signedPath, file)}`
+                            );
+                        }
 
                         // Only need the signed extension archive
                         fs.remove(unpackedPath);

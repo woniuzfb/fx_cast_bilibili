@@ -1,6 +1,13 @@
 name: Build bridge & extension (Windows, macOS & Linux)
 
-on: workflow_dispatch
+on:
+    workflow_dispatch:
+        inputs:
+            release_tag:
+                description: >-
+                    Tag of an existing release to republish with the signed
+                    xpi. Leave empty to only build and upload artifacts.
+                type: string
 
 jobs:
     build:
@@ -77,6 +84,8 @@ jobs:
 
     build-extension:
         runs-on: ubuntu-latest
+        permissions:
+            contents: write
 
         steps:
             - uses: actions/checkout@v4
@@ -109,3 +118,30 @@ jobs:
               with:
                   name: bilibili_cast-extension-signed
                   path: dist/extension/signed/*.xpi
+
+            - name: Publish signed xpi to release
+              if: ${{ inputs.release_tag != '' }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.release_tag }}
+              run: |
+                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
+                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
+                    exit 1
+                  fi
+
+                  gh release upload "$RELEASE_TAG" dist/extension/signed/*.xpi \
+                      --clobber -R "$GITHUB_REPOSITORY"
+
+                  # Signed-only distribution: drop any xpi assets that were
+                  # not just uploaded (e.g. a previously unsigned build).
+                  comm -23 \
+                      <(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
+                          --json assets --jq '.assets[].name' \
+                          | grep '\.xpi$' | sort) \
+                      <(basename -a dist/extension/signed/*.xpi | sort) \
+                      | while read -r asset; do
+                          echo "Removing superseded asset: $asset"
+                          gh release delete-asset "$RELEASE_TAG" "$asset" \
+                              --yes -R "$GITHUB_REPOSITORY"
+                      done
