@@ -3,6 +3,7 @@
     "scripts": {
         "build": "node bin/build.js",
         "package": "node bin/build.js --package",
+        "sign": "node bin/build.js --sign",
         "watch": "node bin/build.js --watch",
         "start": "web-ext run -s ../dist/extension/",
         "lint": "node ../node_modules/eslint/bin/eslint.js src --ext .ts,.js,.svelte"

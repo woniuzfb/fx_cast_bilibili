@@ -28,6 +28,12 @@ const argv = yargs()
         type: "boolean",
         conflicts: "watch"
     })
+    .option("sign", {
+        describe:
+            "Package and sign with web-ext (requires WEB_EXT_API_KEY / WEB_EXT_API_SECRET env vars)",
+        type: "boolean",
+        conflicts: ["watch", "package"]
+    })
     .option("mode", {
         describe: "Set build mode",
         choices: ["development", "production"],
@@ -35,8 +41,8 @@ const argv = yargs()
     })
     .parseSync(process.argv);
 
-// If packaging, use production mode
-if (argv.package) {
+// If packaging or signing, use production mode
+if (argv.package || argv.sign) {
     argv.mode = "production";
 }
 
@@ -55,7 +61,7 @@ const BRIDGE_VERSION = JSON.parse(
 const distPath = path.join(rootPath, "../dist/extension/");
 const unpackedPath = path.join(distPath, "unpacked");
 
-const outPath = argv.package ? unpackedPath : distPath;
+const outPath = argv.package || argv.sign ? unpackedPath : distPath;
 
 /** @type esbuild.BuildOptions */
 const buildOpts = {
@@ -152,6 +158,44 @@ if (argv.watch) {
     console.info("Watching for changes...");
 } else {
     esbuild.build(buildOpts).then(() => {
+        if (argv.sign) {
+            const signedPath = path.join(distPath, "signed");
+            fs.ensureDirSync(signedPath);
+
+            webExt.cmd
+                .sign(
+                    {
+                        sourceDir: unpackedPath,
+                        artifactsDir: signedPath,
+                        // Self-distributed add-on, not listed on AMO
+                        channel: "unlisted",
+                        overwriteDest: true
+                    },
+                    {
+                        // Prevent auto-exit
+                        shouldExitProgram: false
+                    }
+                )
+                .then(
+                    /** @param {{ extensionPath: string }} result */
+                    result => {
+                        console.info(
+                            `Signed extension: ${result.extensionPath}`
+                        );
+
+                        // Only need the signed extension archive
+                        fs.remove(unpackedPath);
+                    }
+                )
+                .catch(err => {
+                    console.error("Signing failed!", err);
+                    fs.remove(unpackedPath);
+                    process.exitCode = 1;
+                });
+
+            return;
+        }
+
         if (argv.package) {
             webExt.cmd
                 .build(

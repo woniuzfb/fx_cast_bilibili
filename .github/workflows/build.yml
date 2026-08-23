@@ -93,3 +93,19 @@ jobs:
               with:
                   name: bilibili_cast-extension
                   path: dist/extension/*.xpi
+
+            - name: Sign extension (AMO)
+              env:
+                  WEB_EXT_API_KEY: ${{ secrets.AMO_API_KEY }}
+                  WEB_EXT_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+              run: |
+                  if [ -z "$WEB_EXT_API_KEY" ] || [ -z "$WEB_EXT_API_SECRET" ]; then
+                    echo "::error::Set the AMO_API_KEY / AMO_API_SECRET repository secrets (create a key at https://addons.mozilla.org/developers/addon/api/key/)"
+                    exit 1
+                  fi
+                  npm run sign:extension
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: bilibili_cast-extension-signed
+                  path: dist/extension/signed/*.xpi
