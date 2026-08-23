@@ -349,25 +349,57 @@ async function recoverSignedXpiFromAmo({ apiKey, apiSecret, version, downloadDir
  * version can never succeed ("Version already exists"). web-ext wraps
  * every error in WebExtError, so classify by message.
  *
+ * web-ext >= 10 submits via native fetch, which reports network errors
+ * as "fetch failed" with the real cause on err.cause, and HTTP errors
+ * with the status text ("Too Many Requests", "Service Unavailable") —
+ * while the legacy stack (web-ext 7 / sign-addon) embedded the numeric
+ * status and errno codes in the message. Match both.
+ *
  * @param {unknown} err
  * @returns {boolean}
  */
 function isTransientSigningError(err) {
-    const message = err instanceof Error ? err.message : String(err);
+    if (!(err instanceof Error)) {
+        return false;
+    }
 
-    // Node network-layer errors are always worth retrying.
-    if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EPIPE/.test(message)) {
+    const messages = [err.message];
+    if (err.cause !== undefined && err.cause !== null) {
+        messages.push(
+            err.cause instanceof Error
+                ? err.cause.message
+                : String(err.cause)
+        );
+    }
+    const message = messages.join(" ");
+
+    // Node network-layer errors are always worth retrying. Native fetch
+    // (web-ext >= 10) surfaces them as "fetch failed"/"terminated" with
+    // the errno code only on err.cause.
+    if (
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EPIPE|ECONNABORTED/i.test(
+            message
+        )
+    ) {
+        return true;
+    }
+    if (/fetch failed|terminated|socket hang up|network error/i.test(message)) {
         return true;
     }
 
-    // AMO embeds "status: <code>" in its error messages.
+    // AMO rate limiting / server trouble, across both error formats.
+    if (/too many requests|bad gateway|service unavailable|gateway timeout|internal server error/i.test(message)) {
+        return true;
+    }
+
+    // Legacy sign-addon embeds "status: <code>" in its error messages.
     const statusMatch = message.match(/status: (\d{3})/);
     if (statusMatch) {
         const status = Number(statusMatch[1]);
         return status === 429 || status >= 500;
     }
 
-    return /too many requests/i.test(message);
+    return false;
 }
 
 /**
@@ -475,9 +507,12 @@ if (argv.watch) {
                 .then(
                     /** @param {{ downloadedFiles: string[] }} result */
                     result => {
-                        // downloadedFiles entries are absolute paths
+                        // web-ext >= 10 returns bare filenames; the legacy
+                        // stack returned absolute paths. Normalize.
                         for (const file of result.downloadedFiles ?? []) {
-                            console.info(`Signed extension: ${file}`);
+                            console.info(
+                                `Signed extension: ${path.isAbsolute(file) ? file : path.join(signedPath, file)}`
+                            );
                         }
 
                         // Only need the signed extension archive
