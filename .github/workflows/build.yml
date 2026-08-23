@@ -130,16 +130,23 @@ jobs:
                     exit 1
                   fi
 
-                  gh release upload "$RELEASE_TAG" dist/extension/signed/*.xpi \
+                  # AMO names signed files after the add-on's internal ID;
+                  # publish under the project name instead.
+                  VERSION=$(node -p "require('./extension/src/manifest.json').version")
+                  RELEASE_XPI="fx_cast_bilibili-${VERSION}.xpi"
+                  cp dist/extension/signed/*.xpi "$RELEASE_XPI"
+
+                  gh release upload "$RELEASE_TAG" "$RELEASE_XPI" \
                       --clobber -R "$GITHUB_REPOSITORY"
 
                   # Signed-only distribution: drop any xpi assets that were
-                  # not just uploaded (e.g. a previously unsigned build).
+                  # not just uploaded (e.g. a previously unsigned build, or
+                  # an AMO-named signed one).
                   comm -23 \
                       <(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
                           --json assets --jq '.assets[].name' \
                           | grep '\.xpi$' | sort) \
-                      <(basename -a dist/extension/signed/*.xpi | sort) \
+                      <(echo "$RELEASE_XPI" | sort) \
                       | while read -r asset; do
                           echo "Removing superseded asset: $asset"
                           gh release delete-asset "$RELEASE_TAG" "$asset" \
