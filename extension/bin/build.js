@@ -223,7 +223,22 @@ if (argv.watch) {
             const signedPath = path.join(distPath, "signed");
             fs.ensureDirSync(signedPath);
 
+            // webExt.cmd.sign is the programmatic API and, unlike the CLI
+            // (--api-key/--api-secret), does not read these env vars itself.
+            const apiKey = process.env.WEB_EXT_API_KEY;
+            const apiSecret = process.env.WEB_EXT_API_SECRET;
+            if (!apiKey || !apiSecret) {
+                console.error(
+                    "Signing requires WEB_EXT_API_KEY and WEB_EXT_API_SECRET env vars"
+                );
+                fs.remove(unpackedPath);
+                process.exitCode = 1;
+                return;
+            }
+
             signWithRetry({
+                apiKey,
+                apiSecret,
                 sourceDir: unpackedPath,
                 artifactsDir: signedPath,
                 // Self-distributed add-on, not listed on AMO
