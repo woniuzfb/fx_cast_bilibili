@@ -248,10 +248,9 @@ if (argv.watch) {
                 .then(
                     /** @param {{ downloadedFiles: string[] }} result */
                     result => {
+                        // downloadedFiles entries are absolute paths
                         for (const file of result.downloadedFiles ?? []) {
-                            console.info(
-                                `Signed extension: ${path.join(signedPath, file)}`
-                            );
+                            console.info(`Signed extension: ${file}`);
                         }
 
                         // Only need the signed extension archive
