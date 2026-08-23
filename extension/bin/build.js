@@ -13,7 +13,6 @@ import webExt from "web-ext";
 import copyFilesPlugin from "./lib/copyFilesPlugin.js";
 
 const BRIDGE_NAME = "fx_cast_bilibili_bridge";
-const BRIDGE_VERSION = "0.1.4";
 
 const MIRRORING_APP_ID = "19A6F4AE";
 
@@ -46,6 +45,12 @@ const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 // Paths
 const rootPath = path.join(__dirname, "../");
 const srcPath = path.join(rootPath, "src");
+
+// Single source of truth for the version: the extension manifest
+// (kept in sync with bridge/config.json's applicationVersion).
+const BRIDGE_VERSION = JSON.parse(
+    fs.readFileSync(`${srcPath}/manifest.json`, { encoding: "utf-8" })
+).version;
 
 const distPath = path.join(rootPath, "../dist/extension/");
 const unpackedPath = path.join(distPath, "unpacked");

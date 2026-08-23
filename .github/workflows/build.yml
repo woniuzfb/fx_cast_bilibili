@@ -1,4 +1,4 @@
-name: Build bridge (Windows, macOS & Linux)
+name: Build bridge & extension (Windows, macOS & Linux)
 
 on: workflow_dispatch
 
@@ -12,10 +12,10 @@ jobs:
                 node-version: [22.x]
 
         steps:
-            - uses: actions/checkout@v3
+            - uses: actions/checkout@v4
 
             - name: Setup Node.js ${{ matrix.node-version }}
-              uses: actions/setup-node@v3
+              uses: actions/setup-node@v4
               with:
                   node-version: ${{ matrix.node-version }}
 
@@ -74,3 +74,22 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-linux-rpm
                   path: dist/bridge/*
+
+    build-extension:
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22.x
+
+            - run: npm ci --prefix ./extension
+            - run: npm run package:extension
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: bilibili_cast-extension
+                  path: dist/extension/*.xpi
