@@ -1,5 +1,6 @@
 // @ts-check
 
+import crypto from "node:crypto";
 import fs from "fs-extra";
 import path from "path";
 import url from "url";
@@ -54,9 +55,11 @@ const srcPath = path.join(rootPath, "src");
 
 // Single source of truth for the version: the extension manifest
 // (kept in sync with bridge/config.json's applicationVersion).
-const BRIDGE_VERSION = JSON.parse(
+const manifestJson = JSON.parse(
     fs.readFileSync(`${srcPath}/manifest.json`, { encoding: "utf-8" })
-).version;
+);
+const BRIDGE_VERSION = manifestJson.version;
+const EXTENSION_ID = manifestJson.browser_specific_settings?.gecko?.id;
 
 const distPath = path.join(rootPath, "../dist/extension/");
 const unpackedPath = path.join(distPath, "unpacked");
@@ -154,6 +157,190 @@ fs.removeSync(distPath);
 
 const SIGN_RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
 
+const AMO_API_PREFIX = "https://addons.mozilla.org/api/v4";
+const RECOVERY_POLL_INTERVAL_MS = 30_000;
+const RECOVERY_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Thrown when the version exists at AMO but recovery cannot produce a
+ * signed file right now (still processing, or awaiting manual review).
+ * Carries a user-actionable message; unlike network errors this is not
+ * worth silently swallowing in favor of the original signing error.
+ */
+class SigningRecoveryError extends Error {}
+
+/**
+ * HS256 JWT for the AMO API, mirroring what sign-addon's amo-client sends
+ * ({iss, iat, exp} signed with the API secret as the HMAC key).
+ *
+ * @param {string} apiKey
+ * @param {string} apiSecret
+ * @returns {string}
+ */
+function createAmoAuthToken(apiKey, apiSecret) {
+    const encodePart = value =>
+        Buffer.from(JSON.stringify(value)).toString("base64url");
+    const header = encodePart({ alg: "HS256", typ: "JWT" });
+    const now = Math.floor(Date.now() / 1000);
+    const payload = encodePart({ iss: apiKey, iat: now, exp: now + 300 });
+    const signature = crypto
+        .createHmac("sha256", apiSecret)
+        .update(`${header}.${payload}`)
+        .digest("base64url");
+    return `${header}.${payload}.${signature}`;
+}
+
+/**
+ * GET the AMO version status — the same URL web-ext PUTs the upload to
+ * and then polls. 404 means the version was never created (the failure
+ * happened before/during upload), so there is nothing to recover.
+ *
+ * @param {{ apiKey: string, apiSecret: string, version: string }} args
+ * @returns {Promise<{ status: number, body: object }>}
+ */
+async function fetchAmoVersionStatus({ apiKey, apiSecret, version }) {
+    const versionUrl =
+        `${AMO_API_PREFIX}/addons/${encodeURIComponent(EXTENSION_ID ?? "")}` +
+        `/versions/${encodeURIComponent(version)}/`;
+    const res = await fetch(versionUrl, {
+        headers: {
+            Authorization: `JWT ${createAmoAuthToken(apiKey, apiSecret)}`,
+            Accept: "application/json"
+        }
+    });
+    return { status: res.status, body: res.ok ? await res.json() : {} };
+}
+
+/**
+ * Download the signed files AMO lists for the version into downloadDir.
+ * Mirrors sign-addon's downloadSignedFiles: only files flagged `signed`
+ * are fetched, named after the download URL's basename.
+ *
+ * @param {{ apiKey: string, apiSecret: string }} args
+ * @param {Array<{ signed: boolean, download_url: string }>} files
+ * @param {string} downloadDir
+ * @returns {Promise<{ downloadedFiles: string[] }>}
+ */
+async function downloadAmoSignedFiles({ apiKey, apiSecret }, files, downloadDir) {
+    const signedFiles = files.filter(file => file.signed);
+    if (signedFiles.length === 0) {
+        throw new Error(
+            "AMO processed the version but returned no signed files"
+        );
+    }
+
+    const downloadedFiles = [];
+    for (const file of signedFiles) {
+        const fileUrl = file.download_url.startsWith("http")
+            ? file.download_url
+            : `https://addons.mozilla.org${file.download_url}`;
+        const res = await fetch(fileUrl, {
+            headers: {
+                Authorization: `JWT ${createAmoAuthToken(apiKey, apiSecret)}`
+            }
+        });
+        if (!res.ok) {
+            throw new Error(
+                `Downloading ${fileUrl} failed with status ${res.status}`
+            );
+        }
+        const fileName = path.join(
+            downloadDir,
+            path.basename(new URL(fileUrl).pathname)
+        );
+        fs.writeFileSync(fileName, Buffer.from(await res.arrayBuffer()));
+        downloadedFiles.push(fileName);
+    }
+    return { downloadedFiles };
+}
+
+/**
+ * Recover a signed xpi from a version that was already uploaded to AMO.
+ *
+ * This handles the failure mode where the upload succeeded but the
+ * process died before downloading the signed file (e.g. network drop
+ * while waiting for approval). Every later signing attempt for the same
+ * version is rejected by AMO with "Version already exists", so the only
+ * way forward is to fetch the already-signed file from the API.
+ *
+ * @param {{ apiKey: string, apiSecret: string, version: string, downloadDir: string }} args
+ * @returns {Promise<{ downloadedFiles: string[] } | null>} null when the
+ * version does not exist at AMO (nothing to recover)
+ */
+async function recoverSignedXpiFromAmo({ apiKey, apiSecret, version, downloadDir }) {
+    const deadline = Date.now() + RECOVERY_TIMEOUT_MS;
+
+    for (let attempt = 0; ; attempt++) {
+        if (attempt > 0) {
+            await new Promise(resolve =>
+                setTimeout(resolve, RECOVERY_POLL_INTERVAL_MS)
+            );
+        }
+
+        const { status, body } = await fetchAmoVersionStatus({
+            apiKey,
+            apiSecret,
+            version
+        });
+
+        if (status === 404) {
+            return null;
+        }
+        if (status !== 200) {
+            throw new Error(`AMO version API returned status ${status}`);
+        }
+
+        if (body.valid === false) {
+            console.warn(
+                "Version failed AMO validation:",
+                body.validation_url ?? "(no validation URL returned)"
+            );
+            return null;
+        }
+
+        // Mirrors sign-addon's waitForSignedAddon readiness check.
+        const ready =
+            body.valid &&
+            body.active &&
+            body.reviewed &&
+            Array.isArray(body.files) &&
+            body.files.length > 0;
+
+        if (ready) {
+            return await downloadAmoSignedFiles(
+                { apiKey, apiSecret },
+                body.files,
+                downloadDir
+            );
+        }
+
+        if (body.valid === true && body.automated_signing === false) {
+            throw new SigningRecoveryError(
+                `Version ${version} was submitted to AMO but requires ` +
+                    `manual review, so it cannot be signed automatically. ` +
+                    `Check https://addons.mozilla.org/developers/ for the ` +
+                    `review status.`
+            );
+        }
+
+        if (Date.now() >= deadline) {
+            throw new SigningRecoveryError(
+                `Version ${version} was submitted to AMO but is still ` +
+                    `being processed after ` +
+                    `${RECOVERY_TIMEOUT_MS / 60_000} minutes. The version ` +
+                    `number is consumed at AMO: once processing finishes, ` +
+                    `re-run this job (re-push the tag) and the signed file ` +
+                    `will be downloaded instead of re-signed.`
+            );
+        }
+
+        console.info(
+            `Version ${version} exists at AMO but is not ready yet; ` +
+                `re-checking in ${RECOVERY_POLL_INTERVAL_MS / 1000}s...`
+        );
+    }
+}
+
 /**
  * AMO signing failures come in two flavors: transient server/network
  * trouble (HTTP 429/5xx, connection resets) worth a backed-off retry,
@@ -185,8 +372,9 @@ function isTransientSigningError(err) {
 
 /**
  * @param {import("web-ext").SignOptions} options
+ * @param {{ apiKey: string, apiSecret: string, version: string, downloadDir: string }} recovery
  */
-async function signWithRetry(options) {
+async function signWithRetry(options, recovery) {
     for (let attempt = 0; ; attempt++) {
         try {
             return await webExt.cmd.sign(options, {
@@ -196,6 +384,37 @@ async function signWithRetry(options) {
         } catch (err) {
             const delay = SIGN_RETRY_DELAYS_MS[attempt];
             if (delay === undefined || !isTransientSigningError(err)) {
+                // Permanent failure, or transient retries exhausted. A
+                // previous attempt may have already uploaded the version
+                // to AMO before dying (e.g. a network drop while waiting
+                // for approval) — every re-upload is then rejected with
+                // "Version already exists". Try to recover by fetching
+                // the signed file straight from the AMO API.
+                console.warn(
+                    "Signing failed; checking AMO for an existing version...",
+                    {
+                        error: err instanceof Error ? err.message : String(err)
+                    }
+                );
+                try {
+                    const recovered = await recoverSignedXpiFromAmo(recovery);
+                    if (recovered) {
+                        console.info(
+                            "Recovered the signed xpi from AMO instead of re-signing"
+                        );
+                        return recovered;
+                    }
+                } catch (recoveryError) {
+                    if (recoveryError instanceof SigningRecoveryError) {
+                        throw recoveryError;
+                    }
+                    console.error(
+                        "AMO recovery check failed:",
+                        recoveryError instanceof Error
+                            ? recoveryError.message
+                            : String(recoveryError)
+                    );
+                }
                 throw err;
             }
 
@@ -236,15 +455,23 @@ if (argv.watch) {
                 return;
             }
 
-            signWithRetry({
-                apiKey,
-                apiSecret,
-                sourceDir: unpackedPath,
-                artifactsDir: signedPath,
-                // Self-distributed add-on, not listed on AMO
-                channel: "unlisted",
-                overwriteDest: true
-            })
+            signWithRetry(
+                {
+                    apiKey,
+                    apiSecret,
+                    sourceDir: unpackedPath,
+                    artifactsDir: signedPath,
+                    // Self-distributed add-on, not listed on AMO
+                    channel: "unlisted",
+                    overwriteDest: true
+                },
+                {
+                    apiKey,
+                    apiSecret,
+                    version: BRIDGE_VERSION,
+                    downloadDir: signedPath
+                }
+            )
                 .then(
                     /** @param {{ downloadedFiles: string[] }} result */
                     result => {
