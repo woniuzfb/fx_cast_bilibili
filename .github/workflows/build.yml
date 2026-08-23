@@ -12,6 +12,8 @@ on:
 jobs:
     build:
         runs-on: ${{ matrix.os }}
+        permissions:
+            contents: write
 
         strategy:
             matrix:
@@ -46,6 +48,18 @@ jobs:
                   name: fx_cast_bilibili_bridge-win64
                   path: dist/bridge/*
 
+            - name: Publish to release (Windows)
+              if: ${{ matrix.os == 'windows-2022' && inputs.release_tag != '' }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.release_tag }}
+              run: |
+                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
+                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
+                    exit 1
+                  fi
+                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+
             - name: Package (macOS)
               if: ${{ matrix.os == 'macos-latest' }}
               run: npm run package:bridge -- -- --arch=arm64
@@ -54,6 +68,18 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-macos
                   path: dist/bridge/*
+
+            - name: Publish to release (macOS)
+              if: ${{ matrix.os == 'macos-latest' && inputs.release_tag != '' }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.release_tag }}
+              run: |
+                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
+                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
+                    exit 1
+                  fi
+                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
 
             - name: Package (macOS Intel)
               if: ${{ matrix.os == 'macos-15-intel' }}
@@ -64,6 +90,18 @@ jobs:
                   name: fx_cast_bilibili_bridge-macos-intel
                   path: dist/bridge/*
 
+            - name: Publish to release (macOS Intel)
+              if: ${{ matrix.os == 'macos-15-intel' && inputs.release_tag != '' }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.release_tag }}
+              run: |
+                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
+                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
+                    exit 1
+                  fi
+                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+
             - name: Package (Ubuntu, deb)
               if: ${{ matrix.os == 'ubuntu-latest' }}
               run: npm run package:bridge -- -- --package-type=deb
@@ -73,6 +111,20 @@ jobs:
                   name: fx_cast_bilibili_bridge-linux-deb
                   path: dist/bridge/*
 
+            # Bridge packaging wipes dist/bridge between runs, so the deb
+            # must be published before the rpm build starts.
+            - name: Publish to release (deb)
+              if: ${{ matrix.os == 'ubuntu-latest' && inputs.release_tag != '' }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.release_tag }}
+              run: |
+                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
+                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
+                    exit 1
+                  fi
+                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
+
             - name: Package (Ubuntu, rpm)
               if: ${{ matrix.os == 'ubuntu-latest' }}
               run: npm run package:bridge -- -- --package-type=rpm
@@ -81,6 +133,18 @@ jobs:
               with:
                   name: fx_cast_bilibili_bridge-linux-rpm
                   path: dist/bridge/*
+
+            - name: Publish to release (rpm)
+              if: ${{ matrix.os == 'ubuntu-latest' && inputs.release_tag != '' }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.release_tag }}
+              run: |
+                  if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY"; then
+                    echo "::error::Release $RELEASE_TAG does not exist (create it first, or run without release_tag)."
+                    exit 1
+                  fi
+                  gh release upload "$RELEASE_TAG" dist/bridge/* --clobber -R "$GITHUB_REPOSITORY"
 
     build-extension:
         runs-on: ubuntu-latest
