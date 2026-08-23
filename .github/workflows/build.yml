@@ -38,15 +38,15 @@ jobs:
                 node-version: [22.x]
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v7
 
             - name: Setup Node.js ${{ matrix.node-version }}
-              uses: actions/setup-node@v4
+              uses: actions/setup-node@v7
               with:
                   node-version: ${{ matrix.node-version }}
 
             # Old version of node-gyp needs Python with setuptools (easier to just use old Python)
-            - uses: actions/setup-python@v6
+            - uses: actions/setup-python@v7
               with:
                   python-version: "3.11"
 
@@ -59,7 +59,7 @@ jobs:
             - name: Package (Windows)
               if: ${{ matrix.os == 'windows-2022' }}
               run: npm run package:bridge -- -- --arch=x64
-            - uses: actions/upload-artifact@v4
+            - uses: actions/upload-artifact@v7
               if: ${{ matrix.os == 'windows-2022' }}
               with:
                   name: fx_cast_bilibili_bridge-win64
@@ -75,7 +75,7 @@ jobs:
             - name: Package (macOS)
               if: ${{ matrix.os == 'macos-latest' }}
               run: npm run package:bridge -- -- --arch=arm64
-            - uses: actions/upload-artifact@v4
+            - uses: actions/upload-artifact@v7
               if: ${{ matrix.os == 'macos-latest' }}
               with:
                   name: fx_cast_bilibili_bridge-macos
@@ -91,7 +91,7 @@ jobs:
             - name: Package (macOS Intel)
               if: ${{ matrix.os == 'macos-15-intel' }}
               run: npm run package:bridge -- -- --arch=x64
-            - uses: actions/upload-artifact@v4
+            - uses: actions/upload-artifact@v7
               if: ${{ matrix.os == 'macos-15-intel' }}
               with:
                   name: fx_cast_bilibili_bridge-macos-intel
@@ -107,7 +107,7 @@ jobs:
             - name: Package (Ubuntu, deb)
               if: ${{ matrix.os == 'ubuntu-latest' }}
               run: npm run package:bridge -- -- --package-type=deb
-            - uses: actions/upload-artifact@v4
+            - uses: actions/upload-artifact@v7
               if: ${{ matrix.os == 'ubuntu-latest' }}
               with:
                   name: fx_cast_bilibili_bridge-linux-deb
@@ -124,7 +124,7 @@ jobs:
             - name: Package (Ubuntu, rpm)
               if: ${{ matrix.os == 'ubuntu-latest' }}
               run: npm run package:bridge -- -- --package-type=rpm
-            - uses: actions/upload-artifact@v4
+            - uses: actions/upload-artifact@v7
               if: ${{ matrix.os == 'ubuntu-latest' }}
               with:
                   name: fx_cast_bilibili_bridge-linux-rpm
@@ -144,17 +144,17 @@ jobs:
             contents: write
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v7
 
             - name: Setup Node.js
-              uses: actions/setup-node@v4
+              uses: actions/setup-node@v7
               with:
                   node-version: 22.x
 
             - run: npm ci --prefix ./extension
             - run: npm run package:extension
 
-            - uses: actions/upload-artifact@v4
+            - uses: actions/upload-artifact@v7
               with:
                   name: bilibili_cast-extension
                   path: dist/extension/*.xpi
@@ -184,7 +184,7 @@ jobs:
 
             # Signing consumes the AMO version, so it only runs for tag
             # pushes (manual dispatch is a build-only test path).
-            - uses: actions/upload-artifact@v4
+            - uses: actions/upload-artifact@v7
               if: startsWith(github.ref, 'refs/tags/')
               with:
                   name: bilibili_cast-extension-signed
