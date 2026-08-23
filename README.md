@@ -9,7 +9,7 @@ A Firefox extension that implements the Chromecast API and exposes it to web app
 
 ## Installing
 
-Install the Firefox extension (from within Firefox) and bridge application via the installer packages. These are two separate downloads that can be found on the [website](https://hensm.github.io/fx_cast/) or in the [GitHub releases](https://github.com/hensm/fx_cast/releases) section.
+Install the Firefox extension (from within Firefox) and bridge application via the installer packages. These are two separate downloads that can be found on the [website](https://woniuzfb.github.io/fx_cast_bilibili/) or in the [GitHub releases](https://github.com/woniuzfb/fx_cast_bilibili/releases) section.
 
 The bridge application is currently supported on Windows, macOS and Linux.
 
@@ -86,7 +86,7 @@ $ sudo pacman -S avahi dpkg rpm-tools
 ### Instructions
 
 ```sh
-$ git clone https://github.com/hensm/fx_cast.git
+$ git clone https://github.com/woniuzfb/fx_cast_bilibili.git
 $ cd fx_cast
 $ npm install
 $ npm run build
@@ -101,9 +101,9 @@ $ npm run remove-manifest
 This will build the extension and bridge, outputting to `dist/`:
 
 -   `dist/bridge/`
-     ... contains the built bridge with launcher script and manifest (with the path pointing that script). The `install-manifest` npm script copies this manifest to the proper location (or adds its current location to the registry on Windows).
+    ... contains the built bridge with launcher script and manifest (with the path pointing that script). The `install-manifest` npm script copies this manifest to the proper location (or adds its current location to the registry on Windows).
 -   `dist/extension/`
-     ... contains the unpacked extension.
+    ... contains the unpacked extension.
 
 Watching extension changes:
 
@@ -136,22 +136,22 @@ $ npm run package:bridge -- -- --arch=x86
 Extension build script (`build:extension`) arguments:
 
 -   `--watch`
-     Rebuild on changes. Incompatible with `--package`.
+    Rebuild on changes. Incompatible with `--package`.
 -   `--package`
-     Package with web-ext.
+    Package with web-ext.
 -   `--mode` `"development"`, `"production"`
-     Sets build mode. Defaults to `development` unless packaging.
+    Sets build mode. Defaults to `development` unless packaging.
 
 Bridge build script (`build:bridge`) arguments:
 
 -   `--package`
     Builds and creates installer packages for distribution.
 -   `--package-type` `"deb"`, `"rpm"`
-     Linux installer package type.
+    Linux installer package type.
 -   `--use-pkg`
-     Create single binary with pkg.
+    Create single binary with pkg.
 -   `--arch` `"x64"`, `"x86"`, `"arm64"`
-     Select platform arch to build for. Defaults to current arch.
+    Select platform arch to build for. Defaults to current arch.
 
     | Platform  | Supported Architectures |
     | --------- | ----------------------- |
@@ -168,9 +168,9 @@ $ npm run package
 ```
 
 -   `dist/bridge/`
-     ... contains the installer package: `fx_cast_bilibili_bridge-<version>-<arch>.(pkg|deb|rpm|exe)`
+    ... contains the installer package: `fx_cast_bilibili_bridge-<version>-<arch>.(pkg|deb|rpm|exe)`
 -   `dist/extension/`
-     ... contains the built extension archive: `fx_cast-<version>.xpi`.
+    ... contains the built extension archive: `fx_cast-<version>.xpi`.
 
 Packaging examples:
 

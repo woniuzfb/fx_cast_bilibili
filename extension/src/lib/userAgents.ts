@@ -4,7 +4,7 @@ import { TypedStorageArea } from "./TypedStorageArea";
 // Bundle UA info at time of build (as a fallback)
 import bundledUaInfo from "../../../docs/ua.json";
 
-const UA_INFO_ENDPOINT = "https://hensm.github.io/fx_cast/ua.json";
+const UA_INFO_ENDPOINT = "https://woniuzfb.github.io/fx_cast_bilibili/ua.json";
 
 interface UaInfo {
     version: 1;

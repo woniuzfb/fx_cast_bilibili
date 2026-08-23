@@ -12,7 +12,7 @@
         "package:bridge": "cd bridge && npm run package",
         "package:extension": "cd extension && npm run package",
         "sign:extension": "cd extension && npm run sign",
-        "release": "tag=${npm_config_tag:?Usage: npm run release --tag=v0.1.6}; git tag \"$tag\" && git push origin \"$tag\"",
+        "release": "tag=${npm_config_tag:?Usage: npm run release --tag=vX.Y.Z}; git tag \"$tag\" && git push origin \"$tag\"",
         "release:build": "gh workflow run build.yml -R woniuzfb/fx_cast_bilibili",
         "package:source": "tar -C .. --exclude='fx_cast_bilibili/fx_cast_bilibili-source.tar.gz' --exclude='node_modules' --exclude='dist' --exclude='build' --exclude='.git' --exclude='.idea' --exclude='*.iml' --exclude='.DS_Store' --exclude='test/ChromeProfile' -czf \"$(pwd)/fx_cast_bilibili-source.tar.gz\" fx_cast_bilibili",
         "test": "node test/driver.js",

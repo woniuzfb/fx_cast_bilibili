@@ -1,9 +1,9 @@
 {
-    "author": "Matt Hensman <m@matt.tf>",
+    "author": "A.I",
     "homepageUrl": "https://github.com/woniuzfb/fx_cast_bilibili",
     "applicationName": "fx_cast_bilibili_bridge",
-    "applicationVersion": "0.1.5",
+    "applicationVersion": "0.1.6",
     "applicationDirectoryName": "fx_cast_bilibili",
     "applicationExecutableName": "fx_cast_bilibili_bridge",
-    "extensionId": "bilibili-cast@local"
+    "extensionId": "fx-cast-bilibili@local"
 }

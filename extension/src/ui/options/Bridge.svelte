@@ -115,7 +115,7 @@
         let updateManifest: UpdateManifest;
         try {
             updateManifest = await fetch(
-                "https://hensm.github.io/fx_cast/updates.json"
+                "https://woniuzfb.github.io/fx_cast_bilibili/updates.json"
             ).then(res => res.json());
         } catch (err) {
             throw new Error(
@@ -138,10 +138,6 @@
     }
 
     async function checkUpdate() {
-        updateStatus = _("optionsBridgeUpdateStatusNoUpdates");
-        return;
-        // Update check disabled for this fork; logic kept for reference.
-        // eslint-disable-next-line no-unreachable
         isCheckingUpdate = true;
 
         try {
@@ -173,7 +169,7 @@
     }
 
     const getReleasePageUrl = (version: string) =>
-        `https://github.com/hensm/fx_cast/releases/tag/${version}`;
+        `https://github.com/woniuzfb/fx_cast_bilibili/releases/tag/${version}`;
 
     async function getUpdate() {
         if (!updateData) return;
