@@ -158,6 +158,11 @@ fs.removeSync(distPath);
 const SIGN_RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
 
 const AMO_API_PREFIX = "https://addons.mozilla.org/api/v4";
+// web-ext >= 10's programmatic cmd.sign() bypasses the yargs option
+// defaults (only the CLI gets this), so the submission API base URL
+// must be passed explicitly or signing fails with
+// "Invalid AMO API base URL: undefined".
+const AMO_SUBMIT_API_BASE_URL = "https://addons.mozilla.org/api/v5/";
 const RECOVERY_POLL_INTERVAL_MS = 30_000;
 const RECOVERY_TIMEOUT_MS = 10 * 60_000;
 
@@ -493,6 +498,7 @@ if (argv.watch) {
                     apiSecret,
                     sourceDir: unpackedPath,
                     artifactsDir: signedPath,
+                    amoBaseUrl: AMO_SUBMIT_API_BASE_URL,
                     // Self-distributed add-on, not listed on AMO
                     channel: "unlisted",
                     overwriteDest: true
