@@ -157,7 +157,9 @@ fs.removeSync(distPath);
 
 const SIGN_RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
 
-const AMO_API_PREFIX = "https://addons.mozilla.org/api/v4";
+// AMO API v5 (v4 is frozen). web-ext >= 10 signs through v5 as well, so
+// recovery and signing share the same API surface.
+const AMO_API_PREFIX = "https://addons.mozilla.org/api/v5";
 // web-ext >= 10's programmatic cmd.sign() bypasses the yargs option
 // defaults (only the CLI gets this), so the submission API base URL
 // must be passed explicitly or signing fails with
@@ -196,17 +198,24 @@ function createAmoAuthToken(apiKey, apiSecret) {
 }
 
 /**
- * GET the AMO version status — the same URL web-ext PUTs the upload to
- * and then polls. 404 means the version was never created (the failure
- * happened before/during upload), so there is nothing to recover.
+ * GET the AMO v5 version detail. web-ext >= 10 submits through this same
+ * API, so the version this returns is exactly the one signing created.
+ *
+ * The `v` prefix forces lookup by version number: a version string
+ * without dots would otherwise be treated as a numeric version id.
+ *
+ * 404 means the version was never created (upload failed or validation
+ * failed — validation errors never create a version in v5), so there is
+ * nothing to recover.
  *
  * @param {{ apiKey: string, apiSecret: string, version: string }} args
  * @returns {Promise<{ status: number, body: object }>}
  */
 async function fetchAmoVersionStatus({ apiKey, apiSecret, version }) {
     const versionUrl =
-        `${AMO_API_PREFIX}/addons/${encodeURIComponent(EXTENSION_ID ?? "")}` +
-        `/versions/${encodeURIComponent(version)}/`;
+        `${AMO_API_PREFIX}/addons/addon/` +
+        `${encodeURIComponent(EXTENSION_ID ?? "")}` +
+        `/versions/v${encodeURIComponent(version)}/`;
     const res = await fetch(versionUrl, {
         headers: {
             Authorization: `JWT ${createAmoAuthToken(apiKey, apiSecret)}`,
@@ -217,46 +226,32 @@ async function fetchAmoVersionStatus({ apiKey, apiSecret, version }) {
 }
 
 /**
- * Download the signed files AMO lists for the version into downloadDir.
- * Mirrors sign-addon's downloadSignedFiles: only files flagged `signed`
- * are fetched, named after the download URL's basename.
+ * Download the signed file AMO lists for the version into downloadDir.
+ * Mirrors web-ext 10's downloadSignedFile: fetch file.url (absolute)
+ * with the same JWT auth — unlisted files are not publicly downloadable.
  *
  * @param {{ apiKey: string, apiSecret: string }} args
- * @param {Array<{ signed: boolean, download_url: string }>} files
+ * @param {string} fileUrl
  * @param {string} downloadDir
  * @returns {Promise<{ downloadedFiles: string[] }>}
  */
-async function downloadAmoSignedFiles({ apiKey, apiSecret }, files, downloadDir) {
-    const signedFiles = files.filter(file => file.signed);
-    if (signedFiles.length === 0) {
-        throw new Error(
-            "AMO processed the version but returned no signed files"
-        );
-    }
-
-    const downloadedFiles = [];
-    for (const file of signedFiles) {
-        const fileUrl = file.download_url.startsWith("http")
-            ? file.download_url
-            : `https://addons.mozilla.org${file.download_url}`;
-        const res = await fetch(fileUrl, {
-            headers: {
-                Authorization: `JWT ${createAmoAuthToken(apiKey, apiSecret)}`
-            }
-        });
-        if (!res.ok) {
-            throw new Error(
-                `Downloading ${fileUrl} failed with status ${res.status}`
-            );
+async function downloadAmoSignedFile({ apiKey, apiSecret }, fileUrl, downloadDir) {
+    const res = await fetch(fileUrl, {
+        headers: {
+            Authorization: `JWT ${createAmoAuthToken(apiKey, apiSecret)}`
         }
-        const fileName = path.join(
-            downloadDir,
-            path.basename(new URL(fileUrl).pathname)
+    });
+    if (!res.ok) {
+        throw new Error(
+            `Downloading ${fileUrl} failed with status ${res.status}`
         );
-        fs.writeFileSync(fileName, Buffer.from(await res.arrayBuffer()));
-        downloadedFiles.push(fileName);
     }
-    return { downloadedFiles };
+    const fileName = path.join(
+        downloadDir,
+        path.basename(new URL(fileUrl).pathname)
+    );
+    fs.writeFileSync(fileName, Buffer.from(await res.arrayBuffer()));
+    return { downloadedFiles: [fileName] };
 }
 
 /**
@@ -267,6 +262,12 @@ async function downloadAmoSignedFiles({ apiKey, apiSecret }, files, downloadDir)
  * while waiting for approval). Every later signing attempt for the same
  * version is rejected by AMO with "Version already exists", so the only
  * way forward is to fetch the already-signed file from the API.
+ *
+ * State mapping (v5 version detail `file.status`):
+ * - public:   signed and downloadable — recover it
+ * - disabled: rejected or disabled — permanent failure
+ * - unreviewed / no file yet: still processing or awaiting manual
+ *   review — poll until the deadline
  *
  * @param {{ apiKey: string, apiSecret: string, version: string, downloadDir: string }} args
  * @returns {Promise<{ downloadedFiles: string[] } | null>} null when the
@@ -295,43 +296,27 @@ async function recoverSignedXpiFromAmo({ apiKey, apiSecret, version, downloadDir
             throw new Error(`AMO version API returned status ${status}`);
         }
 
-        if (body.valid === false) {
-            console.warn(
-                "Version failed AMO validation:",
-                body.validation_url ?? "(no validation URL returned)"
-            );
-            return null;
-        }
-
-        // Mirrors sign-addon's waitForSignedAddon readiness check.
-        const ready =
-            body.valid &&
-            body.active &&
-            body.reviewed &&
-            Array.isArray(body.files) &&
-            body.files.length > 0;
-
-        if (ready) {
-            return await downloadAmoSignedFiles(
+        // Mirrors web-ext 10's waitForApproval readiness check.
+        if (body.file?.status === "public" && body.file.url) {
+            return await downloadAmoSignedFile(
                 { apiKey, apiSecret },
-                body.files,
+                body.file.url,
                 downloadDir
             );
         }
 
-        if (body.valid === true && body.automated_signing === false) {
+        if (body.file?.status === "disabled") {
             throw new SigningRecoveryError(
-                `Version ${version} was submitted to AMO but requires ` +
-                    `manual review, so it cannot be signed automatically. ` +
-                    `Check https://addons.mozilla.org/developers/ for the ` +
-                    `review status.`
+                `Version ${version} was rejected or disabled at AMO and ` +
+                    `cannot be signed. Check ` +
+                    `https://addons.mozilla.org/developers/ for details.`
             );
         }
 
         if (Date.now() >= deadline) {
             throw new SigningRecoveryError(
                 `Version ${version} was submitted to AMO but is still ` +
-                    `being processed after ` +
+                    `being processed (or awaiting manual review) after ` +
                     `${RECOVERY_TIMEOUT_MS / 60_000} minutes. The version ` +
                     `number is consumed at AMO: once processing finishes, ` +
                     `re-run this job (re-push the tag) and the signed file ` +
