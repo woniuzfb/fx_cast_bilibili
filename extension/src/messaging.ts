@@ -24,6 +24,8 @@ import type {
 } from "./types";
 import type { ReceiverAction } from "./cast/sdk/enums";
 
+import type { PongReport } from "../../shared/pongReport";
+
 /**
  * Messages are JSON objects with a `subject` string key and a
  * generic `data` key:
@@ -149,6 +151,14 @@ type BridgeMessageDefinitions = {
    */
   "bridge:startDiscovery": {
     shouldWatchStatus: boolean;
+    /**
+     * Half-dead watchdog timeouts (ms) for the bridge. Optional so older
+     * bridges ignore them and the bridge falls back to its own defaults.
+     *   - remote: platform status connection (remote.ts)
+     *   - session: active cast session socket (Session.ts)
+     */
+    remoteHeartbeatStaleMs?: number;
+    sessionHeartbeatStaleMs?: number;
   };
 
   /**
@@ -225,6 +235,26 @@ type BridgeMessageDefinitions = {
    */
   "cast:sessionStopped": {
     sessionId: string;
+  };
+
+  /**
+   * Heartbeat/PONG timing report from a cast connection's platform
+   * socket, emitted ONLY when the live-calibrated threshold diverges from
+   * the hard-coded HEARTBEAT_STALE_MS (steady state stays quiet). Logged
+   * in the extension background console to tune the half-dead watchdog.
+   * `source` identifies which watchdog to adjust:
+   *   - "session" -> Session.ts DEFAULT_HEARTBEAT_STALE_MS
+   *   - "remote"  -> remote.ts DEFAULT_HEARTBEAT_STALE_MS
+   * `report` uses the shared PongReport type (shared/pongReport.d.ts), the
+   * single source of truth also imported by the bridge — no longer a
+   * hand-duplicated shape.
+   */
+  "main:pongDiagnostics": {
+    source: "session" | "remote";
+    sessionId?: string;
+    deviceId?: string;
+    configuredThresholdMs: number;
+    report: PongReport;
   };
 
   /**

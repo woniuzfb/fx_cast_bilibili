@@ -1,4 +1,5 @@
-import CastClient from "./client";
+import CastClient, { HEARTBEAT_INTERVAL_MS } from "./client";
+import type { PongReport } from "./pongMeter";
 
 import type {
     MediaStatus,
@@ -15,14 +16,36 @@ const TRANSPORT_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
 // platform connection half-dead (e.g. silently broken by system sleep).
 const STATUS_PROBE_TIMEOUT_MS = 2500;
 // No PONG for this long means the connection is half-dead; the socket
-// never closed, so only a watchdog can detect it.
-const HEARTBEAT_STALE_MS = 15000;
+// never closed, so only a watchdog can detect it. Used only when the
+// extension doesn't supply a configured value.
+const DEFAULT_HEARTBEAT_STALE_MS = 15000;
+// Hard floor for any configured stale timeout. Below 2x the heartbeat
+// interval the watchdog tears down healthy connections after a single
+// dropped PONG (steady-state staleMs is ~(interval - RTT), which climbs to
+// ~(2*interval - RTT) after one miss). Values under this floor (from a
+// stale UI or tampered store) fall back to DEFAULT_HEARTBEAT_STALE_MS.
+const MIN_HEARTBEAT_STALE_MS = HEARTBEAT_INTERVAL_MS * 2;
 
 interface CastRemoteOptions {
     onApplicationFound?: () => void;
     onApplicationClose?: () => void;
     onReceiverStatusUpdate?: (status: ReceiverStatus) => void;
     onMediaStatusUpdate?: (status?: MediaStatus) => void;
+    /**
+     * Heartbeat/PONG calibration report for the platform connection,
+     * emitted only when the live-calibrated threshold diverges from this
+     * module's HEARTBEAT_STALE_MS. Forwarded to the extension background
+     * log by the owner (bridge/index.ts).
+     */
+    onPongDiagnostics?: (data: {
+        configuredThresholdMs: number;
+        report: PongReport;
+    }) => void;
+    /**
+     * Half-dead watchdog timeout (ms). Falls back to
+     * DEFAULT_HEARTBEAT_STALE_MS when undefined.
+     */
+    heartbeatStaleMs?: number;
     port?: number;
 }
 
@@ -136,6 +159,22 @@ export default class Remote extends CastClient {
             onPong: () => {
                 if (gen !== this.platformGen) return;
                 this.lastPongAt = Date.now();
+            },
+            onPongStats: report => {
+                if (gen !== this.platformGen) return;
+                // Only surface when the live-calibrated threshold diverges
+                // from the effective (configured or default) threshold.
+                if (report.suggestedThresholdMs === this.heartbeatStaleMs) {
+                    return;
+                }
+                console.warn(
+                    "[fx_cast_bilibili] remote pong stats (threshold drift)",
+                    report
+                );
+                this.options?.onPongDiagnostics?.({
+                    configuredThresholdMs: this.heartbeatStaleMs,
+                    report
+                });
             },
             onClose: () => {
                 if (gen !== this.platformGen) return;
@@ -252,11 +291,20 @@ export default class Remote extends CastClient {
         this.statusProbeResolve?.();
     }
 
+    /** Effective half-dead timeout: user-configured value or the default. */
+    private get heartbeatStaleMs() {
+        const configured = this.options?.heartbeatStaleMs;
+        return typeof configured === "number" &&
+            configured >= MIN_HEARTBEAT_STALE_MS
+            ? configured
+            : DEFAULT_HEARTBEAT_STALE_MS;
+    }
+
     private checkHeartbeat() {
         if (this.destroyed) return;
 
         const staleMs = Date.now() - this.lastPongAt;
-        if (staleMs < HEARTBEAT_STALE_MS) return;
+        if (staleMs < this.heartbeatStaleMs) return;
 
         console.warn(
             "[fx_cast_bilibili] Remote heartbeat watchdog fired (no PONG); rebuilding platform connection",

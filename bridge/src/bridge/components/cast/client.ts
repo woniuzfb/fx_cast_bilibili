@@ -1,19 +1,26 @@
 import { Channel, Client } from "castv2";
 
 import type { ReceiverMessage, SenderMessage } from "./types";
+import PongMeter, { type PongReport } from "./pongMeter";
 
 export const NS_CONNECTION = "urn:x-cast:com.google.cast.tp.connection";
 export const NS_HEARTBEAT = "urn:x-cast:com.google.cast.tp.heartbeat";
 export const NS_RECEIVER = "urn:x-cast:com.google.cast.receiver";
 
 const DEFAULT_PORT = 8009;
-const HEARTBEAT_INTERVAL_MS = 5000;
+export const HEARTBEAT_INTERVAL_MS = 5000;
 
 interface CastClientConnectOptions {
     port?: number;
     onReceiverMessage?: (message: ReceiverMessage) => void;
     onHeartbeat?: () => void;
     onPong?: () => void;
+    /**
+     * Periodic heartbeat/PONG timing report (rate-limited by PongMeter).
+     * Owners with a Messenger (e.g. Session) forward this to the extension
+     * background log so HEARTBEAT_STALE_MS can be calibrated from live data.
+     */
+    onPongStats?: (report: PongReport) => void;
     onClose?: () => void;
 }
 
@@ -95,6 +102,12 @@ export default class CastClient {
      * promise that resolves once the client is connected.
      */
     connect(host: string, options?: CastClientConnectOptions) {
+        // Always-on heartbeat analyzer for this connection. Cheap in
+        // steady state (reports are rate-limited inside PongMeter).
+        const pongMeter = new PongMeter(
+            `${host}:${options?.port ?? DEFAULT_PORT}/${this.destinationId}`
+        );
+
         return new Promise<void>((resolve, reject) => {
             let connected = false;
 
@@ -140,14 +153,18 @@ export default class CastClient {
                     // Track PONG replies for connection liveness checks
                     this.heartbeatChannel.on("message", (message: { type?: string }) => {
                         if (message?.type === "PONG") {
+                            const report = pongMeter.onPong();
+                            if (report) options?.onPongStats?.(report);
                             options?.onPong?.();
                         }
                     });
 
                     this.connectionChannel.send({ type: "CONNECT" });
+                    pongMeter.onPing();
                     this.heartbeatChannel.send({ type: "PING" });
 
                     this.heartbeatIntervalId = setInterval(() => {
+                        pongMeter.onPing();
                         this.heartbeatChannel?.send({ type: "PING" });
                         options?.onHeartbeat?.();
                     }, HEARTBEAT_INTERVAL_MS);

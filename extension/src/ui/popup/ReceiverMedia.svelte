@@ -281,7 +281,20 @@
     }
 
     let currentTime = 0;
-    $: currentTime = getEstimatedMediaTime();
+    // Recompute reactively on every timeline / play-state change — not just
+    // once at init. Written as an explicit call so Svelte tracks `timeline`
+    // and `status` as dependencies (a bare `getEstimatedMediaTime()` only
+    // references the function name, so Svelte saw no deps and ran it a single
+    // time, leaving the 1s interval below as the *only* updater). That gap is
+    // exactly the "popup opens at 0, then jumps to the real position a beat
+    // later" flash: the seeded timeline already holds the true position on
+    // mount, so recomputing here makes the very first paint show it. The
+    // interval still smooths progress between receiver status reports.
+    $: currentTime = estimatePopupMediaTime(
+        timeline,
+        status.playerState === PlayerState.PLAYING,
+        Date.now()
+    );
 
     // Update estimated time every second
     onMount(() => {

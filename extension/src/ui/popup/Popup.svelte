@@ -572,14 +572,16 @@
 
 {#if hasSelectorContext && isBilibiliPage}
     <div class="media-type-select">
-        <div class="media-type-select__label-cast">Quality</div>
+        <div class="media-type-select__label-cast">
+            {_("popupBilibiliQualityLabel")}
+        </div>
         <div class="select-wrapper">
             <select
                 class="media-type-select__dropdown"
                 bind:value={bilibiliQuality}
                 on:change={setBilibiliQuality}
             >
-                <option value={0}>Auto (highest compatible)</option>
+                <option value={0}>{_("popupBilibiliQualityAuto")}</option>
                 <option value={112}>1080P+</option>
                 <option value={80}>1080P</option>
                 <option value={64}>720P</option>

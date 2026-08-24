@@ -18,6 +18,15 @@ const remotes = new Map<string, Remote>();
 let shutdownPromise: Promise<void> | undefined;
 let mediaServerCommandQueue: Promise<void> = Promise.resolve();
 
+/**
+ * Half-dead watchdog timeouts (ms) supplied by the extension via
+ * `bridge:startDiscovery`. `undefined` means fall back to each component's
+ * built-in default. `sessionHeartbeatStaleMs` is latched here at discovery
+ * time and applied when a session is later created.
+ */
+let remoteHeartbeatStaleMs: number | undefined;
+let sessionHeartbeatStaleMs: number | undefined;
+
 function queueMediaServerCommand(command: () => Promise<void>) {
     mediaServerCommandQueue = mediaServerCommandQueue
         .catch(err => console.error("Previous media server command failed", err))
@@ -66,6 +75,12 @@ export function run(messaging: Messenger) {
             case "bridge:startDiscovery": {
                 const { shouldWatchStatus } = message.data;
 
+                // Latch user-configured watchdog timeouts (if provided) for
+                // Remote (used immediately below) and Session (used when a
+                // session is later created).
+                remoteHeartbeatStaleMs = message.data.remoteHeartbeatStaleMs;
+                sessionHeartbeatStaleMs = message.data.sessionHeartbeatStaleMs;
+
                 deviceBrowser = new CastDeviceBrowser();
 
                 deviceBrowser.on("deviceUp", device => {
@@ -82,6 +97,7 @@ export function run(messaging: Messenger) {
                             device.id,
                             new Remote(device.host, {
                                 port: device.port,
+                                heartbeatStaleMs: remoteHeartbeatStaleMs,
                                 // RECEIVER_STATUS
                                 onReceiverStatusUpdate(status) {
                                     messaging.sendMessage({
@@ -103,6 +119,22 @@ export function run(messaging: Messenger) {
                                         data: {
                                             deviceId: device.id,
                                             status
+                                        }
+                                    });
+                                },
+                                // Heartbeat calibration for the platform
+                                // watchdog (drift-gated inside Remote).
+                                onPongDiagnostics({
+                                    configuredThresholdMs,
+                                    report
+                                }) {
+                                    messaging.sendMessage({
+                                        subject: "main:pongDiagnostics",
+                                        data: {
+                                            source: "remote",
+                                            deviceId: device.id,
+                                            configuredThresholdMs,
+                                            report
                                         }
                                     });
                                 }
@@ -181,7 +213,7 @@ export function run(messaging: Messenger) {
                     .get(message.data.receiverDevice.id)
                     ?.ensureConnected();
 
-                handleCastMessage(messaging, message);
+                handleCastMessage(messaging, message, sessionHeartbeatStaleMs);
                 break;
             }
 

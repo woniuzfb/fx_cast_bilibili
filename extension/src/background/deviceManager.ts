@@ -1,5 +1,6 @@
 import bridge, { type BridgeInfo } from "../lib/bridge";
 import logger from "../lib/logger";
+import options from "../lib/options";
 import { TypedEventTarget } from "../lib/TypedEventTarget";
 
 import type { Message, Port } from "../messaging";
@@ -55,11 +56,29 @@ export default new (class extends TypedEventTarget<EventMap> {
             this.bridgePort.onMessage.addListener(this.onBridgeMessage);
             this.bridgePort.onDisconnect.addListener(this.onBridgeDisconnect);
 
+            // Forward the user-configured half-dead watchdog timeouts so the
+            // bridge's Remote/Session watchdogs use them instead of their
+            // built-in defaults. Read defensively: a missing/broken option
+            // must not block discovery.
+            let remoteHeartbeatStaleMs: number | undefined;
+            let sessionHeartbeatStaleMs: number | undefined;
+            try {
+                const opts = await options.getAll();
+                remoteHeartbeatStaleMs = opts.castRemoteHeartbeatStaleMs;
+                sessionHeartbeatStaleMs = opts.castSessionHeartbeatStaleMs;
+            } catch (err) {
+                logger.error(
+                    "Failed to read heartbeat options; bridge will use defaults"
+                );
+            }
+
             this.bridgePort.postMessage({
                 subject: "bridge:startDiscovery",
                 data: {
                     // Also send back status messages
-                    shouldWatchStatus: true
+                    shouldWatchStatus: true,
+                    remoteHeartbeatStaleMs,
+                    sessionHeartbeatStaleMs
                 }
             });
         }
@@ -140,6 +159,31 @@ export default new (class extends TypedEventTarget<EventMap> {
                     new CustomEvent("deviceUp", {
                         detail: { deviceInfo }
                     })
+                );
+
+                break;
+            }
+
+            case "main:pongDiagnostics": {
+                // Only sent by the bridge when the live-calibrated threshold
+                // diverges from the configured one, so this always indicates
+                // a threshold worth reviewing. `source` says which file's
+                // HEARTBEAT_STALE_MS to update (Session.ts vs remote.ts).
+                const {
+                    source,
+                    sessionId,
+                    deviceId,
+                    configuredThresholdMs,
+                    report
+                } = message.data;
+                logger.info(
+                    `Cast heartbeat threshold drift [${source}]` +
+                        (report.newMax ? " (new max gap)" : "") +
+                        `: suggested HEARTBEAT_STALE_MS=` +
+                        `${report.suggestedThresholdMs}ms, configured=` +
+                        `${configuredThresholdMs}ms — consider updating ` +
+                        `${source === "remote" ? "remote.ts" : "Session.ts"}`,
+                    { source, sessionId, deviceId, ...report }
                 );
 
                 break;

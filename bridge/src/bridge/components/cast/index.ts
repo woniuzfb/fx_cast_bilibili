@@ -5,7 +5,11 @@ import CastClient from "./client";
 
 const sessions = new Map<string, Session>();
 
-export function handleCastMessage(messaging: Messenger, message: Message) {
+export function handleCastMessage(
+    messaging: Messenger,
+    message: Message,
+    sessionHeartbeatStaleMs?: number
+) {
     switch (message.subject) {
         case "bridge:createCastSession": {
             const { appId, receiverDevice } = message.data;
@@ -17,7 +21,15 @@ export function handleCastMessage(messaging: Messenger, message: Message) {
                 messaging,
                 sessionId => {
                     sessions.set(sessionId, session);
-                }
+                },
+                // Drop the session once it stops (explicit STOP, launch
+                // error, or the half-dead watchdog) so the map can't leak.
+                sessionId => {
+                    sessions.delete(sessionId);
+                },
+                // User-configured half-dead watchdog timeout (falls back to
+                // the Session default when undefined).
+                sessionHeartbeatStaleMs
             );
 
             break;

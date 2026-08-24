@@ -289,6 +289,40 @@
             </OptionsCategory>
         {/if}
 
+        {#if opts.showAdvancedOptions}
+            <OptionsCategory
+                name={_("optionsCastReliabilityCategoryName")}
+                description={_("optionsCastReliabilityCategoryDescription")}
+            >
+                <Option
+                    id="castSessionHeartbeatStaleMs"
+                    label={_("optionsCastSessionHeartbeatStaleMs")}
+                    description={_(
+                        "optionsCastSessionHeartbeatStaleMsDescription"
+                    )}
+                    type="number"
+                    required
+                    min="10000"
+                    max="120000"
+                    step="1000"
+                    bind:value={opts.castSessionHeartbeatStaleMs}
+                />
+                <Option
+                    id="castRemoteHeartbeatStaleMs"
+                    label={_("optionsCastRemoteHeartbeatStaleMs")}
+                    description={_(
+                        "optionsCastRemoteHeartbeatStaleMsDescription"
+                    )}
+                    type="number"
+                    required
+                    min="10000"
+                    max="120000"
+                    step="1000"
+                    bind:value={opts.castRemoteHeartbeatStaleMs}
+                />
+            </OptionsCategory>
+        {/if}
+
         <OptionsCategory
             name={_("optionsSiteWhitelistCategoryName")}
             description={_("optionsSiteWhitelistCategoryDescription")}

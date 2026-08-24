@@ -8,6 +8,7 @@ import type {
     SenderMediaMessage,
     SenderMessage
 } from "./components/cast/types";
+import type { PongReport } from "../../../shared/pongReport";
 
 import type {
     ReceiverDevice,
@@ -40,6 +41,14 @@ type MessageDefinitions = {
      */
     "bridge:startDiscovery": {
         shouldWatchStatus: boolean;
+        /**
+         * Half-dead watchdog timeouts (ms). Optional so older extensions
+         * omit them and the bridge falls back to its own defaults.
+         *   - remote: platform status connection (remote.ts)
+         *   - session: active cast session socket (Session.ts)
+         */
+        remoteHeartbeatStaleMs?: number;
+        sessionHeartbeatStaleMs?: number;
     };
 
     /**
@@ -115,6 +124,23 @@ type MessageDefinitions = {
      */
     "cast:sessionStopped": {
         sessionId: string;
+    };
+
+    /**
+     * Heartbeat/PONG timing report from a cast connection's platform
+     * socket, emitted ONLY when the live-calibrated threshold diverges
+     * from the hard-coded HEARTBEAT_STALE_MS (steady state stays quiet).
+     * Logged in the extension background console to tune the half-dead
+     * watchdog. `source` identifies which watchdog to adjust:
+     *   - "session" -> Session.ts DEFAULT_HEARTBEAT_STALE_MS
+     *   - "remote"  -> remote.ts DEFAULT_HEARTBEAT_STALE_MS
+     */
+    "main:pongDiagnostics": {
+        source: "session" | "remote";
+        sessionId?: string;
+        deviceId?: string;
+        configuredThresholdMs: number;
+        report: PongReport;
     };
 
     /**

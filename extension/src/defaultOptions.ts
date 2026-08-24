@@ -81,6 +81,21 @@ export interface Options {
     /** Seconds to seek for the BLE remote right button. */
     bleRemoteSeekForwardSeconds: number;
 
+    /**
+     * Half-dead watchdog timeout (ms) for a device's platform status
+     * connection in the bridge (remote.ts). No PONG within this window ->
+     * the connection is rebuilt. Higher = more tolerant of load spikes but
+     * slower to recover; lower = faster recovery but risks false positives.
+     */
+    castRemoteHeartbeatStaleMs: number;
+    /**
+     * Half-dead watchdog timeout (ms) for an active cast session's socket
+     * in the bridge (Session.ts). No PONG within this window -> the session
+     * is torn down so the extension can re-cast. Governs how quickly page
+     * PLAY/PAUSE/SEEK failures on a silently-dead session are detected.
+     */
+    castSessionHeartbeatStaleMs: number;
+
     /** Show advanced options on options page. */
     showAdvancedOptions: boolean;
 
@@ -128,5 +143,9 @@ export default {
     bleRemoteUrl: "http://127.0.0.1:5002/ble-remote/events",
     bleRemoteSeekBackwardSeconds: 30,
     bleRemoteSeekForwardSeconds: 30,
+
+    castRemoteHeartbeatStaleMs: 15000,
+    castSessionHeartbeatStaleMs: 15000,
+
     showAdvancedOptions: false
 } as Options;

@@ -164,7 +164,7 @@
         "description": "Media controls unmute button title."
     },
     "popupMediaVolume": {
-        "message": "Unmute",
+        "message": "Volume",
         "description": "Media controls volume slider accessibility label."
     },
     "popupMediaLive": {
@@ -657,5 +657,31 @@
     },
     "optionsBleRemoteEnabledDescription": {
         "message": "Connect to the Voice Edge BLE remote event stream."
+    },
+    "optionsCastReliabilityCategoryName": {
+        "message": "Cast reliability"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "Advanced heartbeat watchdog timeouts for detecting half-dead cast connections. Changes apply to new connections/sessions."
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "Session heartbeat timeout (ms):"
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "How long an active cast session may go without a heartbeat reply before it is torn down so the extension can re-cast. Higher tolerates load spikes; lower reacts a little faster but too low tears down healthy sessions after a single dropped heartbeat. Keep at least 2x the 5s heartbeat (10000+). Default 15000."
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "Device status heartbeat timeout (ms):"
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "How long a device status connection may go without a heartbeat reply before it is rebuilt. Recovery is silent (no re-cast). Higher tolerates load spikes; lower recovers a little faster but too low rebuilds healthy connections after a single dropped heartbeat. Keep at least 2x the 5s heartbeat (10000+). Default 15000."
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "Quality",
+        "description": "Label for the Bilibili stream quality selector in the popup."
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "Auto (highest compatible)",
+        "description": "Bilibili quality option: pick the highest resolution the receiver can play."
     }
 }

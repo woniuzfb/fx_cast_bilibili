@@ -1,7 +1,7 @@
 {
     "name": "fx cast bilibili",
     "description": "Chromecast Firefox Extension with bilibili support",
-    "version": "0.1.6",
+    "version": "0.1.7",
 
     "browser_specific_settings": {
         "gecko": {
