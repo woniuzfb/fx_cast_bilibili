@@ -19,21 +19,6 @@ The bridge application is currently supported on Windows, macOS and Linux.
 > [!IMPORTANT]
 > On Linux platforms such as Arch, it may be necessary to [configure local hostname resolution](https://wiki.archlinux.org/index.php/avahi#Hostname_resolution)[^arch].
 
-### Installing via package managers
-
-> [!NOTE]
-> These packages are maintained by third parties and any issues specfic to these packages should be directed to the respective package maintainers.
-
--   **macOS (Homebrew cask)**
-    -   `fx-cast-bridge` — https://formulae.brew.sh/cask/fx-cast-bridge
-        Install by running `brew install --cask fx-cast-bridge`.
--   **Arch Linux (AUR)**
-    -   `fx_cast-bin` — https://aur.archlinux.org/packages/fx_cast-bin
-
-### Daemon Configuration
-
-See documentation on the [daemon wiki page](https://github.com/hensm/fx_cast/wiki/daemon).
-
 ## Usage
 
 Clicking on the toolbar button or `Cast...` menu item in the page context menu will open a popup that shows a list of receiver devices will allow you to start casting the currently detected app[^cast_app] or media.
@@ -87,7 +72,7 @@ $ sudo pacman -S avahi dpkg rpm-tools
 
 ```sh
 $ git clone https://github.com/woniuzfb/fx_cast_bilibili.git
-$ cd fx_cast
+$ cd fx_cast_bilibili
 $ npm install
 $ npm run build
 
@@ -201,31 +186,11 @@ $ npm test
 $ SELENIUM_BROWSER=chrome npm test
 ```
 
-## Video Demos
-
-These are somewhat outdated now, but show the basic function of the extension:
-
-[<img width="200" src="https://img.youtube.com/vi/Ex9dWKYguEE/0.jpg" alt="fx_cast Netflix" />](https://www.youtube.com/watch?v=Ex9dWKYguEE)
-[<img width="200" src="https://img.youtube.com/vi/16r8lQKeEX8/0.jpg" alt="fx_cast HTML5" />](https://www.youtube.com/watch?v=16r8lQKeEX8)
-
 ## Credit
 
+-   [fx_cast](https://github.com/hensm/fx_cast)
 -   [electron-chromecast](https://github.com/GPMDP/electron-chromecast)[^electron]
--   Icons by [icons8](https://icons8.com/):
-    -   `extension/src/ui/options/assets/icons8-cancel-120.png`
-    -   `extension/src/ui/options/assets/icons8-ok-120.png`
-    -   `extension/src/ui/options/assets/icons8-warn-120.png`
-
-## Donations
-
-### PayPal
-
-<p style="float: left">
-    <a href="https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=3Z2FTMSG976WN&source=url">
-        <img src="https://www.paypal.com/en_US/i/btn/btn_donateCC_LG.gif" alt="Donate with PayPal button" align="middle">
-    </a>
-    <img alt="Donate with PayPal" src="https://i.imgur.com/oisL6Eo.png" align="middle">
-</p>
+-   Icons by [icons8](https://icons8.com/)
 
 [^arch]: By default, Arch does not configure Avahi to resolve `.local` hostnames via the name service switch (NSS), and the underlying mdns module used by this project relies on [`getaddrinfo`](https://en.wikipedia.org/wiki/Getaddrinfo) to resolve these hostnames correctly.
 [^cast_app]: Some sites may only function properly when initiating casting from the in-page player buttons.
