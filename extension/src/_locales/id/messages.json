@@ -28,7 +28,10 @@
         "message": "$appName$ tidak ada di daftar putih",
         "description": "Receiver selector whitelist suggestion banner label.",
         "placeholders": {
-            "appName": { "content": "$1", "example": "Netflix" }
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            }
         },
         "hash": "7699bc5bc233b6cffd70552dca888941"
     },
@@ -86,7 +89,10 @@
         "message": "Mentransmisikan$ellipsis$",
         "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
-            "ellipsis": { "content": "$1", "example": "..." }
+            "ellipsis": {
+                "content": "$1",
+                "example": "..."
+            }
         },
         "hash": "3a13ea12ce352174fc7628f6ce954a53"
     },
@@ -99,7 +105,10 @@
         "message": "Transmisikan ke $deviceName$",
         "description": "Menu text for cast item in context menu for receivers in receiver selector.",
         "placeholders": {
-            "deviceName": { "content": "$1", "example": "Living Room TV" }
+            "deviceName": {
+                "content": "$1",
+                "example": "Living Room TV"
+            }
         },
         "hash": "da6800a599084a9f971214faa56d3806"
     },
@@ -107,8 +116,14 @@
         "message": "Hentikan \"$appName$\" di $deviceName$",
         "description": "Menu text for stop item in context menu for receivers in receiver selector.",
         "placeholders": {
-            "appName": { "content": "$1", "example": "Netflix" },
-            "deviceName": { "content": "$2", "example": "Living Room TV" }
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            },
+            "deviceName": {
+                "content": "$2",
+                "example": "Living Room TV"
+            }
         },
         "hash": "34f1812668ef443ca94b8fdd59f277ad"
     },
@@ -317,7 +332,10 @@
         "message": "Periksa Pembaruan$ellipsis$",
         "description": "Update check button title while in progress. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
-            "ellipsis": { "content": "$1", "example": ".." }
+            "ellipsis": {
+                "content": "$1",
+                "example": ".."
+            }
         },
         "hash": "282dc18c1fe1de587133edd5d050b624"
     },
@@ -345,7 +363,9 @@
         "message": "Aktifkan koneksi daemon cadangan di $hostPort$",
         "description": "Backup daemon checkbox label. Host/port inputs are inserted inline at the hostPort substitution.",
         "placeholders": {
-            "hostPort": { "content": "$1" }
+            "hostPort": {
+                "content": "$1"
+            }
         },
         "hash": "923eff866d306017aa4f5223e07cfcd5"
     },
@@ -668,7 +688,9 @@
         "message": "Terhubung ke $deviceName$",
         "description": "Mirroring popup label displayed whilst session connected before mirroring.",
         "placeholders": {
-            "deviceName": { "content": "$1" }
+            "deviceName": {
+                "content": "$1"
+            }
         },
         "hash": "bd3d58015008ac8b9dcded600e05a744"
     },
@@ -676,7 +698,9 @@
         "message": "Mentransmisikan Layar ke $deviceName$",
         "description": "Mirroring popup label displayed whilst mirroring.",
         "placeholders": {
-            "deviceName": { "content": "$1" }
+            "deviceName": {
+                "content": "$1"
+            }
         },
         "hash": "13dd028ed9d37902f92977622241d0f9"
     },
@@ -690,6 +714,94 @@
         "description": "Mirroring popup stop mirroring button label.",
         "hash": "fade5f575be1a34437a60036bcd96bb3"
     },
-
-    "__WET_LOCALE__": { "message": "id" }
+    "optionsCastReliabilityCategoryName": {
+        "message": "Keandalan Cast"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "Batas waktu watchdog heartbeat lanjutan untuk mendeteksi koneksi Cast yang setengah mati. Perubahan berlaku untuk koneksi/sesi baru."
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "Batas waktu heartbeat sesi (ms):"
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "Berapa lama sesi Cast aktif boleh tanpa balasan heartbeat sebelum diputus agar ekstensi dapat melakukan cast ulang. Lebih tinggi menoleransi lonjakan beban; lebih rendah bereaksi sedikit lebih cepat, tetapi terlalu rendah akan memutus sesi yang sehat hanya setelah satu heartbeat terlewat. Jaga minimal 2x heartbeat 5 detik (10000+). Bawaan 15000."
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "Batas waktu heartbeat status perangkat (ms):"
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "Berapa lama koneksi status perangkat boleh tanpa balasan heartbeat sebelum dibangun ulang. Pemulihan berlangsung diam-diam (tanpa cast ulang). Lebih tinggi menoleransi lonjakan beban; lebih rendah pulih sedikit lebih cepat, tetapi terlalu rendah akan membangun ulang koneksi yang sehat hanya setelah satu heartbeat terlewat. Jaga minimal 2x heartbeat 5 detik (10000+). Bawaan 15000."
+    },
+    "extensionName": {
+        "message": "fx_cast_bilibili"
+    },
+    "actionTitleDefault": {
+        "message": "fx_cast_bilibili"
+    },
+    "popupSearch": {
+        "message": "Cari perangkat"
+    },
+    "popupSearchClear": {
+        "message": "Hapus pencarian"
+    },
+    "popupSearchNoDevicesFound": {
+        "message": "Tidak ada perangkat yang ditemukan untuk \"$searchTerm$\".",
+        "placeholders": {
+            "searchTerm": {
+                "content": "$1",
+                "example": "Living Room"
+            }
+        }
+    },
+    "optionsBridgeUpdateViewChangelog": {
+        "message": "Lihat catatan perubahan"
+    },
+    "optionsSiteWhitelistCustomUserAgent": {
+        "message": "Agen pengguna:"
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgent": {
+        "message": "Agen pengguna:"
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Pencatatan debug Bilibili"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "Tampilkan panel debug di halaman dan log popup/latar belakang Bilibili yang mendetail."
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "Remote BLE"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "Menerima event tombol MiBeacon yang didekripsi dari Voice Edge."
+    },
+    "optionsBleRemoteUrl": {
+        "message": "URL aliran event:"
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Endpoint aliran event JSON yang dipisahkan baris baru dari Voice Edge."
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "Tombol kiri mundur (detik):"
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "Jumlah detik tombol kiri remote BLE mundur."
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "Tombol kanan maju (detik):"
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "Jumlah detik tombol kanan remote BLE maju."
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "Aktifkan remote BLE"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "Hubungkan ke aliran event remote BLE Voice Edge."
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "Kualitas"
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "Otomatis (tertinggi yang kompatibel)"
+    }
 }

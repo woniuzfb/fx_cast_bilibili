@@ -1,0 +1,685 @@
+{
+    "extensionName": {
+        "message": "fx_cast_bilibili",
+        "description": "Name of the extension and the native receiver selector window title."
+    },
+    "extensionDescription": {
+        "message": "为投放网页应用（如 Netflix 或 BBC iPlayer）、HTML5 视频和屏幕共享提供 Chromecast 支持。",
+        "description": "Description of the extension shown in the add-ons manager."
+    },
+    "actionTitleDefault": {
+        "message": "fx_cast_bilibili",
+        "description": "Title for toolbar button in default state."
+    },
+    "actionTitleConnecting": {
+        "message": "fx_cast_bilibili：正在连接",
+        "description": "Title for toolbar button whilst connecting."
+    },
+    "actionTitleConnected": {
+        "message": "fx_cast_bilibili：已连接",
+        "description": "Title for toolbar button whilst connected."
+    },
+    "popupBridgeErrorBanner": {
+        "message": "桥接程序出现问题！",
+        "description": "Bridge error banner message."
+    },
+    "popupBridgeErrorBannerOptions": {
+        "message": "更多信息",
+        "description": "Bridge error banner button label."
+    },
+    "popupWhitelistNotWhitelisted": {
+        "message": "$appName$ 不在白名单中",
+        "description": "Receiver selector whitelist suggestion banner label.",
+        "placeholders": {
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            }
+        }
+    },
+    "popupWhitelistAddToWhitelist": {
+        "message": "添加到白名单",
+        "description": "Receiver selector whitelist suggestion banner button label."
+    },
+    "popupMediaTypeApp": {
+        "message": "此网站的应用",
+        "description": "Receiver selector media type <option> text for current site's sender application."
+    },
+    "popupMediaTypeAppNotFound": {
+        "message": "此网站的应用（未找到）",
+        "description": "Receiver selector media type <option> text for current site's sender application if none found."
+    },
+    "popupMediaTypeAppMedia": {
+        "message": "此媒体",
+        "description": "Receiver selector media type <option> text for media casting."
+    },
+    "popupMediaTypeScreen": {
+        "message": "屏幕",
+        "description": "Receiver selector media type <option> text for screen."
+    },
+    "popupMediaTypeFile": {
+        "message": "浏览...",
+        "description": "Receiver selector media type <option> text for opening a file selector dialog."
+    },
+    "popupMediaSelectCastLabel": {
+        "message": "投放",
+        "description": "(Cast) <select> to:"
+    },
+    "popupMediaSelectToLabel": {
+        "message": "到：",
+        "description": "Cast <select> (to:)"
+    },
+    "popupNoReceiversFound": {
+        "message": "未找到接收设备",
+        "description": "Message displayed in the receiver selector if there are no available receivers."
+    },
+    "popupCastButtonTitle": {
+        "message": "投放",
+        "description": "Button text for each receiver entry in the receiver selector."
+    },
+    "popupCastingButtonTitle": {
+        "message": "正在投放$ellipsis$",
+        "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. → .. → ...) as loading indicator.",
+        "placeholders": {
+            "ellipsis": {
+                "content": "$1",
+                "example": "..."
+            }
+        }
+    },
+    "popupStopButtonTitle": {
+        "message": "停止",
+        "description": "Alternate action button text displayed instead of popupCastButtonTitle."
+    },
+    "popupCastMenuTitle": {
+        "message": "投放到 $deviceName$",
+        "description": "Menu text for cast item in context menu for receivers in receiver selector.",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1",
+                "example": "Living Room TV"
+            }
+        }
+    },
+    "popupStopMenuTitle": {
+        "message": "在 $deviceName$ 上停止“$appName$”",
+        "description": "Menu text for stop item in context menu for receivers in receiver selector.",
+        "placeholders": {
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            },
+            "deviceName": {
+                "content": "$2",
+                "example": "Living Room TV"
+            }
+        }
+    },
+    "popupShowDetailsTitle": {
+        "message": "显示详情",
+        "description": "Receiver device expand button title."
+    },
+    "popupMediaPlay": {
+        "message": "播放",
+        "description": "Media controls play button title."
+    },
+    "popupMediaPause": {
+        "message": "暂停",
+        "description": "Media controls pause button title."
+    },
+    "popupMediaSkipPrevious": {
+        "message": "上一个",
+        "description": "Media controls skip previous button title."
+    },
+    "popupMediaSkipNext": {
+        "message": "下一个",
+        "description": "Media controls skip next button title."
+    },
+    "popupMediaSeek": {
+        "message": "跳转位置",
+        "description": "Media controls seek bar accessibility label."
+    },
+    "popupMediaSeekBackward": {
+        "message": "快退",
+        "description": "Media controls seek backward button title."
+    },
+    "popupMediaSeekForward": {
+        "message": "快进",
+        "description": "Media controls seek forward button title."
+    },
+    "popupMediaSubtitlesCaptions": {
+        "message": "字幕",
+        "description": "Media controls subtitles/cc button title."
+    },
+    "popupMediaSubtitlesCaptionsOff": {
+        "message": "关闭",
+        "description": "Media controls subtitles/cc button title."
+    },
+    "popupMediaMute": {
+        "message": "静音",
+        "description": "Media controls mute button title."
+    },
+    "popupMediaUnmute": {
+        "message": "取消静音",
+        "description": "Media controls unmute button title."
+    },
+    "popupMediaVolume": {
+        "message": "音量",
+        "description": "Media controls volume slider accessibility label."
+    },
+    "popupMediaLive": {
+        "message": "直播",
+        "description": "Media controls label displayed for live streams."
+    },
+    "popupSearch": {
+        "message": "搜索设备",
+        "description": "Media devices search title."
+    },
+    "popupSearchClear": {
+        "message": "清除搜索",
+        "description": "Media devices search clear button title."
+    },
+    "popupSearchNoDevicesFound": {
+        "message": "未找到与“$searchTerm$”匹配的设备。",
+        "description": "Message displayed when no receiver devices are found for a given search term.",
+        "placeholders": {
+            "searchTerm": {
+                "content": "$1",
+                "example": "Living Room"
+            }
+        }
+    },
+    "contextCast": {
+        "message": "投放...",
+        "description": "Main context menu item title. Ellipsis indicates additional information required as it triggers opening of receiver selector."
+    },
+    "contextAddToWhitelist": {
+        "message": "添加到白名单",
+        "description": "Top-level whitelist context menu item title."
+    },
+    "contextAddToWhitelistRecommended": {
+        "message": "添加 $matchPattern$（推荐）",
+        "description": "Context menu item title for recomended match pattern.",
+        "placeholders": {
+            "matchPattern": {
+                "content": "$1",
+                "example": "https://example.com/*"
+            }
+        }
+    },
+    "contextAddToWhitelistAdvancedAdd": {
+        "message": "添加 $matchPattern$",
+        "description": "Context menu item title for all other match patterns.",
+        "placeholders": {
+            "matchPattern": {
+                "content": "$1",
+                "example": "*://*.example.com/*"
+            }
+        }
+    },
+    "optionsBridgeLoading": {
+        "message": "正在加载桥接信息...",
+        "description": "Loading placeholder text for bridge section on options page."
+    },
+    "optionsBridgeFoundStatusTitle": {
+        "message": "已找到桥接程序",
+        "description": "Bridge OK status title text."
+    },
+    "optionsBridgeIssueStatusTitle": {
+        "message": "桥接程序问题",
+        "description": "Bridge error status title text."
+    },
+    "optionsBridgeIssueStatusTextTimedOut": {
+        "message": "连接超时。",
+        "description": "Bridge timed out issue additional description text."
+    },
+    "optionsBridgeIssueStatusTextAuthentication": {
+        "message": "连接认证失败。",
+        "description": "Bridge authentication issue additional description text."
+    },
+    "optionsBridgeNotFoundStatusTitle": {
+        "message": "未找到桥接程序",
+        "description": "Bridge missing status title text."
+    },
+    "optionsBridgeNotFoundStatusText": {
+        "message": "请尝试下载并安装最新版本。",
+        "description": "Bridge not found additional description text"
+    },
+    "optionsBridgeStatsName": {
+        "message": "名称：",
+        "description": "Bridge stats name row title."
+    },
+    "optionsBridgeStatsVersion": {
+        "message": "版本：",
+        "description": "Bridge stats version row title."
+    },
+    "optionsBridgeStatsExpectedVersion": {
+        "message": "预期版本：",
+        "description": "Bridge stats expected version row title."
+    },
+    "optionsBridgeStatsCompatibility": {
+        "message": "兼容性：",
+        "description": "Bridge stats compatibility row title."
+    },
+    "optionsBridgeStatsRecommendedAction": {
+        "message": "建议操作：",
+        "description": "Bridge stats recommended action row title."
+    },
+    "optionsBridgeCompatible": {
+        "message": "兼容",
+        "description": "Compatibility status is definitely compatible."
+    },
+    "optionsBridgeLikelyCompatible": {
+        "message": "可能兼容",
+        "description": "Compatibility status is probably compatible."
+    },
+    "optionsBridgeIncompatible": {
+        "message": "不兼容",
+        "description": "Compatibility status is definitely incompatible."
+    },
+    "optionsBridgeOlderAction": {
+        "message": "桥接程序版本低于预期，请尝试将桥接程序更新到最新版本。",
+        "description": "Recommended action for when the installed bridge version is older than the installed extension version."
+    },
+    "optionsBridgeNewerAction": {
+        "message": "桥接程序版本高于预期，请尝试将扩展更新到最新版本。",
+        "description": "Recommended action for when the installed bridge version is newer than the installed extension version."
+    },
+    "optionsBridgeNoAction": {
+        "message": "无需操作。",
+        "description": "Recommended action for when both bridge and extension versions are compatible or likely compatible."
+    },
+    "optionsBridgeRefresh": {
+        "message": "刷新桥接状态",
+        "description": "Bridge status refresh button title."
+    },
+    "optionsBridgeUpdateCheck": {
+        "message": "检查更新",
+        "description": "Update check button title."
+    },
+    "optionsBridgeUpdateChecking": {
+        "message": "正在检查更新$ellipsis$",
+        "description": "Update check button title while in progress. Ellipsis cycles (. → .. → ...) as loading indicator.",
+        "placeholders": {
+            "ellipsis": {
+                "content": "$1",
+                "example": ".."
+            }
+        }
+    },
+    "optionsBridgeUpdateStatusNoUpdates": {
+        "message": "没有可用更新",
+        "description": "Update status if no updates are found."
+    },
+    "optionsBridgeUpdateStatusError": {
+        "message": "检查更新时出错",
+        "description": "Update status if an error was encountered checking for updates."
+    },
+    "optionsBridgeUpdateAvailable": {
+        "message": "有可用更新：",
+        "description": "Update status if an update was found."
+    },
+    "optionsBridgeUpdate": {
+        "message": "立即更新...",
+        "description": "Update now button title. Ellipsis indicates additional information as it triggers an update window popup."
+    },
+    "optionsBridgeUpdateViewChangelog": {
+        "message": "查看更新日志",
+        "description": "Link text for changelog link next to bridge update button."
+    },
+    "optionsBridgeBackupEnabled": {
+        "message": "在 $hostPort$ 上启用备用守护进程连接",
+        "description": "Backup daemon checkbox label. Host/port inputs are inserted inline at the hostPort substitution.",
+        "placeholders": {
+            "hostPort": {
+                "content": "$1"
+            }
+        }
+    },
+    "optionsBridgeBackupEnabledDescription": {
+        "message": "如果常规桥接连接失败，则尝试连接到以守护进程模式运行的桥接程序。",
+        "description": "Backup daemon checkbox description."
+    },
+    "optionsBridgeBackupSecure": {
+        "message": "使用安全连接",
+        "description": "Daemon secure option checkbox label."
+    },
+    "optionsBridgeBackupSecureDescription": {
+        "message": "通过 HTTPS 而非 HTTP 连接到守护进程。需要额外配置。",
+        "description": "Daemon secure option description."
+    },
+    "optionsBridgeBackupPassword": {
+        "message": "密码：",
+        "description": "Daemon password option label."
+    },
+    "optionsBridgeBackupPasswordDescription": {
+        "message": "为守护进程连接配置的可选密码。",
+        "description": "Daemon password option description."
+    },
+    "optionsMediaCategoryName": {
+        "message": "媒体投放",
+        "description": "Options page media casting category title."
+    },
+    "optionsMediaCategoryDescription": {
+        "message": "HTML5 视频/音频媒体投放。",
+        "description": "Options page media casting category description."
+    },
+    "optionsMediaEnabled": {
+        "message": "启用媒体投放",
+        "description": "Media casting enabled checkbox label."
+    },
+    "optionsMediaSyncElement": {
+        "message": "将接收设备状态与媒体元素同步",
+        "description": "Media casting sync checkbox label."
+    },
+    "optionsMediaSyncElementDescription": {
+        "message": "在媒体元素与接收设备之间同步状态（播放、音量、字幕等）。",
+        "description": "Media casting sync option description."
+    },
+    "optionsMediaStopOnUnload": {
+        "message": "页面卸载时停止接收设备播放",
+        "description": "Media stop on unload checkbox label."
+    },
+    "optionsLocalMediaCategoryName": {
+        "message": "本地媒体投放",
+        "description": "Options page local media category title."
+    },
+    "optionsLocalMediaCategoryDescription": {
+        "message": "由桥接程序启动的 HTTP 服务器，用于将本地媒体文件流式传输到投放接收设备。",
+        "description": "Options page local media category description."
+    },
+    "optionsLocalMediaEnabled": {
+        "message": "启用本地媒体投放",
+        "description": "Local media enabled checkbox label."
+    },
+    "optionsLocalMediaServerPort": {
+        "message": "HTTP 服务器端口：",
+        "description": "HTTP server port input label."
+    },
+    "optionsReceiverSelectorCategoryName": {
+        "message": "接收设备选择器",
+        "description": "Options page receiver selector category title."
+    },
+    "optionsReceiverSelectorCategoryDescription": {
+        "message": "接收设备选择界面。",
+        "description": "Options page receiver selector category description."
+    },
+    "optionsReceiverSelectorWaitForConnection": {
+        "message": "等待连接",
+        "description": "Receiver selector wait for connection option checkbox label."
+    },
+    "optionsReceiverSelectorWaitForConnectionDescription": {
+        "message": "在会话建立或连接失败之前，保持接收设备选择器打开。",
+        "description": "Receiver selector wait for connection option description."
+    },
+    "optionsReceiverSelectorCloseIfFocusLost": {
+        "message": "失去焦点后关闭",
+        "description": "Receiver selector close if focus lost option checkbox label."
+    },
+    "optionsReceiverSelectorExpandActive": {
+        "message": "自动展开已连接设备的媒体控件",
+        "description": "Receiver selector expand active checkbox label."
+    },
+    "optionsReceiverSelectorShowMediaImages": {
+        "message": "显示媒体图片",
+        "description": "Receiver selector show media images checkbox label."
+    },
+    "optionsReceiverSelectorShowMediaImagesDescription": {
+        "message": "从远程服务器加载媒体缩略图/品牌图片。",
+        "description": "Receiver selector show media images option description."
+    },
+    "optionsSiteWhitelistCategoryName": {
+        "message": "网站白名单",
+        "description": "Options page whitelist category title."
+    },
+    "optionsSiteWhitelistCategoryDescription": {
+        "message": "启用投放功能的网站，其用户代理字符串将被替换为 Chrome 版本以确保兼容性。",
+        "description": "Options page whitelist category description."
+    },
+    "optionsSiteWhitelistEnabled": {
+        "message": "启用网站白名单",
+        "description": "Whitelist enabled checkbox label."
+    },
+    "optionsSiteWhitelistEnabledDescription": {
+        "message": "禁用此选项将在任何网站上启用投放功能，但不会替换用户代理字符串。",
+        "description": "Whitelist restricted mode enabled description."
+    },
+    "optionsSiteWhitelistContent": {
+        "message": "匹配模式：",
+        "description": "Match patterns editor widget label."
+    },
+    "optionsSiteWhitelistAddItem": {
+        "message": "添加项目",
+        "description": "Add new whitelist item button title."
+    },
+    "optionsSiteWhitelistEditItem": {
+        "message": "编辑",
+        "description": "Tooltip text for whitelist item's edit button."
+    },
+    "optionsSiteWhitelistRemoveItem": {
+        "message": "移除",
+        "description": "Tooltip text for whitelist item's remove button."
+    },
+    "optionsSiteWhitelistItemShowOptions": {
+        "message": "显示选项",
+        "description": "Tooltip text for whitelist item's show options button."
+    },
+    "optionsSiteWhitelistItemHideOptions": {
+        "message": "隐藏选项",
+        "description": "Tooltip text for whitelist item's hide options button."
+    },
+    "optionsSiteWhitelistInvalidDuplicatePattern": {
+        "message": "匹配模式已存在！",
+        "description": "Error displayed by input indicating a duplicate match pattern."
+    },
+    "optionsSiteWhitelistKnownAppsCustomApp": {
+        "message": "自定义",
+        "description": "Default <option> for knownApps <select>."
+    },
+    "optionsSiteWhitelistCustomUserAgent": {
+        "message": "用户代理：",
+        "description": "Custom user agent option label."
+    },
+    "optionsSiteWhitelistCustomUserAgentDescription": {
+        "message": "如果指定，则为白名单网站使用的自定义用户代理字符串。",
+        "description": "Custom user agent option description."
+    },
+    "optionsSiteWhitelistUserAgentDisabled": {
+        "message": "禁用用户代理",
+        "description": "Whitelist item user agent disabled checkbox label."
+    },
+    "optionsSiteWhitelistUserAgentDisabledDescription": {
+        "message": "完全禁用与此模式匹配的网站的用户代理替换。",
+        "description": "Whitelist item user agent disabled checkbox description."
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgent": {
+        "message": "用户代理：",
+        "description": "Whitelist item user agent option label."
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgentDescription": {
+        "message": "如果指定，则专门为与此模式匹配的网站使用的自定义用户代理字符串。",
+        "description": "Whitelist item user agent option label."
+    },
+    "optionsSiteWhitelistItemEnabled": {
+        "message": "启用白名单项目",
+        "description": "Whitelist item enabled checkbox title."
+    },
+    "optionsSiteWhitelistItemPattern": {
+        "message": "匹配模式",
+        "description": "Whitelist item pattern edit input title."
+    },
+    "optionsMirroringCategoryName": {
+        "message": "屏幕镜像",
+        "description": "Options page mirroring category name."
+    },
+    "optionsMirroringCategoryDescription": {
+        "message": "镜像到 Chromecast 接收应用。",
+        "description": "Options page mirroring category description."
+    },
+    "optionsMirroringEnabled": {
+        "message": "启用屏幕镜像（实验性）",
+        "description": "Mirroring enabled checkbox label."
+    },
+    "optionsMirroringAppId": {
+        "message": "镜像应用 ID：",
+        "description": "Mirroring app ID input label."
+    },
+    "optionsMirroringAppIdDescription": {
+        "message": "已注册的 Chromecast 接收应用的应用 ID。仅供高级用途。必须与默认应用兼容（参见 GitHub 仓库）。",
+        "description": "Mirroring app ID option description."
+    },
+    "optionsMirroringStreamOptions": {
+        "message": "流编码选项",
+        "description": "Options page mirroring category description."
+    },
+    "optionsMirroringStreamFrameRate": {
+        "message": "最大帧率：",
+        "description": "Mirroring stream max frame rate option label."
+    },
+    "optionsMirroringStreamMaxBitRate": {
+        "message": "最大比特率：",
+        "description": "Mirroring stream max bit rate option label."
+    },
+    "optionsMirroringStreamMaxBitRateDescription": {
+        "message": "以比特每秒为单位的最大比特率。",
+        "description": "Mirroring stream max bit rate option description."
+    },
+    "optionsMirroringStreamDownscaleFactor": {
+        "message": "缩小系数：",
+        "description": "Mirroring stream downscale factor option label."
+    },
+    "optionsMirroringStreamDownscaleFactorDescription": {
+        "message": "视频流缩小的系数，例如系数 2.0 会使视频尺寸变为 1/4。 ",
+        "description": "Mirroring stream downscale factor option description."
+    },
+    "optionsMirroringStreamMaxResolution": {
+        "message": "限制分辨率为",
+        "description": "Mirroring stream resolution option label."
+    },
+    "optionsMirroringStreamMaxResolutionDescription": {
+        "message": "在保持源宽高比的同时限制最大视频流分辨率。",
+        "description": "Mirroring stream resolution option description."
+    },
+    "optionsMirroringStreamMaxResolutionWidthPlaceholder": {
+        "message": "宽度",
+        "description": "Max resolution width input placeholder."
+    },
+    "optionsMirroringStreamMaxResolutionHeightPlaceholder": {
+        "message": "高度",
+        "description": "Max resolution height input placeholder."
+    },
+    "optionsOptionRecommended": {
+        "message": "推荐",
+        "description": "Badge next to option label indicating boolean option is recommended enabled."
+    },
+    "optionsReset": {
+        "message": "恢复默认值",
+        "description": "Restore default options button label."
+    },
+    "optionsSave": {
+        "message": "保存",
+        "description": "Save options button label."
+    },
+    "optionsSaved": {
+        "message": "已保存！",
+        "description": "Status text displayed by save button once options have been successfully saved."
+    },
+    "optionsShowAdvancedOptions": {
+        "message": "显示高级选项",
+        "description": "Show advanced options checkbox label."
+    },
+    "mirroringPopupTitle": {
+        "message": "镜像",
+        "description": "Mirroring popup window title."
+    },
+    "mirroringPopupWaitingForConnection": {
+        "message": "正在等待连接",
+        "description": "Mirroring popup loading text."
+    },
+    "mirroringPopupConnectedTo": {
+        "message": "已连接到 $deviceName$",
+        "description": "Mirroring popup label displayed whilst session connected before mirroring.",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupMirroringTo": {
+        "message": "正在镜像到 $deviceName$",
+        "description": "Mirroring popup label displayed whilst mirroring.",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupChooseSource": {
+        "message": "选择来源",
+        "description": "Mirroring popup choose media source button label."
+    },
+    "mirroringPopupStopMirroring": {
+        "message": "停止镜像",
+        "description": "Mirroring popup stop mirroring button label."
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Bilibili 调试日志"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "显示页内调试面板以及详细的 Bilibili 弹窗/后台日志。"
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "BLE 遥控器"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "接收来自 Voice Edge 的已解密 MiBeacon 按钮事件。"
+    },
+    "optionsBleRemoteUrl": {
+        "message": "事件流 URL："
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Voice Edge 以换行符分隔的 JSON 事件流端点。"
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "左键后退（秒）："
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "BLE 遥控器左键后退的秒数。"
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "右键前进（秒）："
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "BLE 遥控器右键前进的秒数。"
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "启用 BLE 遥控器"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "连接到 Voice Edge BLE 遥控器事件流。"
+    },
+    "optionsCastReliabilityCategoryName": {
+        "message": "投放可靠性"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "用于检测半死投放连接的高级心跳看门狗超时。更改将应用于新的连接/会话。"
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "会话心跳超时（毫秒）："
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "活动投放会话在被拆除以便扩展重新投放之前，允许多长时间没有心跳回复。较高可容忍负载峰值；较低反应略快，但过低会在丢失单个心跳后就拆除健康的会话。请至少保持 5 秒心跳的 2 倍（10000 以上）。默认 15000。"
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "设备状态心跳超时（毫秒）："
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "设备状态连接在被重建之前，允许多长时间没有心跳回复。恢复是静默的（不重新投放）。较高可容忍负载峰值；较低恢复略快，但过低会在丢失单个心跳后就重建健康的连接。请至少保持 5 秒心跳的 2 倍（10000 以上）。默认 15000。"
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "画质"
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "自动（最高兼容画质）"
+    }
+}

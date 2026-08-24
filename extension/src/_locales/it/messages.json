@@ -279,5 +279,327 @@
     "optionsSaved": {
         "message": "Salvato!",
         "description": "Status text displayed by save button once options have been successfully saved."
+    },
+    "optionsCastReliabilityCategoryName": {
+        "message": "Affidabilità del Cast"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "Timeout avanzati del watchdog dell'heartbeat per rilevare connessioni Cast semi-morte. Le modifiche si applicano alle nuove connessioni/sessioni."
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "Timeout heartbeat della sessione (ms):"
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "Per quanto tempo una sessione Cast attiva può restare senza una risposta heartbeat prima di essere chiusa affinché l'estensione possa ritrasmettere. Un valore più alto tollera i picchi di carico; uno più basso reagisce un po' più in fretta, ma troppo basso chiude sessioni sane dopo un solo heartbeat perso. Mantieni almeno 2 volte l'heartbeat da 5s (10000+). Predefinito 15000."
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "Timeout heartbeat dello stato del dispositivo (ms):"
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "Per quanto tempo una connessione di stato del dispositivo può restare senza una risposta heartbeat prima di essere ricostruita. Il ripristino è silenzioso (nessuna ritrasmissione). Un valore più alto tollera i picchi di carico; uno più basso si ripristina un po' più in fretta, ma troppo basso ricostruisce connessioni sane dopo un solo heartbeat perso. Mantieni almeno 2 volte l'heartbeat da 5s (10000+). Predefinito 15000."
+    },
+    "extensionName": {
+        "message": "fx_cast_bilibili"
+    },
+    "actionTitleDefault": {
+        "message": "fx_cast_bilibili"
+    },
+    "actionTitleConnecting": {
+        "message": "fx_cast_bilibili: Connessione in corso"
+    },
+    "actionTitleConnected": {
+        "message": "fx_cast_bilibili: Connesso"
+    },
+    "popupBridgeErrorBanner": {
+        "message": "Si è verificato un problema con il bridge!"
+    },
+    "popupBridgeErrorBannerOptions": {
+        "message": "Maggiori informazioni"
+    },
+    "popupMediaTypeFile": {
+        "message": "Sfoglia..."
+    },
+    "popupCastingButtonTitle": {
+        "message": "Casting$ellipsis$",
+        "placeholders": {
+            "ellipsis": {
+                "content": "$1",
+                "example": "..."
+            }
+        }
+    },
+    "popupStopButtonTitle": {
+        "message": "Interrompi"
+    },
+    "popupShowDetailsTitle": {
+        "message": "Mostra dettagli"
+    },
+    "popupMediaPlay": {
+        "message": "Riproduci"
+    },
+    "popupMediaPause": {
+        "message": "Pausa"
+    },
+    "popupMediaSkipPrevious": {
+        "message": "Precedente"
+    },
+    "popupMediaSkipNext": {
+        "message": "Successivo"
+    },
+    "popupMediaSeek": {
+        "message": "Cerca posizione"
+    },
+    "popupMediaSeekBackward": {
+        "message": "Indietro"
+    },
+    "popupMediaSeekForward": {
+        "message": "Avanti"
+    },
+    "popupMediaSubtitlesCaptions": {
+        "message": "Sottotitoli"
+    },
+    "popupMediaSubtitlesCaptionsOff": {
+        "message": "Disattivati"
+    },
+    "popupMediaMute": {
+        "message": "Disattiva audio"
+    },
+    "popupMediaUnmute": {
+        "message": "Riattiva audio"
+    },
+    "popupMediaVolume": {
+        "message": "Volume"
+    },
+    "popupMediaLive": {
+        "message": "In diretta"
+    },
+    "popupSearch": {
+        "message": "Cerca dispositivi"
+    },
+    "popupSearchClear": {
+        "message": "Cancella ricerca"
+    },
+    "popupSearchNoDevicesFound": {
+        "message": "Nessun dispositivo trovato per \"$searchTerm$\".",
+        "placeholders": {
+            "searchTerm": {
+                "content": "$1",
+                "example": "Living Room"
+            }
+        }
+    },
+    "contextCast": {
+        "message": "Trasmetti..."
+    },
+    "optionsBridgeIssueStatusTextTimedOut": {
+        "message": "Connessione scaduta."
+    },
+    "optionsBridgeIssueStatusTextAuthentication": {
+        "message": "Autenticazione della connessione non riuscita."
+    },
+    "optionsBridgeStatsExpectedVersion": {
+        "message": "Versione prevista:"
+    },
+    "optionsBridgeRefresh": {
+        "message": "Aggiorna stato del bridge"
+    },
+    "optionsBridgeUpdateViewChangelog": {
+        "message": "Visualizza changelog"
+    },
+    "optionsBridgeBackupSecure": {
+        "message": "Usa una connessione sicura"
+    },
+    "optionsBridgeBackupSecureDescription": {
+        "message": "Si connette al daemon tramite HTTPS anziché HTTP. Richiede una configurazione aggiuntiva."
+    },
+    "optionsBridgeBackupPassword": {
+        "message": "Password:"
+    },
+    "optionsBridgeBackupPasswordDescription": {
+        "message": "La password facoltativa configurata per le connessioni del daemon."
+    },
+    "optionsMediaCategoryName": {
+        "message": "Casting multimediale"
+    },
+    "optionsMediaCategoryDescription": {
+        "message": "Casting di contenuti multimediali video/audio HTML5."
+    },
+    "optionsMediaEnabled": {
+        "message": "Abilita casting multimediale"
+    },
+    "optionsMediaSyncElement": {
+        "message": "Sincronizza lo stato del ricevitore con l'elemento multimediale"
+    },
+    "optionsMediaSyncElementDescription": {
+        "message": "Sincronizza lo stato (riproduzione, volume, sottotitoli, ecc.) tra l'elemento multimediale e il dispositivo ricevitore."
+    },
+    "optionsMediaStopOnUnload": {
+        "message": "Interrompi la riproduzione del ricevitore alla chiusura della pagina"
+    },
+    "optionsLocalMediaCategoryName": {
+        "message": "Casting di media locali"
+    },
+    "optionsLocalMediaCategoryDescription": {
+        "message": "Server HTTP avviato dall'app bridge per trasmettere file multimediali locali al ricevitore."
+    },
+    "optionsLocalMediaEnabled": {
+        "message": "Abilita casting di media locali"
+    },
+    "optionsReceiverSelectorExpandActive": {
+        "message": "Espandi automaticamente i controlli multimediali per i dispositivi connessi"
+    },
+    "optionsReceiverSelectorShowMediaImages": {
+        "message": "Mostra immagini multimediali"
+    },
+    "optionsReceiverSelectorShowMediaImagesDescription": {
+        "message": "Carica miniature/immagini di branding da server remoti."
+    },
+    "optionsSiteWhitelistContent": {
+        "message": "Pattern di corrispondenza:"
+    },
+    "optionsSiteWhitelistItemShowOptions": {
+        "message": "Mostra opzioni"
+    },
+    "optionsSiteWhitelistItemHideOptions": {
+        "message": "Nascondi opzioni"
+    },
+    "optionsSiteWhitelistInvalidDuplicatePattern": {
+        "message": "Il pattern di corrispondenza esiste già!"
+    },
+    "optionsSiteWhitelistCustomUserAgent": {
+        "message": "User agent:"
+    },
+    "optionsSiteWhitelistCustomUserAgentDescription": {
+        "message": "Se specificata, una stringa user agent personalizzata da usare per i siti nella whitelist."
+    },
+    "optionsSiteWhitelistUserAgentDisabled": {
+        "message": "Disabilita user agent"
+    },
+    "optionsSiteWhitelistUserAgentDisabledDescription": {
+        "message": "Disabilita completamente la sostituzione dello user agent per i siti che corrispondono a questo pattern."
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgent": {
+        "message": "User agent:"
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgentDescription": {
+        "message": "Se specificata, una stringa user agent personalizzata da usare specificamente per i siti che corrispondono a questo pattern."
+    },
+    "optionsSiteWhitelistItemEnabled": {
+        "message": "Abilita voce della whitelist"
+    },
+    "optionsSiteWhitelistItemPattern": {
+        "message": "Pattern di corrispondenza"
+    },
+    "optionsMirroringCategoryDescription": {
+        "message": "Mirroring verso un'app ricevitore Chromecast."
+    },
+    "optionsMirroringAppId": {
+        "message": "ID app di mirroring:"
+    },
+    "optionsMirroringAppIdDescription": {
+        "message": "ID app per un'applicazione ricevitore Chromecast registrata. Solo per uso avanzato. Deve essere compatibile con l'app predefinita (vedi il repository GitHub)."
+    },
+    "optionsMirroringStreamOptions": {
+        "message": "Opzioni di codifica dello stream"
+    },
+    "optionsMirroringStreamFrameRate": {
+        "message": "Frame rate massimo:"
+    },
+    "optionsMirroringStreamMaxBitRate": {
+        "message": "Bitrate massimo:"
+    },
+    "optionsMirroringStreamMaxBitRateDescription": {
+        "message": "Bitrate massimo in bit al secondo."
+    },
+    "optionsMirroringStreamDownscaleFactor": {
+        "message": "Fattore di riduzione:"
+    },
+    "optionsMirroringStreamDownscaleFactorDescription": {
+        "message": "Fattore di riduzione del flusso video, ad es. un fattore di 2.0 produce un video di 1/4 della dimensione. "
+    },
+    "optionsMirroringStreamMaxResolution": {
+        "message": "Limita la risoluzione a"
+    },
+    "optionsMirroringStreamMaxResolutionDescription": {
+        "message": "Limita la risoluzione massima del flusso video mantenendo le proporzioni della sorgente."
+    },
+    "optionsMirroringStreamMaxResolutionWidthPlaceholder": {
+        "message": "Larghezza"
+    },
+    "optionsMirroringStreamMaxResolutionHeightPlaceholder": {
+        "message": "Altezza"
+    },
+    "optionsShowAdvancedOptions": {
+        "message": "Mostra opzioni avanzate"
+    },
+    "mirroringPopupTitle": {
+        "message": "Mirroring"
+    },
+    "mirroringPopupWaitingForConnection": {
+        "message": "In attesa di connessione"
+    },
+    "mirroringPopupConnectedTo": {
+        "message": "Connesso a $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupMirroringTo": {
+        "message": "Mirroring su $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupChooseSource": {
+        "message": "Scegli sorgente"
+    },
+    "mirroringPopupStopMirroring": {
+        "message": "Interrompi mirroring"
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Log di debug di Bilibili"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "Mostra il pannello di debug nella pagina e log dettagliati del popup/background di Bilibili."
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "Telecomando BLE"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "Riceve eventi dei pulsanti MiBeacon decrittografati da Voice Edge."
+    },
+    "optionsBleRemoteUrl": {
+        "message": "URL del flusso di eventi:"
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Endpoint del flusso di eventi JSON delimitati da newline di Voice Edge."
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "Pulsante sinistro indietro (secondi):"
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "Numero di secondi di riavvolgimento del pulsante sinistro del telecomando BLE."
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "Pulsante destro avanti (secondi):"
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "Numero di secondi di avanzamento del pulsante destro del telecomando BLE."
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "Abilita telecomando BLE"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "Si connette al flusso di eventi del telecomando BLE di Voice Edge."
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "Qualità"
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "Automatica (massima compatibile)"
     }
 }

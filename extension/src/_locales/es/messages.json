@@ -37,7 +37,6 @@
         "message": "Examinar...",
         "description": "Receiver selector media type <option> text for opening a file selector dialog."
     },
-
     "popupMediaSelectCastLabel": {
         "message": "Transmitir",
         "description": "(Cast) <select> to:"
@@ -68,12 +67,10 @@
         "message": "Detener",
         "description": "Alternate action button text displayed instead of popupCastButtonTitle."
     },
-
     "contextCast": {
         "message": "Transmitir a...",
         "description": "Main context menu item title. Ellipsis indicates additional information required as it triggers opening of receiver selector."
     },
-
     "contextAddToWhitelist": {
         "message": "Añadir a la lista blanca",
         "description": "Top-level whitelist context menu item title."
@@ -98,7 +95,6 @@
             }
         }
     },
-
     "optionsBridgeLoading": {
         "message": "Cargando información de la aplicación puente...",
         "description": "Loading placeholder text for bridge section on options page."
@@ -119,7 +115,6 @@
         "message": "Intente descargar e instalar la última versión.",
         "description": "Bridge not found additional description text"
     },
-
     "optionsBridgeStatsName": {
         "message": "Nombre:",
         "description": "Bridge stats name row title."
@@ -194,7 +189,6 @@
         "message": "Actualizar ahora...",
         "description": "Update now button title. Ellipsis indicates additional information as it triggers an update window popup."
     },
-
     "optionsBridgeBackupEnabled": {
         "message": "Activar conexión de demonio de respaldo en $hostPort$",
         "description": "Backup daemon checkbox label. Host/port inputs are inserted inline at the hostPort substitution.",
@@ -208,7 +202,6 @@
         "message": "Si la conexión de puente regular falla, intente conectar a un puente ejecutándose en modo demonio.",
         "description": "Backup daemon checkbox description."
     },
-
     "optionsMediaCategoryName": {
         "message": "Transmisión de contenidos",
         "description": "Options page media casting category title."
@@ -233,7 +226,6 @@
         "message": "Detener reproducción del receptor al cerrar la página",
         "description": "Media stop on unload checkbox label."
     },
-
     "optionsLocalMediaCategoryName": {
         "message": "Transmisión de contenidos locales",
         "description": "Options page local media category title."
@@ -270,7 +262,6 @@
         "message": "Cerrar al perder el foco",
         "description": "Receiver selector close if focus lost option checkbox label."
     },
-
     "optionsSiteWhitelistCategoryName": {
         "message": "Lista blanca de agentes de usuario",
         "description": "Options page whitelist category title."
@@ -283,29 +274,9 @@
         "message": "Activar lista blanca de sitios",
         "description": "Whitelist enabled checkbox label."
     },
-    "optionsSiteWhitelistRestrictedEnabled": {
-        "message": "Activar modo restringido",
-        "description": "Whitelist restricted mode enabled checkbox label."
-    },
-    "optionsSiteWhitelistRestrictedEnabledDescription": {
-        "message": "También aplica restricciones de la lista blanca a sitios intentando cargar la funcionalidad de transmisión sin importar el agente de usuario actual.",
-        "description": "Whitelist restricted mode enabled description."
-    },
     "optionsSiteWhitelistContent": {
         "message": "Patrones de coincidencia:",
         "description": "Match patterns editor widget label."
-    },
-    "optionsSiteWhitelistBasicView": {
-        "message": "Vista básica",
-        "description": "Switch to basic view button title."
-    },
-    "optionsSiteWhitelistRawView": {
-        "message": "Vista en bruto",
-        "description": "Switch to raw view button title."
-    },
-    "optionsSiteWhitelistSaveRaw": {
-        "message": "Guardar archivo en bruto",
-        "description": "Save raw view edits button title."
     },
     "optionsSiteWhitelistAddItem": {
         "message": "Añadir elemento",
@@ -319,17 +290,6 @@
         "message": "Eliminar",
         "description": "Remove whitelist item button title. Displayed on each item."
     },
-    "optionsSiteWhitelistInvalidMatchPattern": {
-        "message": "Patrón de coincidencia $matchPattern$ inválido",
-        "description": "Error displayed by input indicating an invalid match pattern.",
-        "placeholders": {
-            "matchPattern": {
-                "content": "$1",
-                "example": "http://example"
-            }
-        }
-    },
-
     "optionsMirroringCategoryName": {
         "message": "Enviar pantalla/pestaña",
         "description": "Options page mirroring category name."
@@ -366,5 +326,295 @@
     "optionsSaved": {
         "message": "¡Guardado!",
         "description": "Status text displayed by save button once options have been successfully saved."
+    },
+    "optionsCastReliabilityCategoryName": {
+        "message": "Fiabilidad de Cast"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "Tiempos de espera avanzados del supervisor de latidos para detectar conexiones de Cast medio muertas. Los cambios se aplican a nuevas conexiones/sesiones."
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "Tiempo de espera del latido de sesión (ms):"
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "Cuánto tiempo puede estar una sesión de Cast activa sin una respuesta de latido antes de cerrarse para que la extensión pueda volver a transmitir. Un valor más alto tolera picos de carga; uno más bajo reacciona algo más rápido, pero demasiado bajo cierra sesiones sanas tras un solo latido perdido. Mantén al menos 2 veces el latido de 5s (10000+). Predeterminado 15000."
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "Tiempo de espera del latido de estado del dispositivo (ms):"
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "Cuánto tiempo puede estar una conexión de estado del dispositivo sin una respuesta de latido antes de reconstruirse. La recuperación es silenciosa (sin volver a transmitir). Un valor más alto tolera picos de carga; uno más bajo se recupera algo más rápido, pero demasiado bajo reconstruye conexiones sanas tras un solo latido perdido. Mantén al menos 2 veces el latido de 5s (10000+). Predeterminado 15000."
+    },
+    "extensionName": {
+        "message": "fx_cast_bilibili"
+    },
+    "actionTitleDefault": {
+        "message": "fx_cast_bilibili"
+    },
+    "actionTitleConnecting": {
+        "message": "fx_cast_bilibili: Conectando"
+    },
+    "actionTitleConnected": {
+        "message": "fx_cast_bilibili: Conectado"
+    },
+    "popupBridgeErrorBanner": {
+        "message": "¡Hay un problema con la aplicación puente!"
+    },
+    "popupBridgeErrorBannerOptions": {
+        "message": "Más información"
+    },
+    "popupCastMenuTitle": {
+        "message": "Transmitir a $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1",
+                "example": "Living Room TV"
+            }
+        }
+    },
+    "popupStopMenuTitle": {
+        "message": "Detener \"$appName$\" en $deviceName$",
+        "placeholders": {
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            },
+            "deviceName": {
+                "content": "$2",
+                "example": "Living Room TV"
+            }
+        }
+    },
+    "popupShowDetailsTitle": {
+        "message": "Mostrar detalles"
+    },
+    "popupMediaPlay": {
+        "message": "Reproducir"
+    },
+    "popupMediaPause": {
+        "message": "Pausar"
+    },
+    "popupMediaSkipPrevious": {
+        "message": "Anterior"
+    },
+    "popupMediaSkipNext": {
+        "message": "Siguiente"
+    },
+    "popupMediaSeek": {
+        "message": "Buscar posición"
+    },
+    "popupMediaSeekBackward": {
+        "message": "Retroceder"
+    },
+    "popupMediaSeekForward": {
+        "message": "Avanzar"
+    },
+    "popupMediaSubtitlesCaptions": {
+        "message": "Subtítulos"
+    },
+    "popupMediaSubtitlesCaptionsOff": {
+        "message": "Desactivado"
+    },
+    "popupMediaMute": {
+        "message": "Silenciar"
+    },
+    "popupMediaUnmute": {
+        "message": "Activar sonido"
+    },
+    "popupMediaVolume": {
+        "message": "Volumen"
+    },
+    "popupMediaLive": {
+        "message": "En directo"
+    },
+    "popupSearch": {
+        "message": "Buscar dispositivos"
+    },
+    "popupSearchClear": {
+        "message": "Borrar búsqueda"
+    },
+    "popupSearchNoDevicesFound": {
+        "message": "No se encontraron dispositivos para \"$searchTerm$\".",
+        "placeholders": {
+            "searchTerm": {
+                "content": "$1",
+                "example": "Living Room"
+            }
+        }
+    },
+    "optionsBridgeIssueStatusTextTimedOut": {
+        "message": "Se agotó el tiempo de conexión."
+    },
+    "optionsBridgeIssueStatusTextAuthentication": {
+        "message": "No se pudo autenticar la conexión."
+    },
+    "optionsBridgeRefresh": {
+        "message": "Actualizar estado de la aplicación puente"
+    },
+    "optionsBridgeUpdateViewChangelog": {
+        "message": "Ver registro de cambios"
+    },
+    "optionsBridgeBackupSecure": {
+        "message": "Usar una conexión segura"
+    },
+    "optionsBridgeBackupSecureDescription": {
+        "message": "Se conecta al daemon mediante HTTPS en lugar de HTTP. Requiere configuración adicional."
+    },
+    "optionsBridgeBackupPassword": {
+        "message": "Contraseña:"
+    },
+    "optionsBridgeBackupPasswordDescription": {
+        "message": "La contraseña opcional configurada para las conexiones del daemon."
+    },
+    "optionsReceiverSelectorExpandActive": {
+        "message": "Expandir automáticamente los controles multimedia para dispositivos conectados"
+    },
+    "optionsReceiverSelectorShowMediaImages": {
+        "message": "Mostrar imágenes de medios"
+    },
+    "optionsReceiverSelectorShowMediaImagesDescription": {
+        "message": "Carga miniaturas/imágenes de marca desde servidores remotos."
+    },
+    "optionsSiteWhitelistEnabledDescription": {
+        "message": "Desactivar esta opción habilitará la función de transmisión en cualquier sitio, pero no se reemplazará el agente de usuario."
+    },
+    "optionsSiteWhitelistItemShowOptions": {
+        "message": "Mostrar opciones"
+    },
+    "optionsSiteWhitelistItemHideOptions": {
+        "message": "Ocultar opciones"
+    },
+    "optionsSiteWhitelistInvalidDuplicatePattern": {
+        "message": "¡El patrón de coincidencia ya existe!"
+    },
+    "optionsSiteWhitelistKnownAppsCustomApp": {
+        "message": "Personalizado"
+    },
+    "optionsSiteWhitelistCustomUserAgent": {
+        "message": "Agente de usuario:"
+    },
+    "optionsSiteWhitelistCustomUserAgentDescription": {
+        "message": "Si se especifica, una cadena de agente de usuario personalizada para los sitios en la lista blanca."
+    },
+    "optionsSiteWhitelistUserAgentDisabled": {
+        "message": "Desactivar agente de usuario"
+    },
+    "optionsSiteWhitelistUserAgentDisabledDescription": {
+        "message": "Desactivar por completo el reemplazo del agente de usuario para los sitios que coincidan con este patrón."
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgent": {
+        "message": "Agente de usuario:"
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgentDescription": {
+        "message": "Si se especifica, una cadena de agente de usuario personalizada para usar específicamente en los sitios que coincidan con este patrón."
+    },
+    "optionsSiteWhitelistItemEnabled": {
+        "message": "Activar elemento de la lista blanca"
+    },
+    "optionsSiteWhitelistItemPattern": {
+        "message": "Patrón de coincidencia"
+    },
+    "optionsMirroringStreamOptions": {
+        "message": "Opciones de codificación del stream"
+    },
+    "optionsMirroringStreamFrameRate": {
+        "message": "Fotogramas por segundo máx.:"
+    },
+    "optionsMirroringStreamMaxBitRate": {
+        "message": "Tasa de bits máx.:"
+    },
+    "optionsMirroringStreamMaxBitRateDescription": {
+        "message": "Tasa de bits máxima en bits por segundo."
+    },
+    "optionsMirroringStreamDownscaleFactor": {
+        "message": "Factor de reducción:"
+    },
+    "optionsMirroringStreamDownscaleFactorDescription": {
+        "message": "Factor por el que se reduce el stream de vídeo; p. ej., un factor de 2,0 daría como resultado un vídeo de 1/4 del tamaño. "
+    },
+    "optionsMirroringStreamMaxResolution": {
+        "message": "Limitar resolución a"
+    },
+    "optionsMirroringStreamMaxResolutionDescription": {
+        "message": "Limita la resolución máxima del stream de vídeo manteniendo la relación de aspecto de la fuente."
+    },
+    "optionsMirroringStreamMaxResolutionWidthPlaceholder": {
+        "message": "Ancho"
+    },
+    "optionsMirroringStreamMaxResolutionHeightPlaceholder": {
+        "message": "Alto"
+    },
+    "optionsShowAdvancedOptions": {
+        "message": "Mostrar opciones avanzadas"
+    },
+    "mirroringPopupTitle": {
+        "message": "Duplicación"
+    },
+    "mirroringPopupWaitingForConnection": {
+        "message": "Esperando conexión"
+    },
+    "mirroringPopupConnectedTo": {
+        "message": "Conectado a $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupMirroringTo": {
+        "message": "Duplicando a $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupChooseSource": {
+        "message": "Elegir fuente"
+    },
+    "mirroringPopupStopMirroring": {
+        "message": "Detener duplicación"
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Registro de depuración de Bilibili"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "Muestra el panel de depuración en la página y registros detallados de popup/segundo plano de Bilibili."
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "Mando BLE"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "Recibe eventos de botón MiBeacon descifrados de Voice Edge."
+    },
+    "optionsBleRemoteUrl": {
+        "message": "URL del flujo de eventos:"
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Endpoint del flujo de eventos JSON delimitado por saltos de línea de Voice Edge."
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "Botón izquierdo retroceder (segundos):"
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "Número de segundos que el botón izquierdo del mando BLE retrocede."
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "Botón derecho avanzar (segundos):"
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "Número de segundos que el botón derecho del mando BLE avanza."
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "Activar mando BLE"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "Conecta con el flujo de eventos del mando BLE de Voice Edge."
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "Calidad"
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "Automática (la más alta compatible)"
     }
 }

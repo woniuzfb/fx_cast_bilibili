@@ -38,7 +38,10 @@
         "message": "$appName$ is niet gewhitelist",
         "description": "Receiver selector whitelist suggestion banner label.",
         "placeholders": {
-            "appName": { "content": "$1", "example": "Netflix" }
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            }
         },
         "hash": "7699bc5bc233b6cffd70552dca888941"
     },
@@ -96,7 +99,10 @@
         "message": "Aan het casten$ellipsis$",
         "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
-            "ellipsis": { "content": "$1", "example": "..." }
+            "ellipsis": {
+                "content": "$1",
+                "example": "..."
+            }
         },
         "hash": "3a13ea12ce352174fc7628f6ce954a53"
     },
@@ -109,7 +115,10 @@
         "message": "Cast naar $deviceName$",
         "description": "Menu text for cast item in context menu for receivers in receiver selector.",
         "placeholders": {
-            "deviceName": { "content": "$1", "example": "Living Room TV" }
+            "deviceName": {
+                "content": "$1",
+                "example": "Living Room TV"
+            }
         },
         "hash": "da6800a599084a9f971214faa56d3806"
     },
@@ -117,8 +126,14 @@
         "message": "Stop $appName$ op $deviceName$",
         "description": "Menu text for stop item in context menu for receivers in receiver selector.",
         "placeholders": {
-            "appName": { "content": "$1", "example": "Netflix" },
-            "deviceName": { "content": "$2", "example": "Living Room TV" }
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            },
+            "deviceName": {
+                "content": "$2",
+                "example": "Living Room TV"
+            }
         },
         "hash": "34f1812668ef443ca94b8fdd59f277ad"
     },
@@ -203,10 +218,13 @@
         "hash": "3e6f7446e68cf0949146c3d488385d27"
     },
     "popupSearchNoDevicesFound": {
-        "message": "Geen apparaten gevonden voor \"$searchTerms$\".",
+        "message": "Geen apparaten gevonden voor \"$searchTerm$\".",
         "description": "Message displayed when no receiver devices are found for a given search term.",
         "placeholders": {
-            "searchTerm": { "content": "$1", "example": "Living Room" }
+            "searchTerm": {
+                "content": "$1",
+                "example": "Living Room"
+            }
         },
         "hash": "4c53dd5c9ed94ee2ed53969930e0fbfb"
     },
@@ -346,7 +364,10 @@
         "message": "Bezig met controleren op updates$ellipsis$",
         "description": "Update check button title while in progress. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
-            "ellipsis": { "content": "$1", "example": ".." }
+            "ellipsis": {
+                "content": "$1",
+                "example": ".."
+            }
         },
         "hash": "282dc18c1fe1de587133edd5d050b624"
     },
@@ -378,7 +399,9 @@
         "message": "Back-up daemonverbinding inschakelen op $hostPort$",
         "description": "Backup daemon checkbox label. Host/port inputs are inserted inline at the hostPort substitution.",
         "placeholders": {
-            "hostPort": { "content": "$1" }
+            "hostPort": {
+                "content": "$1"
+            }
         },
         "hash": "923eff866d306017aa4f5223e07cfcd5"
     },
@@ -710,7 +733,9 @@
         "message": "Verbonden met $deviceName$",
         "description": "Mirroring popup label displayed whilst session connected before mirroring.",
         "placeholders": {
-            "deviceName": { "content": "$1" }
+            "deviceName": {
+                "content": "$1"
+            }
         },
         "hash": "bd3d58015008ac8b9dcded600e05a744"
     },
@@ -718,7 +743,9 @@
         "message": "Spiegelen naar $deviceName$",
         "description": "Mirroring popup label displayed whilst mirroring.",
         "placeholders": {
-            "deviceName": { "content": "$1" }
+            "deviceName": {
+                "content": "$1"
+            }
         },
         "hash": "13dd028ed9d37902f92977622241d0f9"
     },
@@ -732,6 +759,64 @@
         "description": "Mirroring popup stop mirroring button label.",
         "hash": "fade5f575be1a34437a60036bcd96bb3"
     },
-
-    "__WET_LOCALE__": { "message": "nl" }
+    "optionsCastReliabilityCategoryName": {
+        "message": "Cast-betrouwbaarheid"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "Geavanceerde heartbeat-watchdog-time-outs om half-dode Cast-verbindingen te detecteren. Wijzigingen gelden voor nieuwe verbindingen/sessies."
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "Time-out sessie-heartbeat (ms):"
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "Hoe lang een actieve Cast-sessie zonder heartbeat-antwoord mag blijven voordat deze wordt afgebroken zodat de extensie opnieuw kan casten. Hoger tolereert belastingspieken; lager reageert iets sneller, maar te laag breekt gezonde sessies af na slechts één gemiste heartbeat. Houd minstens 2x de 5s-heartbeat aan (10000+). Standaard 15000."
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "Time-out apparaatstatus-heartbeat (ms):"
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "Hoe lang een apparaatstatusverbinding zonder heartbeat-antwoord mag blijven voordat deze opnieuw wordt opgebouwd. Herstel is stil (geen nieuwe cast). Hoger tolereert belastingspieken; lager herstelt iets sneller, maar te laag bouwt gezonde verbindingen opnieuw op na slechts één gemiste heartbeat. Houd minstens 2x de 5s-heartbeat aan (10000+). Standaard 15000."
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Bilibili-foutopsporingslogboek"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "Toont het foutopsporingspaneel in de pagina en uitgebreide Bilibili-popup-/achtergrondlogboeken."
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "BLE-afstandsbediening"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "Ontvangt ontsleutelde MiBeacon-knopgebeurtenissen van Voice Edge."
+    },
+    "optionsBleRemoteUrl": {
+        "message": "URL van gebeurtenisstroom:"
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Voice Edge-eindpunt voor een door regeleinden gescheiden JSON-gebeurtenisstroom."
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "Linkerknop terugspoelen (seconden):"
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "Aantal seconden dat de linkerknop van de BLE-afstandsbediening terugspoelt."
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "Rechterknop vooruitspoelen (seconden):"
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "Aantal seconden dat de rechterknop van de BLE-afstandsbediening vooruitspoelt."
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "BLE-afstandsbediening inschakelen"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "Maakt verbinding met de gebeurtenisstroom van de Voice Edge BLE-afstandsbediening."
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "Kwaliteit"
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "Automatisch (hoogste compatibele)"
+    }
 }

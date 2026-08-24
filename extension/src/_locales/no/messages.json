@@ -3,7 +3,6 @@
         "message": "Skrur på Chromecast for å caste apper på nettet (som Netflix eller BBC iPlayer), HTML5 video og skjerm/fane-deling",
         "description": "Description of the extension shown in the add-ons manager."
     },
-
     "popupMediaTypeApp": {
         "message": "denne sidens applikasjon",
         "description": "Receiver selector media type <option> text for current site's sender application."
@@ -24,7 +23,6 @@
         "message": "Søk...",
         "description": "Receiver selector media type <option> text for opening a file selector dialog."
     },
-
     "popupMediaSelectCastLabel": {
         "message": "Cast",
         "description": "(Cast) <select> to:"
@@ -55,12 +53,10 @@
         "message": "Stopp",
         "description": "Alternate action button text displayed instead of popupCastButtonTitle."
     },
-
     "contextCast": {
         "message": "Cast...",
         "description": "Main context menu item title. Ellipsis indicates additional information required as it triggers opening of receiver selector."
     },
-
     "contextAddToWhitelist": {
         "message": "Legg til i Whitelist",
         "description": "Top-level whitelist context menu item title."
@@ -85,7 +81,6 @@
             }
         }
     },
-
     "optionsBridgeLoading": {
         "message": "Laster bro-info",
         "description": "Loading placeholder text for bridge section on options page."
@@ -106,7 +101,6 @@
         "message": "Prøv å last ned nyeste versjon",
         "description": "Bridge not found additional description text"
     },
-
     "optionsBridgeStatsName": {
         "message": "Navn:",
         "description": "Bridge stats name row title."
@@ -181,7 +175,6 @@
         "message": "Oppdater nå...",
         "description": "Update now button title. Ellipsis indicates additional information as it triggers an update window popup."
     },
-
     "optionsBridgeBackupEnabled": {
         "message": "Skru på backup daemon tilkobling på $hostPort$",
         "description": "Backup daemon checkbox label. Host/port inputs are inserted inline at the hostPort substitution.",
@@ -195,7 +188,6 @@
         "message": "Hvis den vanlige bro-tilkoblingen mislykkes, prøv å koble til en bro som kjører i daemon-modus",
         "description": "Backup daemon checkbox description."
     },
-
     "optionsMediaCategoryName": {
         "message": "Media-casting",
         "description": "Options page media casting category title."
@@ -220,7 +212,6 @@
         "message": "Stop spilling på mottager når siden lukkes",
         "description": "Media stop on unload checkbox label."
     },
-
     "optionsLocalMediaCategoryName": {
         "message": "Lokal media-casting",
         "description": "Options page local media category title."
@@ -237,7 +228,6 @@
         "message": "HTTP-server port:",
         "description": "HTTP server port input label."
     },
-
     "optionsReceiverSelectorCategoryName": {
         "message": "Velg mottager",
         "description": "Options page receiver selector category title."
@@ -258,7 +248,6 @@
         "message": "Lukk når fokus mistes",
         "description": "Receiver selector close if focus lost option checkbox label."
     },
-
     "optionsSiteWhitelistCategoryName": {
         "message": "Brukeragent whitelist",
         "description": "Options page whitelist category title."
@@ -271,29 +260,9 @@
         "message": "Skru på whitelist",
         "description": "Whitelist enabled checkbox label."
     },
-    "optionsSiteWhitelistRestrictedEnabled": {
-        "message": "Skru på ",
-        "description": "Whitelist restricted mode enabled checkbox label."
-    },
-    "optionsSiteWhitelistRestrictedEnabledDescription": {
-        "message": "Legg også til whitelist-begrensninger til side smo prøvde å laste cast-funksjonalitet uavhengig av nåværende brukeragent.",
-        "description": "Whitelist restricted mode enabled description."
-    },
     "optionsSiteWhitelistContent": {
         "message": "Match mønster",
         "description": "Match patterns editor widget label."
-    },
-    "optionsSiteWhitelistBasicView": {
-        "message": "Standard visning",
-        "description": "Switch to basic view button title."
-    },
-    "optionsSiteWhitelistRawView": {
-        "message": "Rå visning",
-        "description": "Switch to raw view button title."
-    },
-    "optionsSiteWhitelistSaveRaw": {
-        "message": "Lagre rå",
-        "description": "Save raw view edits button title."
     },
     "optionsSiteWhitelistAddItem": {
         "message": "Legg til",
@@ -307,17 +276,6 @@
         "message": "Fjern",
         "description": "Remove whitelist item button title. Displayed on each item."
     },
-    "optionsSiteWhitelistInvalidMatchPattern": {
-        "message": "Ugyldig mønster $matchPattern$",
-        "description": "Error displayed by input indicating an invalid match pattern.",
-        "placeholders": {
-            "matchPattern": {
-                "content": "$1",
-                "example": "http://example"
-            }
-        }
-    },
-
     "optionsMirroringCategoryName": {
         "message": "Skjerm/fane-casting",
         "description": "Options page mirroring category name."
@@ -338,12 +296,10 @@
         "message": "App ID for en registrert Chromecast-mottager applikasjon. Kun for viderekommende. Må være kompatibel med standard-appen (se Github repo)",
         "description": "Mirroring app ID option description."
     },
-
     "optionsOptionRecommended": {
         "message": "anbefalt",
         "description": "Badge next to option label indicating boolean option is recommended enabled."
     },
-
     "optionsReset": {
         "message": "Tilbakestill verdier",
         "description": "Restore default options button label."
@@ -355,5 +311,307 @@
     "optionsSaved": {
         "message": "Lagret",
         "description": "Status text displayed by save button once options have been successfully saved."
+    },
+    "optionsCastReliabilityCategoryName": {
+        "message": "Cast-pålitelighet"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "Avanserte tidsavbrudd for heartbeat-vakthund for å oppdage halvdøde Cast-tilkoblinger. Endringer gjelder nye tilkoblinger/økter."
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "Tidsavbrudd for økt-heartbeat (ms):"
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "Hvor lenge en aktiv Cast-økt kan gå uten et heartbeat-svar før den rives ned slik at utvidelsen kan caste på nytt. Høyere tåler belastningstopper; lavere reagerer litt raskere, men for lavt river ned friske økter etter et eneste tapt heartbeat. Behold minst 2x 5s-heartbeaten (10000+). Standard 15000."
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "Tidsavbrudd for enhetsstatus-heartbeat (ms):"
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "Hvor lenge en enhetsstatustilkobling kan gå uten et heartbeat-svar før den bygges opp på nytt. Gjenoppretting skjer stille (ingen ny casting). Høyere tåler belastningstopper; lavere gjenoppretter litt raskere, men for lavt bygger opp friske tilkoblinger på nytt etter et eneste tapt heartbeat. Behold minst 2x 5s-heartbeaten (10000+). Standard 15000."
+    },
+    "extensionName": {
+        "message": "fx_cast_bilibili"
+    },
+    "actionTitleDefault": {
+        "message": "fx_cast_bilibili"
+    },
+    "actionTitleConnecting": {
+        "message": "fx_cast_bilibili: Kobler til"
+    },
+    "actionTitleConnected": {
+        "message": "fx_cast_bilibili: Tilkoblet"
+    },
+    "popupBridgeErrorBanner": {
+        "message": "Det er et problem med broen!"
+    },
+    "popupBridgeErrorBannerOptions": {
+        "message": "Mer informasjon"
+    },
+    "popupWhitelistNotWhitelisted": {
+        "message": "$appName$ er ikke i whitelist",
+        "placeholders": {
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            }
+        }
+    },
+    "popupWhitelistAddToWhitelist": {
+        "message": "Legg til i whitelist"
+    },
+    "popupCastMenuTitle": {
+        "message": "Cast til $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1",
+                "example": "Living Room TV"
+            }
+        }
+    },
+    "popupStopMenuTitle": {
+        "message": "Stopp «$appName$» på $deviceName$",
+        "placeholders": {
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            },
+            "deviceName": {
+                "content": "$2",
+                "example": "Living Room TV"
+            }
+        }
+    },
+    "popupShowDetailsTitle": {
+        "message": "Vis detaljer"
+    },
+    "popupMediaPlay": {
+        "message": "Spill av"
+    },
+    "popupMediaPause": {
+        "message": "Pause"
+    },
+    "popupMediaSkipPrevious": {
+        "message": "Forrige"
+    },
+    "popupMediaSkipNext": {
+        "message": "Neste"
+    },
+    "popupMediaSeek": {
+        "message": "Søk posisjon"
+    },
+    "popupMediaSeekBackward": {
+        "message": "Spol bakover"
+    },
+    "popupMediaSeekForward": {
+        "message": "Spol framover"
+    },
+    "popupMediaSubtitlesCaptions": {
+        "message": "Undertekster"
+    },
+    "popupMediaSubtitlesCaptionsOff": {
+        "message": "Av"
+    },
+    "popupMediaMute": {
+        "message": "Demp"
+    },
+    "popupMediaUnmute": {
+        "message": "Opphev demping"
+    },
+    "popupMediaVolume": {
+        "message": "Volum"
+    },
+    "popupMediaLive": {
+        "message": "Direkte"
+    },
+    "popupSearch": {
+        "message": "Søk etter enheter"
+    },
+    "popupSearchClear": {
+        "message": "Tøm søk"
+    },
+    "popupSearchNoDevicesFound": {
+        "message": "Ingen enheter funnet for «$searchTerm$».",
+        "placeholders": {
+            "searchTerm": {
+                "content": "$1",
+                "example": "Living Room"
+            }
+        }
+    },
+    "optionsBridgeIssueStatusTextTimedOut": {
+        "message": "Tidsavbrudd for tilkobling."
+    },
+    "optionsBridgeIssueStatusTextAuthentication": {
+        "message": "Kunne ikke autentisere tilkoblingen."
+    },
+    "optionsBridgeRefresh": {
+        "message": "Oppdater bro-status"
+    },
+    "optionsBridgeUpdateViewChangelog": {
+        "message": "Vis endringslogg"
+    },
+    "optionsBridgeBackupSecure": {
+        "message": "Bruk en sikker tilkobling"
+    },
+    "optionsBridgeBackupSecureDescription": {
+        "message": "Kobler til daemonen via HTTPS i stedet for HTTP. Krever ekstra konfigurasjon."
+    },
+    "optionsBridgeBackupPassword": {
+        "message": "Passord:"
+    },
+    "optionsBridgeBackupPasswordDescription": {
+        "message": "Det valgfrie passordet som er konfigurert for daemon-tilkoblingene."
+    },
+    "optionsReceiverSelectorExpandActive": {
+        "message": "Utvid mediekontroller automatisk for tilkoblede enheter"
+    },
+    "optionsReceiverSelectorShowMediaImages": {
+        "message": "Vis mediebilder"
+    },
+    "optionsReceiverSelectorShowMediaImagesDescription": {
+        "message": "Laster inn miniatyrbilder/merkevarebilder fra eksterne servere."
+    },
+    "optionsSiteWhitelistEnabledDescription": {
+        "message": "Hvis dette slås av, aktiveres casting på alle nettsteder, men brukeragent-strengen blir ikke erstattet."
+    },
+    "optionsSiteWhitelistItemShowOptions": {
+        "message": "Vis alternativer"
+    },
+    "optionsSiteWhitelistItemHideOptions": {
+        "message": "Skjul alternativer"
+    },
+    "optionsSiteWhitelistInvalidDuplicatePattern": {
+        "message": "Treffmønsteret finnes allerede!"
+    },
+    "optionsSiteWhitelistKnownAppsCustomApp": {
+        "message": "Egendefinert"
+    },
+    "optionsSiteWhitelistCustomUserAgent": {
+        "message": "Brukeragent:"
+    },
+    "optionsSiteWhitelistCustomUserAgentDescription": {
+        "message": "Hvis angitt, en egendefinert brukeragent-streng som brukes for nettsteder i whitelist."
+    },
+    "optionsSiteWhitelistUserAgentDisabled": {
+        "message": "Deaktiver brukeragent"
+    },
+    "optionsSiteWhitelistUserAgentDisabledDescription": {
+        "message": "Deaktiver erstatning av brukeragent helt for nettsteder som samsvarer med dette mønsteret."
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgent": {
+        "message": "Brukeragent:"
+    },
+    "optionsSiteWhitelistSiteSpecificUserAgentDescription": {
+        "message": "Hvis angitt, en egendefinert brukeragent-streng som brukes spesifikt for nettsteder som samsvarer med dette mønsteret."
+    },
+    "optionsSiteWhitelistItemEnabled": {
+        "message": "Aktiver whitelist-oppføring"
+    },
+    "optionsSiteWhitelistItemPattern": {
+        "message": "Treffmønster"
+    },
+    "optionsMirroringStreamOptions": {
+        "message": "Alternativer for strømkoding"
+    },
+    "optionsMirroringStreamFrameRate": {
+        "message": "Maks bildefrekvens:"
+    },
+    "optionsMirroringStreamMaxBitRate": {
+        "message": "Maks bitrate:"
+    },
+    "optionsMirroringStreamMaxBitRateDescription": {
+        "message": "Maksimal bitrate i bit per sekund."
+    },
+    "optionsMirroringStreamDownscaleFactor": {
+        "message": "Nedskaleringsfaktor:"
+    },
+    "optionsMirroringStreamDownscaleFactorDescription": {
+        "message": "Faktor for å skalere ned videostrømmen, f.eks. gir en faktor på 2,0 en video på 1/4 av størrelsen. "
+    },
+    "optionsMirroringStreamMaxResolution": {
+        "message": "Begrens oppløsning til"
+    },
+    "optionsMirroringStreamMaxResolutionDescription": {
+        "message": "Begrenser maksimal oppløsning på videostrømmen samtidig som kildens sideforhold beholdes."
+    },
+    "optionsMirroringStreamMaxResolutionWidthPlaceholder": {
+        "message": "Bredde"
+    },
+    "optionsMirroringStreamMaxResolutionHeightPlaceholder": {
+        "message": "Høyde"
+    },
+    "optionsShowAdvancedOptions": {
+        "message": "Vis avanserte alternativer"
+    },
+    "mirroringPopupTitle": {
+        "message": "Speiling"
+    },
+    "mirroringPopupWaitingForConnection": {
+        "message": "Venter på tilkobling"
+    },
+    "mirroringPopupConnectedTo": {
+        "message": "Tilkoblet $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupMirroringTo": {
+        "message": "Speiler til $deviceName$",
+        "placeholders": {
+            "deviceName": {
+                "content": "$1"
+            }
+        }
+    },
+    "mirroringPopupChooseSource": {
+        "message": "Velg kilde"
+    },
+    "mirroringPopupStopMirroring": {
+        "message": "Stopp speiling"
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Bilibili-feilsøkingslogg"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "Viser feilsøkingspanelet på siden og detaljerte Bilibili-popup-/bakgrunnslogger."
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "BLE-fjernkontroll"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "Mottar dekrypterte MiBeacon-knappehendelser fra Voice Edge."
+    },
+    "optionsBleRemoteUrl": {
+        "message": "URL for hendelsesstrøm:"
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Voice Edge-endepunkt for JSON-hendelsesstrøm avgrenset med linjeskift."
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "Venstre knapp spol bakover (sekunder):"
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "Antall sekunder venstre BLE-fjernkontrollknapp spoler bakover."
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "Høyre knapp spol framover (sekunder):"
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "Antall sekunder høyre BLE-fjernkontrollknapp spoler framover."
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "Aktiver BLE-fjernkontroll"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "Kobler til Voice Edge BLE-fjernkontrollens hendelsesstrøm."
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "Kvalitet"
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "Automatisk (høyeste kompatible)"
     }
 }

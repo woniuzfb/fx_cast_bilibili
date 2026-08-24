@@ -38,7 +38,10 @@
         "message": "$appName$ отсутствует в Белом списке",
         "description": "Receiver selector whitelist suggestion banner label.",
         "placeholders": {
-            "appName": { "content": "$1", "example": "Netflix" }
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            }
         },
         "hash": "7699bc5bc233b6cffd70552dca888941"
     },
@@ -96,7 +99,10 @@
         "message": "Транслирую$ellipsis$",
         "description": "Button text while establishing a session in the receiver selector. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
-            "ellipsis": { "content": "$1", "example": "..." }
+            "ellipsis": {
+                "content": "$1",
+                "example": "..."
+            }
         },
         "hash": "3a13ea12ce352174fc7628f6ce954a53"
     },
@@ -109,7 +115,10 @@
         "message": "Транслировать на $deviceName$",
         "description": "Menu text for cast item in context menu for receivers in receiver selector.",
         "placeholders": {
-            "deviceName": { "content": "$1", "example": "Living Room TV" }
+            "deviceName": {
+                "content": "$1",
+                "example": "Living Room TV"
+            }
         },
         "hash": "da6800a599084a9f971214faa56d3806"
     },
@@ -117,8 +126,14 @@
         "message": "Остановить \"$appName$\" на $deviceName$",
         "description": "Menu text for stop item in context menu for receivers in receiver selector.",
         "placeholders": {
-            "appName": { "content": "$1", "example": "Netflix" },
-            "deviceName": { "content": "$2", "example": "Living Room TV" }
+            "appName": {
+                "content": "$1",
+                "example": "Netflix"
+            },
+            "deviceName": {
+                "content": "$2",
+                "example": "Living Room TV"
+            }
         },
         "hash": "34f1812668ef443ca94b8fdd59f277ad"
     },
@@ -204,7 +219,13 @@
     },
     "popupSearchNoDevicesFound": {
         "message": "Устройства по запросу \"$searchTerm$\" не найдены.",
-        "hash": "4c53dd5c9ed94ee2ed53969930e0fbfb"
+        "hash": "4c53dd5c9ed94ee2ed53969930e0fbfb",
+        "placeholders": {
+            "searchTerm": {
+                "content": "$1",
+                "example": "Living Room"
+            }
+        }
     },
     "contextCast": {
         "message": "Транслировать...",
@@ -218,7 +239,13 @@
     },
     "contextAddToWhitelistRecommended": {
         "message": "Добавить $matchPattern$ (Рекомендуется)",
-        "hash": "395caf736ead76c1a7340850424e2c5b"
+        "hash": "395caf736ead76c1a7340850424e2c5b",
+        "placeholders": {
+            "matchPattern": {
+                "content": "$1",
+                "example": "https://example.com/*"
+            }
+        }
     },
     "contextAddToWhitelistAdvancedAdd": {
         "message": "Добавить $matchPattern$",
@@ -335,7 +362,10 @@
         "message": "Проверяю обновления$ellipsis$",
         "description": "Update check button title while in progress. Ellipsis cycles (. → .. → ...) as loading indicator.",
         "placeholders": {
-            "ellipsis": { "content": "$1", "example": ".." }
+            "ellipsis": {
+                "content": "$1",
+                "example": ".."
+            }
         },
         "hash": "282dc18c1fe1de587133edd5d050b624"
     },
@@ -368,7 +398,9 @@
         "message": "Включить резервное соединение на $hostPort$",
         "description": "Backup daemon checkbox label. Host/port inputs are inserted inline at the hostPort substitution.",
         "placeholders": {
-            "hostPort": { "content": "$1" }
+            "hostPort": {
+                "content": "$1"
+            }
         },
         "hash": "923eff866d306017aa4f5223e07cfcd5"
     },
@@ -700,7 +732,9 @@
         "message": "Соединено с $deviceName$",
         "description": "Mirroring popup label displayed whilst session connected before mirroring.",
         "placeholders": {
-            "deviceName": { "content": "$1" }
+            "deviceName": {
+                "content": "$1"
+            }
         },
         "hash": "bd3d58015008ac8b9dcded600e05a744"
     },
@@ -708,7 +742,9 @@
         "message": "Демонстрирую на $deviceName$",
         "description": "Mirroring popup label displayed whilst mirroring.",
         "placeholders": {
-            "deviceName": { "content": "$1" }
+            "deviceName": {
+                "content": "$1"
+            }
         },
         "hash": "13dd028ed9d37902f92977622241d0f9"
     },
@@ -722,6 +758,64 @@
         "description": "Mirroring popup stop mirroring button label.",
         "hash": "fade5f575be1a34437a60036bcd96bb3"
     },
-
-    "__WET_LOCALE__": { "message": "ru" }
+    "optionsCastReliabilityCategoryName": {
+        "message": "Надёжность трансляции"
+    },
+    "optionsCastReliabilityCategoryDescription": {
+        "message": "Расширенные тайм-ауты сторожевого таймера heartbeat для обнаружения полумёртвых соединений трансляции. Изменения применяются к новым соединениям/сеансам."
+    },
+    "optionsCastSessionHeartbeatStaleMs": {
+        "message": "Тайм-аут heartbeat сеанса (мс):"
+    },
+    "optionsCastSessionHeartbeatStaleMsDescription": {
+        "message": "Как долго активный сеанс трансляции может оставаться без ответа heartbeat, прежде чем он будет разорван, чтобы расширение могло начать трансляцию заново. Больше — устойчивее к пикам нагрузки; меньше — реагирует немного быстрее, но слишком низкое значение разрывает исправные сеансы уже после одного пропущенного heartbeat. Держите не менее 2× от 5-секундного heartbeat (10000+). По умолчанию 15000."
+    },
+    "optionsCastRemoteHeartbeatStaleMs": {
+        "message": "Тайм-аут heartbeat состояния устройства (мс):"
+    },
+    "optionsCastRemoteHeartbeatStaleMsDescription": {
+        "message": "Как долго соединение состояния устройства может оставаться без ответа heartbeat, прежде чем оно будет пересоздано. Восстановление происходит незаметно (без повторной трансляции). Больше — устойчивее к пикам нагрузки; меньше — восстанавливается немного быстрее, но слишком низкое значение пересоздаёт исправные соединения уже после одного пропущенного heartbeat. Держите не менее 2× от 5-секундного heartbeat (10000+). По умолчанию 15000."
+    },
+    "optionsBilibiliDebugEnabled": {
+        "message": "Журнал отладки Bilibili"
+    },
+    "optionsBilibiliDebugEnabledDescription": {
+        "message": "Показывать панель отладки на странице и подробные логи всплывающего окна/фона Bilibili."
+    },
+    "optionsBleRemoteCategoryName": {
+        "message": "BLE-пульт"
+    },
+    "optionsBleRemoteCategoryDescription": {
+        "message": "Получает расшифрованные события кнопок MiBeacon от Voice Edge."
+    },
+    "optionsBleRemoteUrl": {
+        "message": "URL потока событий:"
+    },
+    "optionsBleRemoteUrlDescription": {
+        "message": "Конечная точка потока событий Voice Edge в формате JSON с разделением по строкам."
+    },
+    "optionsBleRemoteSeekBackwardSeconds": {
+        "message": "Левая кнопка перемотка назад (секунды):"
+    },
+    "optionsBleRemoteSeekBackwardSecondsDescription": {
+        "message": "Число секунд перемотки назад левой кнопкой BLE-пульта."
+    },
+    "optionsBleRemoteSeekForwardSeconds": {
+        "message": "Правая кнопка перемотка вперёд (секунды):"
+    },
+    "optionsBleRemoteSeekForwardSecondsDescription": {
+        "message": "Число секунд перемотки вперёд правой кнопкой BLE-пульта."
+    },
+    "optionsBleRemoteEnabled": {
+        "message": "Включить BLE-пульт"
+    },
+    "optionsBleRemoteEnabledDescription": {
+        "message": "Подключается к потоку событий BLE-пульта Voice Edge."
+    },
+    "popupBilibiliQualityLabel": {
+        "message": "Качество"
+    },
+    "popupBilibiliQualityAuto": {
+        "message": "Авто (макс. совместимое)"
+    }
 }
