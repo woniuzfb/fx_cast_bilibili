@@ -28,11 +28,34 @@ async function getOption<K extends keyof Options>(
 
 export interface MediaSenderOpts {
   mediaUrl: string;
+  /**
+   * Lazily supplies the real mediaUrl (+ relay userAgent) before the FIRST
+   * load. Lets the receiver selector open immediately while the URL is still
+   * being resolved in parallel (CCTV captures the live playlist off the
+   * page's network traffic, which takes up to a playlist refresh cycle).
+   * `mediaUrl` may be a placeholder when this is provided; loadMedia awaits
+   * the resolver once, then reuses this.mediaUrl for reloads (DASH seeks,
+   * auto-recovery).
+   */
+  mediaUrlResolver?: () => Promise<{ mediaUrl: string; userAgent?: string }>;
   mediaElement?: HTMLMediaElement;
   mediaTitle?: string;
   mediaContentType?: string;
   isVideo?: boolean;
-  remoteProxy?: { referer: string; audioUrl?: string };
+  /**
+   * Live stream (e.g. CCTV live HLS). Sets MediaInfo streamType to LIVE and
+   * skips duration reporting so the receiver/popup treat it as a live
+   * broadcast instead of a seekable VOD item.
+   */
+  isLive?: boolean;
+  remoteProxy?: {
+    referer: string;
+    audioUrl?: string;
+    hlsLive?: boolean;
+    /** Real Chrome UA (from docs/ua.json) for the bridge's upstream CDN
+     *  fetches; used by the live HLS relay to avoid CDN UA throttling. */
+    userAgent?: string;
+  };
   /**
    * Forward the local media element's play/pause/seek events to the
    * receiver. Disable for sites (e.g. Bilibili) whose own player script
@@ -40,6 +63,11 @@ export interface MediaSenderOpts {
    * the receiver's playback state.
    */
   forwardPageControls?: boolean;
+  /**
+   * Mirror receiver time/seek position onto the page element. Disable when the
+   * page and receiver use different timelines, while retaining play-state sync.
+   */
+  syncMediaPosition?: boolean;
   /**
    * When true, only forward page play/pause/seek events that happen shortly
    * after a real user gesture (pointerdown/keydown). This lets the site's own
@@ -49,6 +77,16 @@ export interface MediaSenderOpts {
   gestureGatedControls?: boolean;
   /** Invoked after the Cast session is stopped (e.g. the popup Stop button). */
   onStopped?: () => void;
+  /**
+   * Recover automatically when the receiver's media session dies mid-cast
+   * (playerState IDLE without a user stop). The CNTV live CDN intermittently
+   * emits corrupted segments; the strict receiver pipeline treats one bad
+   * segment as fatal and unloads the media, while desktop players merely
+   * glitch. When enabled, the sender reloads the same media at the last known
+   * position (mapped onto the freshly rebuilt DVR timeline), stepping forward
+   * past corrupt content on repeated quick deaths.
+   */
+  autoRecoverOnIdle?: boolean;
   debug?: (message: string, data?: unknown) => void;
 }
 
@@ -56,12 +94,24 @@ export default class MediaSender {
   private port?: CastPort;
 
   private mediaUrl: string;
+  private mediaUrlResolver?: () => Promise<{
+    mediaUrl: string;
+    userAgent?: string;
+  }>;
   private mediaTitle?: string;
   private mediaContentType = "";
   private isVideo = false;
-  private remoteProxy?: { referer: string; audioUrl?: string };
+  private isLive = false;
+  private remoteProxy?: {
+    referer: string;
+    audioUrl?: string;
+    hlsLive?: boolean;
+    userAgent?: string;
+  };
   private forwardPageControls = true;
+  private syncMediaPosition = true;
   private gestureGatedControls = false;
+  private autoRecoverOnIdle = false;
   private onStopped?: () => void;
   private debug?: (message: string, data?: unknown) => void;
 
@@ -140,6 +190,87 @@ export default class MediaSender {
    * receiver.
    */
   private onDashSeekStart?: (target: number) => void;
+
+  // ---- Auto-recovery state (autoRecoverOnIdle) ----
+  /**
+   * Death is judged by the receiver's BEHAVIOR, not its status reports:
+   * the relay reports one message per /seg serve BEYOND the initial
+   * prebuffer window (the bridge suppresses the event for the first
+   * prebuffered segments — see the background forwarder), and a receiver
+   * that keeps being served segments is alive. The liveness clock only
+   * STARTS at the first post-prebuffer serve: while the receiver is still
+   * inside the prebuffered window there is nothing to judge (it may drain
+   * the cache at any pace, or the session may die before ever reaching
+   * pipeline-served content — recovery is pointless until the receiver has
+   * demonstrated progress). Once started, each serve contributes one period
+   * of liveness credit — the slot's MEASURED duration (clamped to 1–2
+   * nominal segment periods), because a slot's content can legitimately
+   * measure above or below one nominal segment and the receiver's next
+   * request arrives accordingly. This preserves credit when the receiver drains several
+   * slots in a burst instead of assuming that every request must be followed
+   * by another within a fixed wall-clock interval. Recovery fires only after
+   * all accumulated credit plus a 1.5-segment jitter allowance has elapsed
+   * while the receiver is not paused. A single steady-state serve therefore
+   * gets 2.5 segment periods total: one period of earned credit plus 1.5
+   * periods for receiver/scheduler jitter.
+   */
+  /** Segment cadence (seconds) of the current live relay, from the bridge. */
+  private relaySegmentStepSeconds = 4;
+  private relayActivityTimeoutMs(): number {
+    return this.relaySegmentStepSeconds * 1.5 * 1000;
+  }
+  /**
+   * Wall-clock of the last LIVE /seg request the relay proxied.
+   * 0 = receiver has not yet fetched beyond the prebuffer — no judgment.
+   */
+  private lastRelaySegmentRequestAt = 0;
+  /**
+   * Playback deadline accumulated from post-prebuffer requests. Every request
+   * adds one segment period, so burst requests retain credit for later checks.
+   */
+  private relayLivenessDeadlineAt = 0;
+  /** Logs the "requests stopped" transition once per stale episode. */
+  private relayStaleLogged = false;
+  /** First observation of a liveness failure without a receiver ERROR. */
+  private receiverLivenessGraceObservedAt = 0;
+  /** Dedupes receiver ERROR diagnostics while the same media remains idle. */
+  private receiverErrorLoggedForSession?: number;
+  /**
+   * Fallback while the receiver is still inside the prebuffer. Prebuffer
+   * request cadence is intentionally NOT liveness; instead, track receiver
+   * media-time progress so any load that stalls before its first
+   * post-prebuffer request can still be detected without penalizing a healthy
+   * receiver that consumes cached segments at an arbitrary request rate.
+   */
+  private prebufferProgressMediaTime?: number;
+  private prebufferProgressObservedAt = 0;
+  /** Last successful cached prebuffer serve; never arms steady-state liveness. */
+  private lastPrebufferSegmentRequestAt = 0;
+  /** A recovery reload is in flight / cooling down. */
+  private recoverInFlight = false;
+  /** Not before this time may another recovery trigger (post-reload cooldown). */
+  private recoverNotBeforeAt = 0;
+  /**
+   * Watchdog that re-attempts recovery after a FAILED reload.
+   *
+   * Death detection lives in the media-element sync interval, but
+   * recoverFromIdleDeath() calls suspendMediaElementSync() (which clears that
+   * interval) BEFORE reloading. A SUCCESSFUL reload rebuilds the interval via
+   * addMediaElementListeners, but a FAILED reload — e.g. the bridge's boot
+   * prebuffer can't fill within the sender's waitForMediaServer timeout, so
+   * startRemoteMediaServer rejects with "Timed out waiting for the Cast bridge
+   * media server" — leaves nothing running to try again, so recovery would
+   * dead-end after a single failure. This timer bridges that gap by
+   * re-attempting on a backoff until a reload succeeds (restoring the normal
+   * detection loop) or the sender is stopped.
+   */
+  private recoveryRetryTimer?: number;
+  /** Backoff for consecutive failed recovery attempts (reset on success). */
+  private recoveryRetryBackoffMs = 0;
+  /** Base/cap for the failed-recovery retry backoff. */
+  private static readonly RECOVERY_RETRY_BASE_MS = 15_000;
+  private static readonly RECOVERY_RETRY_MAX_MS = 120_000;
+
   /**
    * Routes a trusted BLE action through the page media event pipeline. The
    * listener closure arms exactly one matching event so gesture gating accepts
@@ -152,18 +283,57 @@ export default class MediaSender {
   ) => boolean;
 
   private get isDashRemux() {
+    // Only the true Bilibili DASH remux (separate audio track): the receiver
+    // cannot seek inside the sequentially-remuxed HLS, so seeks restart the
+    // bridge remux at the target. The CCTV live relay is NOT part of this
+    // path — see isHlsDvr.
     return Boolean(this.remoteProxy?.audioUrl);
+  }
+
+  /**
+   * CCTV live synthetic DVR: the bridge serves a frozen, fully-synthesized
+   * VOD playlist (60s history + future segments up to 2h). It is a plain
+   * seekable VOD on the receiver, so seeks go through the receiver's native
+   * SEEK — except forward seeks, which the background clamps to the live
+   * edge so they never target segments the CDN hasn't published yet.
+   */
+  private get isHlsDvr() {
+    return Boolean(this.remoteProxy?.hlsLive);
+  }
+
+  /**
+   * Synthetic-DVR live-edge anchor, set when the bridge reports one. At
+   * builtAtMs the edge sits at baseSeconds in the VOD timeline; it advances
+   * with wall clock. Kept in sync with the clamp in background/castManager
+   * (which reads the same values from customData).
+   */
+  private dvrLiveEdge?: { baseSeconds: number; builtAtMs: number };
+
+  /** Forward seeks stay this far behind the live edge (published segments only). */
+  private static DVR_FORWARD_SEEK_MARGIN_SECONDS = 60;
+
+  /** Current live-edge offset (seconds) in the synthetic DVR timeline. */
+  private dvrLiveEdgeSeconds(): number | undefined {
+    if (!this.dvrLiveEdge) return undefined;
+    return (
+      this.dvrLiveEdge.baseSeconds +
+      (Date.now() - this.dvrLiveEdge.builtAtMs) / 1000
+    );
   }
 
   constructor(opts: MediaSenderOpts) {
     this.mediaUrl = opts.mediaUrl;
+    this.mediaUrlResolver = opts.mediaUrlResolver;
     this.mediaElement = opts.mediaElement;
     this.mediaTitle = opts.mediaTitle;
     this.mediaContentType = opts.mediaContentType ?? "";
     this.isVideo = opts.isVideo ?? false;
+    this.isLive = opts.isLive ?? false;
     this.remoteProxy = opts.remoteProxy;
     this.forwardPageControls = opts.forwardPageControls ?? true;
+    this.syncMediaPosition = opts.syncMediaPosition ?? true;
     this.gestureGatedControls = opts.gestureGatedControls ?? false;
+    this.autoRecoverOnIdle = opts.autoRecoverOnIdle ?? false;
     this.onStopped = opts.onStopped;
     this.debug = opts.debug;
     this.debug?.("media sender created");
@@ -199,6 +369,7 @@ export default class MediaSender {
       window.clearTimeout(this.dashSeekDebounceId);
       this.dashSeekDebounceId = undefined;
     }
+    this.clearRecoveryRetry();
 
     this.stopOwnedMediaServer();
     if (stopReceiver) this.session?.stop();
@@ -288,11 +459,16 @@ export default class MediaSender {
     });
     this.suspendMediaElementSync();
     this.mediaUrl = opts.mediaUrl;
+    // Lazy resolvers are one-shot (loadMedia clears them after resolving), so
+    // an update must re-arm the resolver when the caller passes one — CCTV
+    // quality changes re-resolve the live stream URL through this path.
+    this.mediaUrlResolver = opts.mediaUrlResolver;
     this.mediaTitle = opts.mediaTitle;
     this.mediaContentType = opts.mediaContentType ?? "";
     this.mediaElement = opts.mediaElement;
     this.remoteProxy = opts.remoteProxy;
     this.isVideo = opts.isVideo ?? this.isVideo;
+    this.isLive = opts.isLive ?? this.isLive;
     await this.loadMedia();
   }
 
@@ -302,6 +478,41 @@ export default class MediaSender {
     } catch (err) {
       logger.error("Failed to initialize cast API", err);
     }
+
+    // Receiver-liveness feed: the background forwards one message per /seg
+    // serve beyond the initial prebuffer window. Death detection starts only
+    // once the receiver moves past the prebuffer (see the comment on
+    // lastRelaySegmentRequestAt). Credit is the slot's MEASURED duration —
+    // a slot's measured duration can legitimately differ from one nominal
+    // segment, so the receiver's next request arrives accordingly.
+    this.port?.addEventListener("message", (ev) => {
+      const message = ev.data as Message | undefined;
+      const subject = message?.subject;
+      if (subject === "mediaCast:relaySegmentRequested") {
+        const now = Date.now();
+        const measured = (
+          message?.data as { durationSeconds?: number } | undefined
+        )?.durationSeconds;
+        // Clamp against measurement noise: never less than one nominal
+        // period, never more than two (a gross mis-measurement must not
+        // blind the death detector for minutes).
+        const creditSeconds =
+          typeof measured === "number" && Number.isFinite(measured) && measured > 0
+            ? Math.min(
+                Math.max(measured, this.relaySegmentStepSeconds),
+                this.relaySegmentStepSeconds * 2
+              )
+            : this.relaySegmentStepSeconds;
+        this.lastRelaySegmentRequestAt = now;
+        this.relayLivenessDeadlineAt =
+          Math.max(this.relayLivenessDeadlineAt, now) + creditSeconds * 1000;
+        this.relayStaleLogged = false;
+      } else if (subject === "mediaCast:relayPrebufferSegmentRequested") {
+        this.lastPrebufferSegmentRequestAt = Date.now();
+        this.relayStaleLogged = false;
+      }
+    });
+    this.port?.start();
 
     this.stopOnUnloadEnabled = await getOption("mediaStopOnUnload");
     this.syncElementEnabled = await getOption("mediaSyncElement");
@@ -431,32 +642,72 @@ export default class MediaSender {
     }
   }
 
+  /**
+   * Load the media on the active cast session.
+   *
+   * @param startTimeOverride Restart position. Used by DASH seeks (absolute
+   *   video time). Auto-recovery reloads pass NO override: the bridge
+   *   rebuilds the synthetic DVR window to continue right after the last
+   *   segment it served (see its live-relay continuation state), so the
+   *   receiver simply starts at the head of the fresh prebuffer.
+   */
   private async loadMedia(startTimeOverride?: number) {
     if (this.stopped) return;
+    // Consume the lazy URL resolver (CCTV live capture) before anything
+    // touches this.mediaUrl. One-shot: reloads (seeks, auto-recovery) reuse
+    // the resolved URL — the bridge rebuilds its relay from it directly.
+    if (this.mediaUrlResolver) {
+      const resolver = this.mediaUrlResolver;
+      this.mediaUrlResolver = undefined;
+      const resolved = await resolver();
+      this.mediaUrl = resolved.mediaUrl;
+      if (resolved.userAgent && this.remoteProxy) {
+        this.remoteProxy.userAgent = resolved.userAgent;
+      }
+      this.debug?.("lazy media URL resolved", { mediaUrl: this.mediaUrl });
+    }
     const loadId = ++this.dashLoadId;
     let mediaUrl = new URL(this.mediaUrl);
     const mediaTitle = this.mediaTitle ?? mediaUrl.pathname.slice(1);
     const subtitleUrls: URL[] = [];
     let bridgePageDuration: number | undefined;
+    // Start position the bridge asks the receiver to begin playback at
+    // (e.g. a DASH remux restarted at a seek target).
+    let bridgeStartTime: number | undefined;
+    // Synthetic DVR live edge: at dvrBuiltAtMs the edge sits at
+    // dvrLiveEdgeBaseSeconds in the VOD timeline; it advances with wall
+    // clock. Forward seeks must be clamped to it (the segments beyond don't
+    // exist on the CDN yet).
+    let dvrLiveEdgeBaseSeconds: number | undefined;
+    let dvrBuiltAtMs: number | undefined;
 
     // In DASH remux mode the bridge restarts ffmpeg at this position and
     // pads the playlist so the receiver timeline stays in absolute video
     // time (receiver currentTime == page currentTime).
     const dashStartTime = this.isDashRemux
-      ? startTimeOverride ??
+      ? this.syncMediaPosition
+        ? startTimeOverride ??
         (this.mediaElement instanceof HTMLMediaElement &&
         Number.isFinite(this.mediaElement.currentTime)
           ? this.mediaElement.currentTime
           : 0)
+        : 0
       : 0;
 
     if (this.remoteProxy) {
       const port = await getOption("localMediaServerPort");
+      const cctvDebugEnabled = this.remoteProxy.hlsLive
+        ? await getOption("cctvDebugEnabled")
+        : false;
       this.debug?.("starting bridge proxy", {
         port,
         host: mediaUrl.hostname,
         hasSeparateAudio: Boolean(this.remoteProxy.audioUrl),
-        expectedMode: this.remoteProxy.audioUrl ? "dash-remux" : "proxy",
+        expectedMode: this.remoteProxy.audioUrl
+          ? "dash-remux"
+          : this.remoteProxy.hlsLive
+          ? "hls-live-relay"
+          : "proxy",
         startTime: this.isDashRemux ? dashStartTime : undefined,
       });
       const requestId = this.nextMediaServerRequestId();
@@ -468,7 +719,10 @@ export default class MediaSender {
         this.mediaContentType,
         port,
         this.remoteProxy.audioUrl,
-        dashStartTime
+        dashStartTime,
+        this.remoteProxy.hlsLive,
+        this.remoteProxy.userAgent,
+        cctvDebugEnabled
       );
       if (this.stopped || loadId !== this.dashLoadId) {
         this.stopOwnedMediaServer(requestId);
@@ -484,6 +738,45 @@ export default class MediaSender {
         Number(result.pageDuration) > 0
       ) {
         bridgePageDuration = Number(result.pageDuration);
+      }
+      if (
+        Number.isFinite(result.liveEdgeBaseSeconds) &&
+        Number(result.liveEdgeBaseSeconds) > 0 &&
+        Number.isFinite(result.builtAtMs) &&
+        Number(result.builtAtMs) > 0
+      ) {
+        dvrLiveEdgeBaseSeconds = Number(result.liveEdgeBaseSeconds);
+        dvrBuiltAtMs = Number(result.builtAtMs);
+        this.dvrLiveEdge = {
+          baseSeconds: dvrLiveEdgeBaseSeconds,
+          builtAtMs: dvrBuiltAtMs,
+        };
+      }
+      if (Number.isFinite(result.startTime)) {
+        bridgeStartTime = Number(result.startTime);
+      }
+      if (this.isHlsDvr) {
+        // Segment cadence from the relay (drives the liveness timeout).
+        if (
+          Number.isFinite(result.stepSeconds) &&
+          Number(result.stepSeconds) > 0
+        ) {
+          this.relaySegmentStepSeconds = Number(result.stepSeconds);
+        }
+        // Reset the liveness clock: a fresh prebuffer window is being
+        // served, so death detection is DISARMED until the receiver moves
+        // past the prebuffered segments onto the rolling pipeline cache
+        // (see lastRelaySegmentRequestAt). This covers the prebuffer/LOAD
+        // phase AND the whole initial cached window — first playback gets
+        // its full prebuffered runway.
+        this.lastRelaySegmentRequestAt = 0;
+        this.relayLivenessDeadlineAt = 0;
+        this.relayStaleLogged = false;
+        this.receiverLivenessGraceObservedAt = 0;
+        this.receiverErrorLoggedForSession = undefined;
+        this.prebufferProgressMediaTime = undefined;
+        this.prebufferProgressObservedAt = Date.now();
+        this.lastPrebufferSegmentRequestAt = 0;
       }
       this.debug?.("bridge proxy ready", mediaUrl.href);
     } else if (this.isLocalMedia) {
@@ -515,12 +808,32 @@ export default class MediaSender {
     );
     mediaInfo.metadata = new cast.media.GenericMediaMetadata();
     mediaInfo.metadata.title = mediaTitle;
+    if (this.remoteProxy?.hlsLive) {
+      // The bridge republishes CCTV as a frozen synthetic-DVR VOD playlist
+      // (PLAYLIST-TYPE:VOD + ENDLIST). BUFFERED makes the receiver treat it
+      // as a seekable VOD that buffers ahead from t=0 instead of chasing a
+      // live edge — the same semantics as the Bilibili DASH remux path.
+      mediaInfo.streamType = cast.media.StreamType.BUFFERED;
+    } else if (this.isLive) {
+      mediaInfo.streamType = cast.media.StreamType.LIVE;
+    }
     if (
       this.mediaElement instanceof HTMLMediaElement &&
       Number.isFinite(this.mediaElement.duration) &&
       this.mediaElement.duration > 0
     ) {
       mediaInfo.duration = this.mediaElement.duration;
+    } else if (
+      bridgePageDuration !== undefined &&
+      Number.isFinite(bridgePageDuration) &&
+      bridgePageDuration > 0
+    ) {
+      // CCTV live has no page <video> duration (it is a live element). Use the
+      // bridge's finite nominal duration so the receiver treats the growing
+      // event playlist as a seekable VOD (starts at t=0, buffers ahead) instead
+      // of a live edge — the same signal a Bilibili DASH remux gets from its
+      // page's finite video duration.
+      mediaInfo.duration = bridgePageDuration;
     }
     if (this.isDashRemux) {
       // The receiver may not report a duration for the live-style event
@@ -536,6 +849,17 @@ export default class MediaSender {
       mediaInfo.customData = {
         dashRemux: true,
         ...(pageDuration !== undefined ? { pageDuration } : {}),
+      };
+    } else if (this.isHlsDvr && bridgePageDuration !== undefined) {
+      // Synthetic DVR (CCTV): the popup needs the synthesized duration for
+      // its seek bar, and the background needs the live-edge anchor to clamp
+      // forward seeks to published segments. No dashRemux flag — this is a
+      // plain receiver-seekable VOD, NOT a remux-restart session.
+      mediaInfo.customData = {
+        hlsDvr: true,
+        pageDuration: bridgePageDuration,
+        dvrLiveEdgeBaseSeconds: dvrLiveEdgeBaseSeconds,
+        dvrBuiltAtMs: dvrBuiltAtMs,
       };
     }
     mediaInfo.tracks = [];
@@ -627,7 +951,29 @@ export default class MediaSender {
     loadRequest.autoplay = true;
     loadRequest.activeTrackIds = activeTrackIds;
 
-    if (this.mediaElement instanceof HTMLMediaElement) {
+    if (this.isHlsDvr) {
+      // CCTV synthetic DVR: the page live element's currentTime is on an
+      // unrelated live clock and must NOT seed the VOD timeline. The bridge's
+      // startTime is the head of the prebuffered window (0 on a first cast —
+      // a full lookback behind the live edge; on a recovery reload the
+      // continuation point right after the last served segment). Begin
+      // exactly there, clamped behind published segments.
+      let currentTime =
+        bridgeStartTime !== undefined && Number.isFinite(bridgeStartTime)
+          ? bridgeStartTime
+          : 0;
+      const frontier = this.dvrLiveEdgeSeconds();
+      if (frontier !== undefined && Number.isFinite(frontier)) {
+        currentTime = Math.min(
+          currentTime,
+          frontier - MediaSender.DVR_FORWARD_SEEK_MARGIN_SECONDS
+        );
+      }
+      loadRequest.currentTime = Math.max(0, currentTime);
+      this.debug?.("applying DVR start position", {
+        currentTime: loadRequest.currentTime,
+      });
+    } else if (this.mediaElement instanceof HTMLMediaElement) {
       // DASH remux streams are padded up to dashStartTime, so the initial
       // position is expressed in absolute video time.
       const initialTime = this.isDashRemux
@@ -640,6 +986,14 @@ export default class MediaSender {
         currentTime: loadRequest.currentTime,
         sourcePaused: this.mediaElement.paused,
         continuousSync: this.syncElementEnabled,
+      });
+    } else if (
+      bridgeStartTime !== undefined &&
+      Number.isFinite(bridgeStartTime)
+    ) {
+      loadRequest.currentTime = bridgeStartTime;
+      this.debug?.("applying live start position", {
+        currentTime: loadRequest.currentTime,
       });
     }
 
@@ -875,6 +1229,7 @@ export default class MediaSender {
     };
 
     const onSeeked = () => {
+      if (!this.syncMediaPosition) return;
       if (suppressSeek > 0) {
         suppressSeek--;
         return;
@@ -895,6 +1250,13 @@ export default class MediaSender {
           currentTime: mediaElement.currentTime,
           dashRemux: this.isDashRemux,
         });
+      }
+      if (this.isHlsDvr) {
+        // The CCTV page player runs on its own live clock, unrelated to the
+        // synthetic VOD timeline — its seek positions cannot be translated.
+        // Only play/pause are forwarded for live sources.
+        this.debug?.("ignored page seek on unrelated live timeline");
+        return;
       }
       if (this.isDashRemux) {
         // The receiver cannot seek inside the sequentially-remuxed HLS:
@@ -945,6 +1307,45 @@ export default class MediaSender {
       const delta = action === "seek_backward"
         ? -backwardSeconds
         : forwardSeconds;
+      if (this.isHlsDvr) {
+        // The page element runs on an unrelated live clock, so seek the
+        // receiver directly on its VOD timeline. Backward is free (history
+        // segments exist); forward is clamped behind the live edge so it
+        // never targets a segment the CDN hasn't published yet.
+        const boundMedia = currentMedia();
+        const current = boundMedia?.getEstimatedTime();
+        if (
+          !boundMedia ||
+          current === undefined ||
+          !Number.isFinite(current) ||
+          current < 0
+        ) {
+          this.debug?.("BLE remote seek ignored: no receiver position");
+          return true;
+        }
+        const liveEdge = this.dvrLiveEdgeSeconds();
+        let target = current + delta;
+        if (liveEdge !== undefined) {
+          target = Math.min(
+            target,
+            Math.max(
+              0,
+              liveEdge - MediaSender.DVR_FORWARD_SEEK_MARGIN_SECONDS
+            )
+          );
+        }
+        target = Math.max(0, target);
+        this.debug?.("BLE remote receiver-native DVR seek", {
+          action,
+          from: current,
+          target,
+          liveEdge,
+        });
+        const request = new cast.media.SeekRequest();
+        request.currentTime = target;
+        boundMedia.seek(request, undefined, sendError("BLE DVR seek"));
+        return true;
+      }
       const duration = Number(mediaElement.duration);
       const target = Math.max(
         0,
@@ -1001,6 +1402,159 @@ export default class MediaSender {
         });
       }
       if (!boundMedia) return;
+
+      // ---- auto-recovery death detection ----
+      // Judge death by the receiver's BEHAVIOR, not its status reports. The
+      // liveness clock starts at the receiver's FIRST live-segment fetch
+      // (beyond the prebuffer); before that (lastRelaySegmentRequestAt === 0)
+      // no judgment is made — first playback gets the whole cached window.
+      // Once live fetches have begun, a single steady-state request gets 2.5
+      // segment periods before recovery: one earned period plus 1.5 periods
+      // of receiver/scheduler jitter. During every load, media-time stagnation
+      // provides a
+      // separate fallback until the first post-prebuffer request.
+      // A paused receiver is exempt from both checks.
+      const now = Date.now();
+      const receiverMediaTime = Number(boundMedia.currentTime);
+      if (
+        Number.isFinite(receiverMediaTime) &&
+        (this.prebufferProgressMediaTime === undefined ||
+          Math.abs(receiverMediaTime - this.prebufferProgressMediaTime) >= 0.25)
+      ) {
+        this.prebufferProgressMediaTime = receiverMediaTime;
+        this.prebufferProgressObservedAt = now;
+      }
+      const prebufferProgressTimeoutMs = Math.max(
+        15_000,
+        this.relayActivityTimeoutMs() * 2
+      );
+      const prebufferStalled =
+        this.autoRecoverOnIdle &&
+        this.lastRelaySegmentRequestAt === 0 &&
+        this.prebufferProgressObservedAt > 0 &&
+        now - this.prebufferProgressObservedAt > prebufferProgressTimeoutMs &&
+        now -
+          Math.max(
+            this.prebufferProgressObservedAt,
+            this.lastPrebufferSegmentRequestAt
+          ) >
+          prebufferProgressTimeoutMs;
+      const isReceiverIdle =
+        boundMedia.playerState === cast.media.PlayerState.IDLE;
+      if (!isReceiverIdle) {
+        this.receiverErrorLoggedForSession = undefined;
+      }
+      const receiverError =
+        isReceiverIdle && boundMedia.idleReason === cast.media.IdleReason.ERROR;
+      if (
+        receiverError &&
+        this.receiverErrorLoggedForSession !== boundMedia.mediaSessionId
+      ) {
+        this.receiverErrorLoggedForSession = boundMedia.mediaSessionId;
+        this.debug?.("receiver returned media error", {
+          mediaSessionId: boundMedia.mediaSessionId,
+          playerState: boundMedia.playerState,
+          idleReason: boundMedia.idleReason,
+          currentTime: boundMedia.currentTime,
+        });
+        this.logRecovery("info", "Receiver returned media error", {
+          mediaSessionId: boundMedia.mediaSessionId,
+          playerState: boundMedia.playerState,
+          idleReason: boundMedia.idleReason,
+          currentTime: boundMedia.currentTime,
+        });
+      }
+      const relayJitterAllowanceMs =
+        this.relaySegmentStepSeconds * 1.5 * 1000;
+      const livenessStale =
+        this.autoRecoverOnIdle &&
+        ((this.relayLivenessDeadlineAt > 0 &&
+          now > this.relayLivenessDeadlineAt + relayJitterAllowanceMs) ||
+          prebufferStalled);
+      // Receiver ERROR is diagnostic evidence, not its own death trigger.
+      // Only after request/media-time liveness goes stale may ERROR confirm
+      // immediate recovery; without ERROR, allow one full segment period.
+      if (!livenessStale || receiverError) {
+        this.receiverLivenessGraceObservedAt = 0;
+      } else if (this.receiverLivenessGraceObservedAt === 0) {
+        this.receiverLivenessGraceObservedAt = now;
+      }
+      const livenessGraceExpired =
+        livenessStale &&
+        !receiverError &&
+        this.receiverLivenessGraceObservedAt > 0 &&
+        now - this.receiverLivenessGraceObservedAt >=
+          this.relaySegmentStepSeconds * 1000;
+      const relayStale =
+        livenessStale && (receiverError || livenessGraceExpired);
+      if (!relayStale) {
+        // Segment requests flowing (or no live relay yet): playback is healthy.
+        this.relayStaleLogged = false;
+      } else if (
+        boundMedia.playerState === cast.media.PlayerState.PAUSED
+      ) {
+        // A paused receiver legitimately stops fetching segments.
+        this.relayStaleLogged = false;
+      } else {
+        if (!this.relayStaleLogged) {
+          this.relayStaleLogged = true;
+          this.logRecovery(
+            "info",
+            receiverError
+              ? "Receiver returned media error; treating media as dead"
+              : livenessGraceExpired
+                ? "Receiver liveness remained stale for one segment without an error; treating media as dead"
+                : prebufferStalled
+                  ? "Receiver media time stalled inside prebuffer; treating media as dead"
+                  : "Receiver segment requests stopped; treating media as dead",
+            {
+              mediaSessionId: boundMedia.mediaSessionId,
+              playerState: boundMedia.playerState,
+              idleReason: boundMedia.idleReason,
+              receiverError,
+              livenessGraceMs:
+                this.receiverLivenessGraceObservedAt > 0
+                  ? now - this.receiverLivenessGraceObservedAt
+                  : undefined,
+              msSinceLastSegmentRequest:
+                this.lastRelaySegmentRequestAt > 0
+                  ? now - this.lastRelaySegmentRequestAt
+                  : undefined,
+              relayCreditSegments:
+                this.relayLivenessDeadlineAt > 0
+                  ? Math.max(
+                      0,
+                      (this.relayLivenessDeadlineAt - now) /
+                        (this.relaySegmentStepSeconds * 1000)
+                    )
+                  : undefined,
+              segmentDurationMs: this.relaySegmentStepSeconds * 1000,
+              livenessThresholdMs:
+                this.relaySegmentStepSeconds * 1000 + relayJitterAllowanceMs,
+              prebufferStalled,
+              msSinceReceiverProgress: prebufferStalled
+                ? now - this.prebufferProgressObservedAt
+                : undefined,
+              msSinceLastPrebufferSegmentRequest:
+                prebufferStalled && this.lastPrebufferSegmentRequestAt > 0
+                  ? now - this.lastPrebufferSegmentRequestAt
+                  : undefined,
+            }
+          );
+        }
+        const cooldownRemainingMs = Math.max(
+          0,
+          this.recoverNotBeforeAt - now
+        );
+        if (
+          !this.stopped &&
+          !this.recoverInFlight &&
+          cooldownRemainingMs === 0
+        ) {
+          void this.recoverFromIdleDeath();
+        }
+      }
+
       // A DASH seek reload is restarting the remux and rebinding the media
       // session; the old session's position/state is stale and must not be
       // mirrored onto the page.
@@ -1053,8 +1607,9 @@ export default class MediaSender {
       // sentinel. Playback-state reconciliation below must still run, or the
       // page video remains paused while the receiver is already PLAYING.
       const canSyncPosition =
-        boundMedia.playerState === cast.media.PlayerState.PLAYING ||
-        boundMedia.playerState === cast.media.PlayerState.PAUSED;
+        this.syncMediaPosition &&
+        (boundMedia.playerState === cast.media.PlayerState.PLAYING ||
+          boundMedia.playerState === cast.media.PlayerState.PAUSED);
       if (
         canSyncPosition &&
         Number.isFinite(rawEstimatedTime) &&
@@ -1214,7 +1769,10 @@ export default class MediaSender {
     contentType: string,
     port: number,
     audioUrl?: string,
-    startTime = 0
+    startTime = 0,
+    hlsLive = false,
+    userAgent?: string,
+    cctvDebugEnabled = false
   ): Promise<{
     mediaPath: string;
     localAddress: string;
@@ -1222,6 +1780,12 @@ export default class MediaSender {
     mode?: "proxy" | "dash-remux";
     startTime?: number;
     padBaseSeconds?: number;
+    /** Synthetic-DVR live edge at start: baseSeconds in the VOD timeline. */
+    liveEdgeBaseSeconds?: number;
+    /** Wall-clock ms when liveEdgeBaseSeconds was captured. */
+    builtAtMs?: number;
+    /** Synthetic-DVR segment cadence in seconds. */
+    stepSeconds?: number;
   }> {
     return new Promise((resolve, reject) => {
       if (!this.port) return reject("Cast bridge unavailable");
@@ -1241,8 +1805,14 @@ export default class MediaSender {
           if (audioUrl && message.data.mode !== "dash-remux") {
             cleanup();
             reject(
-              "The installed native bridge does not support DASH remux. " +
-                "Rebuild, reinstall, and restart the fx_cast_bilibili native bridge."
+              browser.i18n.getMessage("errorBridgeDashRemuxUnsupported")
+            );
+            return;
+          }
+          if (hlsLive && message.data.mode !== "dash-remux") {
+            cleanup();
+            reject(
+              browser.i18n.getMessage("errorBridgeLiveHlsUnsupported")
             );
             return;
           }
@@ -1270,7 +1840,7 @@ export default class MediaSender {
       const timeoutId = window.setTimeout(() => {
         cleanup();
         reject("Timed out waiting for the Cast bridge media server");
-      }, audioUrl ? 90_000 : 10_000);
+      }, audioUrl || hlsLive ? 90_000 : 10_000);
 
       this.port.addEventListener("message", onMessage);
       this.port.start();
@@ -1281,6 +1851,7 @@ export default class MediaSender {
         contentType,
         port,
         startTime,
+        hlsLive,
       });
       this.port.postMessage({
         subject: "bridge:startRemoteMediaServer",
@@ -1292,9 +1863,124 @@ export default class MediaSender {
           contentType,
           port,
           startTime,
+          hlsLive,
+          cctvDebugEnabled,
+          userAgent,
         },
       });
     });
+  }
+
+  /** Forward sender-side recovery diagnostics to the background console. */
+  private logRecovery(
+    level: "info" | "error",
+    message: string,
+    data: Record<string, unknown> = {}
+  ) {
+    if (level === "error") logger.error(message, data);
+    else logger.info(message, data);
+    void browser.runtime
+      .sendMessage({
+        subject: "cctv:recoveryDebug",
+        data: { level, message, data },
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Reload the media after the receiver's segment requests stopped (see the
+   * behavior-based death detection in addMediaElementListeners).
+   *
+   * Same shape as the Bilibili channel change: cleanly disconnect the old
+   * pipeline (suspend page element sync, stop the old bridge relay), then
+   * reload. The bridge rebuilds the synthetic DVR window to continue right
+   * after the last segment the old relay served and re-prebuffers; the
+   * receiver starts at the head of that fresh cache. loadMedia re-arms the
+   * liveness baseline, so the prebuffer/LOAD phase cannot be mistaken for
+   * another death.
+   *
+   * Guards, kept minimal: one reload at a time (recoverInFlight) and a
+   * cooldown after each reload (recoverNotBeforeAt). There is deliberately no
+   * attempt budget: every independently detected receiver death may recover.
+   */
+  private async recoverFromIdleDeath() {
+    // We are attempting now: cancel any pending watchdog retry so a scheduled
+    // attempt can't overlap this one.
+    this.clearRecoveryRetry();
+    this.recoverInFlight = true;
+    try {
+      this.logRecovery("info", "Receiver media recovery starting", {
+        resumeMode: "continueAfterLastServedSegment",
+      });
+
+      // Cleanly disconnect the old pipeline FIRST — the same ordering as
+      // the Bilibili channel change (updateMedia). The bridge's live relay
+      // startup stops any previous server as its first action, so a failed
+      // rebuild never leaves an orphaned relay behind.
+      this.suspendMediaElementSync();
+      this.stopOwnedMediaServer();
+
+      const reloadStartedAt = Date.now();
+      await this.loadMedia();
+      const reloadCompletedAt = Date.now();
+      this.recoverNotBeforeAt =
+        reloadCompletedAt + this.relayActivityTimeoutMs();
+      // Success: a fresh reload restored the media-element sync loop (via
+      // addMediaElementListeners), so normal death detection is back in
+      // charge. Drop the failure backoff and any pending watchdog retry.
+      this.recoveryRetryBackoffMs = 0;
+      this.clearRecoveryRetry();
+      this.logRecovery("info", "Receiver media recovery reload completed", {
+        reloadElapsedMs: reloadCompletedAt - reloadStartedAt,
+      });
+    } catch (err) {
+      // A failed reload tore down the media-element sync loop
+      // (suspendMediaElementSync) without rebuilding it, so nothing else will
+      // retry. Grow the backoff and arm the watchdog to try again.
+      this.recoveryRetryBackoffMs = Math.min(
+        MediaSender.RECOVERY_RETRY_MAX_MS,
+        this.recoveryRetryBackoffMs > 0
+          ? Math.round(this.recoveryRetryBackoffMs * 1.5)
+          : MediaSender.RECOVERY_RETRY_BASE_MS
+      );
+      this.recoverNotBeforeAt = Date.now() + this.recoveryRetryBackoffMs;
+      this.logRecovery("error", "Auto-recovery reload failed", {
+        error: err instanceof Error ? err.stack ?? err.message : String(err),
+        nextRetryInMs: this.recoveryRetryBackoffMs,
+      });
+      this.recoverInFlight = false;
+      this.scheduleRecoveryRetry();
+      return;
+    } finally {
+      this.recoverInFlight = false;
+    }
+  }
+
+  /** Cancel a pending failed-recovery watchdog retry, if any. */
+  private clearRecoveryRetry() {
+    if (this.recoveryRetryTimer !== undefined) {
+      window.clearTimeout(this.recoveryRetryTimer);
+      this.recoveryRetryTimer = undefined;
+    }
+  }
+
+  /**
+   * Arm the watchdog to re-attempt recovery once the current cooldown
+   * (recoverNotBeforeAt) elapses. Only used on the failure path, where the
+   * media-element sync loop that normally drives recovery has been torn down.
+   * A success clears both the timer and the backoff.
+   */
+  private scheduleRecoveryRetry() {
+    if (this.stopped) return;
+    if (this.recoveryRetryTimer !== undefined) return; // already scheduled
+    if (!this.autoRecoverOnIdle) return;
+    const delayMs = Math.max(0, this.recoverNotBeforeAt - Date.now());
+    this.logRecovery("info", "Auto-recovery retry scheduled", { delayMs });
+    this.recoveryRetryTimer = window.setTimeout(() => {
+      this.recoveryRetryTimer = undefined;
+      if (this.stopped || this.recoverInFlight) return;
+      void this.recoverFromIdleDeath();
+    }, delayMs);
   }
 
   private startMediaServer(

@@ -616,5 +616,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "Automática (la más alta compatible)"
+    },
+    "popupCctvQualityLabel": {
+        "message": "Resolución"
+    },
+    "popupCctvQualityAuto": {
+        "message": "Automática (la más alta disponible)"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "Registro de depuración de CCTV"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Mostrar diagnósticos detallados del relé de CCTV en la consola en segundo plano de la extensión."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "No se pudo capturar la URL del directo de CCTV. Asegúrese de que el vídeo en directo se esté reproduciendo en la página e inténtelo de nuevo."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "El puente nativo instalado no admite el remux DASH. Recompile, reinstale y reinicie el puente nativo de fx_cast_bilibili."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "El puente nativo instalado no admite el relé HLS en directo. Recompile, reinstale y reinicie el puente nativo de fx_cast_bilibili."
     }
 }

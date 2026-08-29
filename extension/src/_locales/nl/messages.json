@@ -818,5 +818,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "Automatisch (hoogste compatibele)"
+    },
+    "popupCctvQualityLabel": {
+        "message": "Resolutie"
+    },
+    "popupCctvQualityAuto": {
+        "message": "Automatisch (hoogst beschikbare)"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "CCTV-debuglogboek"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Uitgebreide diagnostiek van het CCTV-relais tonen in de achtergrondconsole van de extensie."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "Kon de URL van de CCTV-livestream niet vastleggen. Zorg dat de livevideo op de pagina wordt afgespeeld en probeer het opnieuw."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "De geïnstalleerde native bridge ondersteunt geen DASH-remux. Bouw de native bridge van fx_cast_bilibili opnieuw, herinstalleer en herstart deze."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "De geïnstalleerde native bridge ondersteunt het live-HLS-relais niet. Bouw de native bridge van fx_cast_bilibili opnieuw, herinstalleer en herstart deze."
     }
 }

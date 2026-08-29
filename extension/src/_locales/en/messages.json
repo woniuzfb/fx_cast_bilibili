@@ -683,5 +683,28 @@
     "popupBilibiliQualityAuto": {
         "message": "Auto (highest compatible)",
         "description": "Bilibili quality option: pick the highest resolution the receiver can play."
+    },
+    "popupCctvQualityLabel": {
+        "message": "Resolution",
+        "description": "Label for the CCTV live stream resolution selector in the popup."
+    },
+    "popupCctvQualityAuto": {
+        "message": "Auto (highest available)",
+        "description": "CCTV resolution option: pick the highest variant the live stream offers."
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "CCTV debug logging"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Show verbose CCTV relay diagnostics in the extension background console."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "Could not capture the CCTV live stream URL. Make sure the live video is playing on the page, then try again."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "The installed native bridge does not support DASH remux. Rebuild, reinstall, and restart the fx_cast_bilibili native bridge."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "The installed native bridge does not support the live HLS relay. Rebuild, reinstall, and restart the fx_cast_bilibili native bridge."
     }
 }

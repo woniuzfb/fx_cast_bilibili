@@ -194,7 +194,10 @@ type MessageDefinitions = {
         filePath: string;
         port: number;
     };
-    "bridge:startRemoteMediaServer": { requestId: string; mediaUrl: string; audioUrl?: string; referer: string; contentType: string; port: number; startTime?: number; };
+    "bridge:startRemoteMediaServer": { requestId: string; mediaUrl: string; audioUrl?: string; referer: string; contentType: string; port: number; startTime?: number; hlsLive?: boolean; cctvDebugEnabled?: boolean; userAgent?: string; };
+    /** Live HLS relay diagnostics, surfaced in the extension background
+     *  console via handleBridgeMessage. */
+    "mediaCast:relayDebug": { requestId: string; event: string; [key: string]: unknown; };
     /**
      * Sent to media sender from bridge when the media server is ready
      * to serve files.
@@ -211,6 +214,15 @@ type MessageDefinitions = {
         padBaseSeconds?: number;
     /** Full source duration reported by ffprobe when available. */
     pageDuration?: number;
+    /** Synthetic DVR (CCTV live): offset of the live edge in the VOD
+     *  timeline at builtAtMs; it advances with wall clock from there.
+     *  Used to clamp forward seeks to published segments. */
+    liveEdgeBaseSeconds?: number;
+    builtAtMs?: number;
+    /** Synthetic DVR (CCTV live): segment cadence in seconds. The receiver
+     *  fetches one segment per stepSeconds while alive; the sender keys its
+     *  auto-recovery liveness timeout on it. */
+    stepSeconds?: number;
     };
     /**
      * Sent to bridge to stop HTTP media server.

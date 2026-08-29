@@ -72,6 +72,8 @@ export interface Options {
     bilibiliDefaultsVersion: number;
     /** Show Bilibili debug overlay and verbose traces. */
     bilibiliDebugEnabled: boolean;
+    /** Show verbose CCTV relay diagnostics. */
+    cctvDebugEnabled: boolean;
     /** Enable Voice Edge BLE remote event consumption. */
     bleRemoteEnabled: boolean;
     /** Voice Edge BLE remote newline-delimited JSON event stream URL. */
@@ -139,6 +141,7 @@ export default {
 
     bilibiliDefaultsVersion: 1,
     bilibiliDebugEnabled: false,
+    cctvDebugEnabled: false,
     bleRemoteEnabled: true,
     bleRemoteUrl: "http://127.0.0.1:5002/ble-remote/events",
     bleRemoteSeekBackwardSeconds: 30,

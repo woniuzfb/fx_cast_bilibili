@@ -612,5 +612,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "Automatisch (höchste kompatible)"
+    },
+    "popupCctvQualityLabel": {
+        "message": "Auflösung"
+    },
+    "popupCctvQualityAuto": {
+        "message": "Automatisch (höchste verfügbare)"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "CCTV-Debug-Protokollierung"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Ausführliche Diagnose des CCTV-Relays in der Hintergrundkonsole der Erweiterung anzeigen."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "Die URL des CCTV-Livestreams konnte nicht erfasst werden. Stellen Sie sicher, dass das Live-Video auf der Seite abgespielt wird, und versuchen Sie es erneut."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "Die installierte native Bridge unterstützt kein DASH-Remux. Erstellen Sie die native fx_cast_bilibili-Bridge neu, installieren Sie sie erneut und starten Sie sie neu."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "Die installierte native Bridge unterstützt das Live-HLS-Relay nicht. Erstellen Sie die native fx_cast_bilibili-Bridge neu, installieren Sie sie erneut und starten Sie sie neu."
     }
 }

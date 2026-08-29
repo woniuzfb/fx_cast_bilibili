@@ -11,6 +11,7 @@ import deviceManager from "./deviceManager";
 
 import { initAction } from "./action";
 import { initMenus, launchBilibiliSender } from "./menus";
+import { CCTV_LIVE_PAGE_RE, initCctvLive, launchCctvSender, setCctvLiveQuality } from "./cctvLive";
 import { initWhitelist } from "./whitelist";
 import { initBleRemote } from "./bleRemote";
 import { cacheUaInfo } from "../lib/userAgents";
@@ -136,6 +137,7 @@ async function init() {
     await initMenus();
     await initWhitelist();
     initBleRemote();
+    initCctvLive();
 
     // Surface popup debug logs in the background console. The browser-action
     // popup can't be inspected directly, so Popup.svelte forwards its debug
@@ -149,6 +151,22 @@ async function init() {
                 message?.data?.data ?? {}
             );
         });
+    });
+
+    // Sender/content-script consoles are separate from the extension
+    // background console. Forward CCTV recovery diagnostics here so a single
+    // background-console export contains both recovery decisions and relay logs.
+    browser.runtime.onMessage.addListener((message, sender) => {
+        if (message?.subject !== "cctv:recoveryDebug") return;
+        if (sender.tab?.id === undefined) return;
+        const level = message?.data?.level === "error" ? "error" : "info";
+        const text = "[cctv recovery] " + String(message?.data?.message ?? "");
+        const data = {
+            tabId: sender.tab.id,
+            ...(message?.data?.data ?? {})
+        };
+        if (level === "error") logger.error(text, data);
+        else logger.info(text, data);
     });
 
     browser.runtime.onMessage.addListener(message => {
@@ -171,6 +189,8 @@ async function init() {
                     tab.id,
                     Number(message.data?.quality) || 0
                 );
+            } else if (CCTV_LIVE_PAGE_RE.test(tab.url ?? "")) {
+                await launchCctvSender(tab.id, Number(message.data?.quality) || 0);
             } else {
                 await castManager.triggerCast(tab.id);
             }
@@ -193,6 +213,15 @@ async function init() {
                 args: [Number(message.data?.quality) || 0]
             });
         })().catch(err => logger.error("Bilibili quality change failed", err));
+    });
+
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "action:setCctvQuality") return;
+        void (async () => {
+            const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+            if (tab.id === undefined) return;
+            await setCctvLiveQuality(tab.id, Number(message.data?.quality) || 0);
+        })().catch(err => logger.error("CCTV quality change failed", err));
     });
 
     messaging.onMessage.addListener(message => {

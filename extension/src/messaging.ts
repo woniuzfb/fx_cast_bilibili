@@ -316,6 +316,15 @@ type BridgeMessageDefinitions = {
     contentType: string;
     port: number;
     startTime?: number;
+    /** Live HLS relay mode (CCTV live): bridge rewrites the playlist and
+     *  proxies segments through this machine. */
+    hlsLive?: boolean;
+    /** Enables verbose bridge relay logging and LAN debug playlist endpoints. */
+    cctvDebugEnabled?: boolean;
+    /** User-Agent for the bridge's upstream CDN requests (live relay). The
+     *  extension resolves the real Chrome UA from docs/ua.json so the CDN
+     *  doesn't throttle/serve degraded edges to an unknown client. */
+    userAgent?: string;
   };
   /**
    * Sent to media sender from bridge when the media server is ready
@@ -333,6 +342,15 @@ type BridgeMessageDefinitions = {
     padBaseSeconds?: number;
     /** Full source duration reported by ffprobe when available. */
     pageDuration?: number;
+    /** Synthetic DVR (CCTV live): offset of the live edge in the VOD
+     *  timeline at builtAtMs; it advances with wall clock from there.
+     *  Used to clamp forward seeks to published segments. */
+    liveEdgeBaseSeconds?: number;
+    builtAtMs?: number;
+    /** Synthetic DVR (CCTV live): segment cadence in seconds. The receiver
+     *  fetches one segment per stepSeconds while alive; the sender keys its
+     *  auto-recovery liveness timeout on it. */
+    stepSeconds?: number;
   };
   /**
    * Sent to bridge to stop HTTP media server.
@@ -343,6 +361,26 @@ type BridgeMessageDefinitions = {
    * stopped.
    */
   "mediaCast:mediaServerStopped": { requestId: string };
+  /** Live HLS relay diagnostics from the bridge, logged in the background
+   *  console by handleBridgeMessage (so relay activity is visible without
+   *  reading the bridge's stderr). */
+  "mediaCast:relayDebug": {
+    requestId: string;
+    event: string;
+    [key: string]: unknown;
+  };
+  /** Live relay: the receiver was served a media segment (/seg) beyond the
+   *  initial prebuffer window. Synthesized by the background from relayDebug
+   *  events and pushed to the page sender as the receiver-liveness signal for
+   *  auto-recovery: a receiver that keeps being served segments is alive,
+   *  whatever its media status says. `durationSeconds` is the slot's measured
+   *  content duration, so liveness credit is granted for what was actually
+   *  served. */
+  "mediaCast:relaySegmentRequested": { durationSeconds?: number };
+  /** Live relay: a cached prebuffer segment was served successfully. This is
+   *  separate from steady-state liveness because cached request cadence is
+   *  arbitrary; it only suppresses the prebuffer-stall fallback. */
+  "mediaCast:relayPrebufferSegmentRequested": Record<string, never>;
   /**
    * Sent to media sender from bridge when the media server has
    * encountered an error.

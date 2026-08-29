@@ -41,9 +41,31 @@
     /** Page info (if launched from page context). */
     let pageInfo: Optional<ReceiverSelectorPageInfo>;
     let bilibiliQuality = 0;
+    /** CCTV resolution cap (lines of height; 0 = auto), independent of the
+     *  Bilibili quality code preference. */
+    let cctvQuality = 0;
+    /**
+     * Quality ladder of the page's own master playlist, served by the
+     * background from its capture cache ({ height, page label } — the site
+     * labels the 1024x576 rung "540", not "576"). Empty until captured;
+     * the fallback ladder renders meanwhile.
+     */
+    let cctvQualityChoices: Array<{ height: number; label: string }> = [];
+    let cctvChoicesRequested = false;
+    const CCTV_FALLBACK_QUALITY_CHOICES = [
+        { height: 1080, label: "1080" },
+        { height: 720, label: "720" },
+        { height: 480, label: "480" },
+        { height: 360, label: "360" }
+    ];
     $: isBilibiliPage = /^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(
         pageInfo?.url ?? ""
     );
+    $: isCctvPage = /^https:\/\/tv\.cctv\.com\/live\//.test(pageInfo?.url ?? "");
+    $: if (hasSelectorContext && isCctvPage && !cctvChoicesRequested) {
+        cctvChoicesRequested = true;
+        void loadCctvQualityChoices();
+    }
 
     /** App details (if matches known app). */
     let knownApp: Nullable<KnownApp> = null;
@@ -155,8 +177,13 @@
             await browser.runtime.sendMessage({
                 subject: "action:castCurrentTab",
                 data: selection
-                    ? { selection, quality: bilibiliQuality }
-                    : { quality: bilibiliQuality }
+                    ? {
+                          selection,
+                          quality: isCctvPage ? cctvQuality : bilibiliQuality
+                      }
+                    : {
+                          quality: isCctvPage ? cctvQuality : bilibiliQuality
+                      }
             });
         } catch (err) {
             isPreparingSelector = false;
@@ -176,6 +203,73 @@
         popupLog("Bilibili quality changed", {
             quality: bilibiliQuality || "auto"
         });
+    }
+
+    async function setCctvQuality() {
+        await browser.storage.local.set({ cctvQuality });
+        await browser.runtime.sendMessage({
+            subject: "action:setCctvQuality",
+            data: { quality: cctvQuality }
+        });
+        popupLog("CCTV quality changed", {
+            quality: cctvQuality || "auto"
+        });
+    }
+
+    /**
+     * Ask the background for the page's master-playlist ladder. The master
+     * lands in its capture cache when the page loads, so this normally
+     * resolves on the first try; a short retry covers the popup having been
+     * opened before the player fetched it.
+     */
+    async function loadCctvQualityChoices() {
+        for (let attempt = 0; attempt < 5; attempt++) {
+            let choices: Array<{ height: number; label: string }> | undefined;
+            try {
+                const response = await browser.runtime.sendMessage({
+                    subject: "cctv:getQualityChoices",
+                    data: {}
+                });
+                if (Array.isArray(response?.choices)) {
+                    choices = response.choices
+                        .filter(
+                            (choice: any) =>
+                                Number.isFinite(Number(choice?.height)) &&
+                                typeof choice?.label === "string" &&
+                                choice.label
+                        )
+                        .map((choice: any) => ({
+                            height: Number(choice.height),
+                            label: choice.label
+                        }));
+                }
+            } catch {
+                /* background not reachable; retry */
+            }
+            if (choices?.length) {
+                cctvQualityChoices = choices;
+                if (
+                    cctvQuality > 0 &&
+                    !choices.some((choice) => choice.height === cctvQuality)
+                ) {
+                    // Stored preference is from another channel's ladder:
+                    // clamp onto this one (the cast picks the highest rung
+                    // below the value anyway, so keep the dropdown truthful).
+                    cctvQuality =
+                        choices.find(
+                            (choice) => choice.height <= cctvQuality
+                        )?.height ?? 0;
+                }
+                popupLog("CCTV quality choices loaded", { choices });
+                return;
+            }
+            await new Promise((resolve) =>
+                window.setTimeout(resolve, 1000)
+            );
+        }
+        popupLog(
+            "CCTV quality choices unavailable; using fallback ladder"
+        );
     }
 
     function connectPopupPort() {
@@ -215,10 +309,11 @@
             browser.tabs.query({ active: true, currentWindow: true }).then(
                 tabs => tabs[0]
             ),
-            browser.storage.local.get("bilibiliQuality")
+            browser.storage.local.get(["bilibiliQuality", "cctvQuality"])
         ]);
         popupTabId = activeTab?.id;
         bilibiliQuality = Number(stored.bilibiliQuality) || 0;
+        cctvQuality = Number(stored.cctvQuality) || 0;
         connectPopupPort();
         autoCastTimeoutId = window.setTimeout(() => {
             autoCastTimeoutId = undefined;
@@ -587,6 +682,28 @@
                 <option value={64}>720P</option>
                 <option value={32}>480P</option>
                 <option value={16}>360P</option>
+            </select>
+        </div>
+    </div>
+{/if}
+
+{#if hasSelectorContext && isCctvPage}
+    <div class="media-type-select">
+        <div class="media-type-select__label-cast">
+            {_("popupCctvQualityLabel")}
+        </div>
+        <div class="select-wrapper">
+            <select
+                class="media-type-select__dropdown"
+                bind:value={cctvQuality}
+                on:change={setCctvQuality}
+            >
+                <option value={0}>{_("popupCctvQualityAuto")}</option>
+                {#each cctvQualityChoices.length > 0
+                        ? cctvQualityChoices
+                        : CCTV_FALLBACK_QUALITY_CHOICES as choice (choice.height)}
+                    <option value={choice.height}>{choice.label}P</option>
+                {/each}
             </select>
         </div>
     </div>

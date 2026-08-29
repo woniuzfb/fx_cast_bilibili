@@ -415,6 +415,14 @@
                 inline
             />
             <Option
+                id="cctvDebugEnabled"
+                label={_("optionsCctvDebugEnabled")}
+                description={_("optionsCctvDebugEnabledDescription")}
+                type="checkbox"
+                bind:checked={opts.cctvDebugEnabled}
+                inline
+            />
+            <Option
                 id="showAdvancedOptions"
                 label={_("optionsShowAdvancedOptions")}
                 type="checkbox"

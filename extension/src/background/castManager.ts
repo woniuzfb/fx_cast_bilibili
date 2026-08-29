@@ -28,6 +28,13 @@ import ReceiverSelector, {
 
 import deviceManager from "./deviceManager";
 import { ActionState, updateActionState } from "./action";
+import {
+  armCctvPageCaptureIngest,
+  beginCctvPageCapture,
+  endCctvPageCapture,
+  isCctvPageCaptureActive,
+  pauseCctvPageCaptureIngest,
+} from "./cctvPageCapture";
 
 type AnyPort = Port | TypedMessagePort<Message>;
 
@@ -248,6 +255,10 @@ function destroyCastInstance(instance: CastInstance) {
   // tabId 0 is a valid value and must not be skipped by a truthiness check.
   if (instance.contentContext?.tabId !== undefined) {
     updateActionState(ActionState.Default, instance.contentContext?.tabId);
+    // A CCTV live capture session is bound to its cast instance's lifetime.
+    if (isCctvPageCaptureActive(instance.contentContext.tabId)) {
+      endCctvPageCapture(instance.contentContext.tabId);
+    }
   }
 
   activeInstances.delete(instance);
@@ -440,7 +451,7 @@ const castManager = new (class {
     contentPort: MessagePort,
     contentContext?: ContentContext
   ): Promise<CastInstance> {
-    const instance = await createCastInstance({
+    const instance = createCastInstance({
       contentPort,
       contentContext,
       isTrusted: true,
@@ -481,7 +492,7 @@ const castManager = new (class {
       );
     }
 
-    const instance = await createCastInstance({ contentPort, isTrusted });
+    const instance = createCastInstance({ contentPort, isTrusted });
 
     // cast instance -> (any)
     const onContentPortMessage = (message: Message) => {
@@ -551,8 +562,71 @@ export default castManager;
 
 /** Handles messages to cast instances from bridge. */
 async function handleBridgeMessage(instance: CastInstance, message: Message) {
+  // Surface live HLS relay diagnostics in the background console. These are
+  // purely informational and are not forwarded to the content port.
+  if (message.subject === "mediaCast:relayDebug") {
+    // requestId is required on the bridge protocol envelope, but repeating the
+    // full UUID in every high-volume segment log wastes the Firefox console
+    // preview budget and hides the actual decrypt diagnostics.
+    const { event, requestId: _requestId, ...rest } = message.data;
+    void _requestId;
+    const stored = (await browser.storage.sync.get("options")) as {
+      options?: { cctvDebugEnabled?: boolean };
+    };
+    if (stored.options?.cctvDebugEnabled) logger.info(`[relay] ${event}`, rest);
+    // Push /seg serves PAST the initial prebuffer window to the page sender.
+    // The event fires only after the slot resolved, so a receiver that keeps
+    // being served content is alive; one that requests but starves (bridge
+    // waiting on the page watermark forever) correctly gets no credit. Slots
+    // carry their measured duration so the sender's liveness credit matches
+    // the content actually served instead of the nominal segment cadence.
+    if (event === "receiver segment served") {
+      instance.contentPort.postMessage({
+        subject: "mediaCast:relaySegmentRequested",
+        data: {
+          durationSeconds:
+            typeof rest.durationSeconds === "number"
+              ? rest.durationSeconds
+              : undefined,
+        },
+      });
+    } else if (event === "receiver prebuffer segment served") {
+      // Keep cached prebuffer activity separate from steady-state liveness
+      // because its cadence is arbitrary.
+      instance.contentPort.postMessage({
+        subject: "mediaCast:relayPrebufferSegmentRequested",
+        data: {},
+      });
+    }
+    return;
+  }
+
   // Intercept messages to store relevant info
   switch (message.subject) {
+    case "mediaCast:mediaServerStarted": {
+      // Synthetic-DVR live relay is listening: switch the tab's page TS
+      // capture from buffering to POST-ingest and flush the restart gap.
+      // liveEdgeBaseSeconds is only ever set by the live relay path.
+      const tabId = instance.contentContext?.tabId;
+      if (
+        tabId !== undefined &&
+        isCctvPageCaptureActive(tabId) &&
+        typeof message.data.liveEdgeBaseSeconds === "number"
+      ) {
+        armCctvPageCaptureIngest(tabId, message.data.requestId);
+      }
+      break;
+    }
+
+    case "mediaCast:mediaServerStopped":
+    case "mediaCast:mediaServerError": {
+      const tabId = instance.contentContext?.tabId;
+      if (tabId !== undefined && isCctvPageCaptureActive(tabId)) {
+        pauseCctvPageCaptureIngest(tabId, message.data.requestId);
+      }
+      break;
+    }
+
     case "main:castSessionCreated": {
       // Keep the receiver selector alive as the browser-action
       // control channel for the lifetime of the Cast session.
@@ -627,6 +701,29 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
   }
 
   switch (message.subject) {
+    case "bridge:startRemoteMediaServer": {
+      // CCTV live relay (initial cast AND every recovery rebuild): start the
+      // page TS capture session for this tab. The endpoint is armed only when
+      // the relay reports listening (mediaServerStarted). cdrmld-seeded relays
+      // run heartbeat-only capture: the page plays the enc1/AV1 tree while
+      // the relay serves cdrmld H.264, so only the request timestamps (the
+      // page download progress watermark) matter, never the bytes.
+      if (
+        message.data.hlsLive &&
+        instance.contentContext?.tabId !== undefined
+      ) {
+        beginCctvPageCapture(
+          instance.contentContext.tabId,
+          {
+            port: message.data.port,
+            requestId: message.data.requestId,
+          },
+          /cdrmld/i.test(message.data.mediaUrl)
+        );
+      }
+      break;
+    }
+
     case "main:initializeCastSdk": {
       instance.apiConfig = message.data.apiConfig;
       instance.contentPort.postMessage({
@@ -1251,12 +1348,52 @@ function createSelector(tabId: number) {
           logger.error("Failed to route popup seek to page sender", err);
         }
       }
+      const customData = deviceManager.getDeviceById(deviceId)?.mediaStatus
+        ?.media?.customData;
+      // Synthetic DVR (CCTV live): the playlist is a frozen VOD extrapolated
+      // hours past the snapshot, so a forward seek can target segments the
+      // CDN hasn't published yet. Clamp it to stay behind the live edge
+      // (which advances with wall clock from the anchor embedded in
+      // customData). Keep the margin in sync with
+      // MediaSender.DVR_FORWARD_SEEK_MARGIN_SECONDS.
+      if (
+        customData &&
+        typeof customData === "object" &&
+        (customData as { hlsDvr?: unknown }).hlsDvr
+      ) {
+        const dvr = customData as {
+          dvrLiveEdgeBaseSeconds?: unknown;
+          dvrBuiltAtMs?: unknown;
+        };
+        if (
+          typeof dvr.dvrLiveEdgeBaseSeconds === "number" &&
+          typeof dvr.dvrBuiltAtMs === "number"
+        ) {
+          const liveEdge =
+            dvr.dvrLiveEdgeBaseSeconds +
+            (Date.now() - dvr.dvrBuiltAtMs) / 1000;
+          const clamped = Math.min(
+            message.currentTime,
+            Math.max(0, liveEdge - 60)
+          );
+          if (clamped < message.currentTime) {
+            logger.info("Clamped DVR forward seek behind live edge", {
+              requested: message.currentTime,
+              clamped,
+              liveEdge,
+            });
+          }
+          deviceManager.sendMediaMessage(deviceId, {
+            ...message,
+            currentTime: clamped,
+          });
+          return;
+        }
+      }
       // The page sender couldn't handle the seek (tab navigated or was
       // refreshed). A DASH remux session must not fall through to a native
       // receiver seek: the remuxed HLS only exists up to the ffmpeg
       // download frontier, so the receiver would buffer forever.
-      const customData = deviceManager.getDeviceById(deviceId)?.mediaStatus
-        ?.media?.customData;
       if (
         customData &&
         typeof customData === "object" &&

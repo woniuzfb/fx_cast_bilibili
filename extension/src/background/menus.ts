@@ -4,6 +4,7 @@ import options from "../lib/options";
 import { MenuId } from "../menuIds";
 
 import castManager, { CastInstanceDestroyedError } from "./castManager";
+import { CCTV_LIVE_PAGE_RE, launchCctvSender } from "./cctvLive";
 
 const _ = browser.i18n.getMessage;
 
@@ -195,6 +196,8 @@ async function onMenuClicked(
           /^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(tab.url ?? "")
         ) {
           await launchBilibiliSender(tab.id);
+        } else if (CCTV_LIVE_PAGE_RE.test(tab.url ?? "")) {
+          await launchCctvSender(tab.id);
         } else {
           castManager.triggerCast(tab.id, info.frameId);
         }

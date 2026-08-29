@@ -40,6 +40,7 @@ const argv = await yargs()
     .conflicts("use-pkg", "package")
     .parse(process.argv);
 
+/** @type {Record<string, readonly string[]>} */
 const supportedTargets = {
     win32: ["x86", "x64"],
     darwin: ["x64", "arm64"],
@@ -48,7 +49,7 @@ const supportedTargets = {
 if (!supportedTargets[process.platform]?.includes(argv.arch)) {
     console.error(
         `Error: Unsupported target! (${
-            paths.pkgPlatformMap[process.platform]
+            paths.pkgPlatformMap[process.platform] ?? process.platform
         }-${argv.arch})`
     );
 
@@ -91,6 +92,7 @@ async function build() {
      * Native app manifest
      * https://mdn.io/Native_manifests#Native_messaging_manifests
      */
+    /** @type {{ name: string; description: string; type: string; allowed_extensions: string[]; path?: string }} */
     const manifest = {
         name: config.applicationName,
         description: "",
@@ -107,11 +109,19 @@ async function build() {
         const pkgManifest = {
             bin: "main.js",
             pkg: {
-                /**
-                 * Workaround for pkg asset detection
-                 * https://github.com/thibauts/node-castv2/issues/46
-                 */
-                assets: "../../../node_modules/castv2/lib/cast_channel.proto"
+                assets: [
+                    // Workaround for pkg asset detection
+                    // https://github.com/thibauts/node-castv2/issues/46
+                    "../../../node_modules/castv2/lib/cast_channel.proto"
+                ],
+                scripts: [
+                    // Loaded dynamically by the isolated decrypt worker via
+                    // require(path.join(__dirname, "cctvDecrypt.js")). The
+                    // only static reference is a type-only import in
+                    // mediaServer.ts (erased by tsc), so pkg's dependency
+                    // analysis never sees it.
+                    "bridge/components/cctvDecrypt.js"
+                ]
             }
         };
 
@@ -132,7 +142,7 @@ async function build() {
             path.join(BUILD_PATH, "src"),
             "--target",
             `node${argv.nodeVersion}-${
-                paths.pkgPlatformMap[process.platform]
+                paths.pkgPlatformMap[process.platform] ?? process.platform
             }-${argv.arch}`,
             "--output",
             path.join(BUILD_PATH, executableName)
@@ -198,10 +208,7 @@ NODE_PATH="${modulesDir}" node $(dirname $0)/src/main.js --__name $(basename $0)
     }
 
     // Write a package.json so the bindings module resolves from this directory
-    fs.writeFileSync(
-        path.join(BUILD_PATH, "package.json"),
-        "{}"
-    );
+    fs.writeFileSync(path.join(BUILD_PATH, "package.json"), "{}");
 
     // Write app manifest
     fs.writeFileSync(
@@ -509,6 +516,7 @@ function packageLinuxRpm(
         mustache.render(fs.readFileSync(specPath).toString(), view)
     );
 
+    /** @type {Record<string, string>} */
     const rpmArchMap = { x86: "i386", x64: "x86_64" };
 
     spawnSync(

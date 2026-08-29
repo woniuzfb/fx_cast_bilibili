@@ -601,5 +601,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "Automatica (massima compatibile)"
+    },
+    "popupCctvQualityLabel": {
+        "message": "Risoluzione"
+    },
+    "popupCctvQualityAuto": {
+        "message": "Automatica (la più alta disponibile)"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "Registrazione di debug CCTV"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Mostra la diagnostica dettagliata del relay CCTV nella console in background dell'estensione."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "Impossibile acquisire l'URL del live CCTV. Assicurarsi che il video in diretta sia in riproduzione nella pagina, quindi riprovare."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "Il bridge nativo installato non supporta il remux DASH. Ricompilare, reinstallare e riavviare il bridge nativo fx_cast_bilibili."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "Il bridge nativo installato non supporta il relay HLS in diretta. Ricompilare, reinstallare e riavviare il bridge nativo fx_cast_bilibili."
     }
 }

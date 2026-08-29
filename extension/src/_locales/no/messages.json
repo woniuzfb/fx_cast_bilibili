@@ -613,5 +613,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "Automatisk (høyeste kompatible)"
+    },
+    "popupCctvQualityLabel": {
+        "message": "Oppløsning"
+    },
+    "popupCctvQualityAuto": {
+        "message": "Automatisk (høyeste tilgjengelige)"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "CCTV-feilsøkingslogging"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Vis detaljert CCTV-relédiagnostikk i utvidelsens bakgrunnskonsoll."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "Kunne ikke hente nettadressen til CCTV-direktestrømmen. Pass på at direktevideoen spilles av på siden, og prøv igjen."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "Den installerte native broen støtter ikke DASH-remux. Bygg, installer og start den native fx_cast_bilibili-broen på nytt."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "Den installerte native broen støtter ikke live-HLS-reléet. Bygg, installer og start den native fx_cast_bilibili-broen på nytt."
     }
 }

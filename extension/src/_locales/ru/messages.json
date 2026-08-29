@@ -817,5 +817,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "Авто (макс. совместимое)"
+    },
+    "popupCctvQualityLabel": {
+        "message": "Разрешение"
+    },
+    "popupCctvQualityAuto": {
+        "message": "Авто (макс. доступное)"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "Журнал отладки CCTV"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Показывать подробную диагностику реле CCTV в фоновой консоли расширения."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "Не удалось получить URL прямого эфира CCTV. Убедитесь, что видео с прямым эфиром воспроизводится на странице, и повторите попытку."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "Установленный нативный мост не поддерживает DASH-ремультиплексирование. Пересоберите, переустановите и перезапустите нативный мост fx_cast_bilibili."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "Установленный нативный мост не поддерживает реле прямого HLS-эфира. Пересоберите, переустановите и перезапустите нативный мост fx_cast_bilibili."
     }
 }

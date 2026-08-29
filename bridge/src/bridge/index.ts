@@ -28,9 +28,13 @@ let remoteHeartbeatStaleMs: number | undefined;
 let sessionHeartbeatStaleMs: number | undefined;
 
 function queueMediaServerCommand(command: () => Promise<void>) {
+    // Keep the serialization queue permanently fulfilled. Callers intentionally
+    // fire-and-forget this promise, so allowing the current command rejection to
+    // escape becomes an unhandled rejection; Node 22 then terminates the native
+    // messaging host and Firefox only reports an empty bridge disconnect.
     mediaServerCommandQueue = mediaServerCommandQueue
-        .catch(err => console.error("Previous media server command failed", err))
-        .then(command);
+        .then(command)
+        .catch(err => console.error("Media server command failed", err));
     return mediaServerCommandQueue;
 }
 
@@ -233,14 +237,19 @@ export function run(messaging: Messenger) {
                     referer,
                     contentType,
                     port,
-                    startTime
+                    startTime,
+                    hlsLive,
+                    cctvDebugEnabled,
+                    userAgent
                 } = message.data;
-                console.error("[fx_cast_bilibili] proxy requested", {
+                if (cctvDebugEnabled) console.error("[fx_cast_bilibili] proxy requested", {
                     requestId,
                     host: new URL(mediaUrl).hostname,
                     hasSeparateAudio: Boolean(audioUrl),
                     port,
-                    startTime
+                    startTime,
+                    hlsLive,
+                    hasUserAgent: Boolean(userAgent)
                 });
                 void queueMediaServerCommand(() =>
                     startRemoteMediaServer(
@@ -251,7 +260,10 @@ export function run(messaging: Messenger) {
                         contentType,
                         port,
                         audioUrl,
-                        startTime
+                        startTime,
+                        hlsLive,
+                        userAgent,
+                        cctvDebugEnabled
                     )
                 );
                 break;

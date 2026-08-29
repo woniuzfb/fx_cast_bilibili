@@ -681,5 +681,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "自動（最高相容畫質）"
+    },
+    "popupCctvQualityLabel": {
+        "message": "解析度"
+    },
+    "popupCctvQualityAuto": {
+        "message": "自動（最高可用解析度）"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "CCTV 偵錯日誌"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "顯示詳細的 CCTV 後台日誌。"
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "未能擷取 CCTV 直播串流網址。請確認頁面中的直播正在播放，然後再試。"
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "已安裝的本機橋接程式不支援 DASH 重新封裝。請重新建置及安裝 fx_cast_bilibili 本機橋接程式，然後重新啟動。"
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "已安裝的本機橋接程式不支援直播 HLS 中繼。請重新建置及安裝 fx_cast_bilibili 本機橋接程式，然後重新啟動。"
     }
 }

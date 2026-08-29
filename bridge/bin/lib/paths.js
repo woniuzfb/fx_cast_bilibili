@@ -13,6 +13,13 @@ export const LICENSE_PATH = path.join(rootPath, "LICENSE");
 
 export const REGISTRY_KEY = config.applicationName;
 
+/**
+ * Typed as a plain string-keyed record (not { win32: … }) so callers can
+ * index it with `process.platform` (NodeJS.Platform) under @ts-check and
+ * fall back for unlisted platforms.
+ *
+ * @type {Record<string, string | undefined>}
+ */
 export const pkgPlatformMap = {
     win32: "win",
     darwin: "macos",

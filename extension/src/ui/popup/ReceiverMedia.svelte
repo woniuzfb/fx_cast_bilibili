@@ -50,15 +50,19 @@
     // DASH remux sessions (Bilibili) report a live-style event playlist: the
     // receiver may omit media.duration and the SEEK capability even though
     // the page sender can seek by restarting the remux. The sender passes the
-    // real duration through customData.
+    // real duration through customData. The CCTV synthetic DVR uses the same
+    // pageDuration fallback (its receiver reports a real VOD duration and
+    // SEEK capability, so no flag is needed there).
     $: dashRemuxData = ((): {
         dashRemux?: boolean;
+        hlsDvr?: boolean;
         pageDuration?: number;
     } => {
         const customData = status.media?.customData;
         return customData && typeof customData === "object"
             ? (customData as {
                   dashRemux?: boolean;
+                  hlsDvr?: boolean;
                   pageDuration?: number;
               })
             : {};

@@ -803,5 +803,26 @@
     },
     "popupBilibiliQualityAuto": {
         "message": "Otomatis (tertinggi yang kompatibel)"
+    },
+    "popupCctvQualityLabel": {
+        "message": "Resolusi"
+    },
+    "popupCctvQualityAuto": {
+        "message": "Otomatis (tertinggi yang tersedia)"
+    },
+    "optionsCctvDebugEnabled": {
+        "message": "Pencatatan debug CCTV"
+    },
+    "optionsCctvDebugEnabledDescription": {
+        "message": "Tampilkan diagnostik relay CCTV yang terperinci di konsol latar belakang ekstensi."
+    },
+    "errorCctvLiveUrlCaptureFailed": {
+        "message": "Tidak dapat menangkap URL siaran langsung CCTV. Pastikan video langsung sedang diputar di halaman, lalu coba lagi."
+    },
+    "errorBridgeDashRemuxUnsupported": {
+        "message": "Native bridge yang terpasang tidak mendukung remux DASH. Bangun kembali, pasang kembali, dan mulai ulang native bridge fx_cast_bilibili."
+    },
+    "errorBridgeLiveHlsUnsupported": {
+        "message": "Native bridge yang terpasang tidak mendukung relay HLS langsung. Bangun kembali, pasang kembali, dan mulai ulang native bridge fx_cast_bilibili."
     }
 }
