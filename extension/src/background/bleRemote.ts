@@ -11,18 +11,29 @@ async function debugLog(message: string, data?: unknown) {
 }
 
 async function controlActiveBilibiliTab(action: BleRemoteAction) {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await browser.tabs.query({
+        active: true,
+        currentWindow: true
+    });
     if (tab.id === undefined || !tab.url) {
         await debugLog("ignored: no active tab", { action });
         return;
     }
     let hostname: string;
-    try { hostname = new URL(tab.url).hostname; } catch {
-        await debugLog("ignored: invalid active tab URL", { action, url: tab.url });
+    try {
+        hostname = new URL(tab.url).hostname;
+    } catch {
+        await debugLog("ignored: invalid active tab URL", {
+            action,
+            url: tab.url
+        });
         return;
     }
     if (hostname !== "bilibili.com" && !hostname.endsWith(".bilibili.com")) {
-        await debugLog("ignored: active tab is not Bilibili", { action, hostname });
+        await debugLog("ignored: active tab is not Bilibili", {
+            action,
+            hostname
+        });
         return;
     }
 
@@ -69,16 +80,24 @@ async function controlActiveBilibiliTab(action: BleRemoteAction) {
         if (!video) return { target: "page", result: "no-video" };
         switch (remoteAction) {
             case "seek_backward":
-                video.currentTime = Math.max(0, video.currentTime - seekBackwardSeconds);
+                video.currentTime = Math.max(
+                    0,
+                    video.currentTime - seekBackwardSeconds
+                );
                 break;
             case "seek_forward": {
                 const target = video.currentTime + seekForwardSeconds;
                 video.currentTime = Number.isFinite(video.duration)
-                    ? Math.min(video.duration, target) : target;
+                    ? Math.min(video.duration, target)
+                    : target;
                 break;
             }
-            case "pause": video.pause(); break;
-            case "play": void video.play(); break;
+            case "pause":
+                video.pause();
+                break;
+            case "play":
+                void video.play();
+                break;
         }
         return {
             target: "page",
@@ -116,7 +135,12 @@ async function handleStreamLine(line: string) {
     }
     await debugLog("message", message);
     if (message?.type !== "BLE_REMOTE") return;
-    if (!["seek_backward", "seek_forward", "pause", "play"].includes(message.action)) return;
+    if (
+        !["seek_backward", "seek_forward", "pause", "play"].includes(
+            message.action
+        )
+    )
+        return;
     try {
         await controlActiveBilibiliTab(message.action as BleRemoteAction);
     } catch (error) {
@@ -131,7 +155,9 @@ async function consumeEventStream() {
     for (;;) {
         try {
             if (!(await options.get("bleRemoteEnabled"))) {
-                await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY_MS));
+                await new Promise(resolve =>
+                    setTimeout(resolve, RECONNECT_DELAY_MS)
+                );
                 continue;
             }
             const configuredUrl = await options.get("bleRemoteUrl");
@@ -146,7 +172,10 @@ async function consumeEventStream() {
                     cache: "no-store",
                     signal: controller.signal
                 });
-                await debugLog("response", { status: response.status, ok: response.ok });
+                await debugLog("response", {
+                    status: response.status,
+                    ok: response.ok
+                });
                 if (!response.ok || !response.body) {
                     throw new Error(`BLE event stream HTTP ${response.status}`);
                 }
@@ -172,7 +201,9 @@ async function consumeEventStream() {
                 }
             }
         } catch (error) {
-            await debugLog("stream disconnected", { error: errorMessage(error) });
+            await debugLog("stream disconnected", {
+                error: errorMessage(error)
+            });
         }
         await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY_MS));
     }

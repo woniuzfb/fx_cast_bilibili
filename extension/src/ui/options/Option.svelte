@@ -40,9 +40,9 @@
     {#if inline}
         <div class="option__control">
             {#if $$restProps.type === "checkbox"}
-                <input {id} type="checkbox" bind:checked={checked} {...$$restProps} />
+                <input {id} type="checkbox" bind:checked {...$$restProps} />
             {:else}
-                <input {id} bind:value={value} {...$$restProps} />
+                <input {id} bind:value {...$$restProps} />
             {/if}
         </div>
         <label class="option__label" for={id}>
@@ -72,9 +72,9 @@
         </label>
         <div class="option__control">
             {#if $$restProps.type === "checkbox"}
-                <input {id} type="checkbox" bind:checked={checked} {...$$restProps} />
+                <input {id} type="checkbox" bind:checked {...$$restProps} />
             {:else}
-                <input {id} bind:value={value} {...$$restProps} />
+                <input {id} bind:value {...$$restProps} />
             {/if}
             {#if description}
                 <div class="option__description">

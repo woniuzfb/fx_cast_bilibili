@@ -11,7 +11,12 @@ import deviceManager from "./deviceManager";
 
 import { initAction } from "./action";
 import { initMenus, launchBilibiliSender } from "./menus";
-import { CCTV_LIVE_PAGE_RE, initCctvLive, launchCctvSender, setCctvLiveQuality } from "./cctvLive";
+import {
+    CCTV_LIVE_PAGE_RE,
+    initCctvLive,
+    launchCctvSender,
+    setCctvLiveQuality
+} from "./cctvLive";
 import { initWhitelist } from "./whitelist";
 import { initBleRemote } from "./bleRemote";
 import { cacheUaInfo } from "../lib/userAgents";
@@ -182,15 +187,25 @@ async function init() {
                 return;
             }
             if (message.data?.selection) {
-                castManager.queueReceiverSelection(tab.id, message.data.selection);
+                castManager.queueReceiverSelection(
+                    tab.id,
+                    message.data.selection
+                );
             }
-            if (/^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(tab.url ?? "")) {
+            if (
+                /^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(
+                    tab.url ?? ""
+                )
+            ) {
                 await launchBilibiliSender(
                     tab.id,
                     Number(message.data?.quality) || 0
                 );
             } else if (CCTV_LIVE_PAGE_RE.test(tab.url ?? "")) {
-                await launchCctvSender(tab.id, Number(message.data?.quality) || 0);
+                await launchCctvSender(
+                    tab.id,
+                    Number(message.data?.quality) || 0
+                );
             } else {
                 await castManager.triggerCast(tab.id);
             }
@@ -203,7 +218,10 @@ async function init() {
     browser.runtime.onMessage.addListener(message => {
         if (message?.subject !== "action:setBilibiliQuality") return;
         void (async () => {
-            const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+            const [tab] = await browser.tabs.query({
+                active: true,
+                currentWindow: true
+            });
             if (tab.id === undefined) return;
             await browser.scripting.executeScript({
                 target: { tabId: tab.id },
@@ -218,9 +236,15 @@ async function init() {
     browser.runtime.onMessage.addListener(message => {
         if (message?.subject !== "action:setCctvQuality") return;
         void (async () => {
-            const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+            const [tab] = await browser.tabs.query({
+                active: true,
+                currentWindow: true
+            });
             if (tab.id === undefined) return;
-            await setCctvLiveQuality(tab.id, Number(message.data?.quality) || 0);
+            await setCctvLiveQuality(
+                tab.id,
+                Number(message.data?.quality) || 0
+            );
         })().catch(err => logger.error("CCTV quality change failed", err));
     });
 

@@ -61,7 +61,9 @@
     $: isBilibiliPage = /^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(
         pageInfo?.url ?? ""
     );
-    $: isCctvPage = /^https:\/\/tv\.cctv\.com\/live\//.test(pageInfo?.url ?? "");
+    $: isCctvPage = /^https:\/\/tv\.cctv\.com\/live\//.test(
+        pageInfo?.url ?? ""
+    );
     $: if (hasSelectorContext && isCctvPage && !cctvChoicesRequested) {
         cctvChoicesRequested = true;
         void loadCctvQualityChoices();
@@ -250,26 +252,21 @@
                 cctvQualityChoices = choices;
                 if (
                     cctvQuality > 0 &&
-                    !choices.some((choice) => choice.height === cctvQuality)
+                    !choices.some(choice => choice.height === cctvQuality)
                 ) {
                     // Stored preference is from another channel's ladder:
                     // clamp onto this one (the cast picks the highest rung
                     // below the value anyway, so keep the dropdown truthful).
                     cctvQuality =
-                        choices.find(
-                            (choice) => choice.height <= cctvQuality
-                        )?.height ?? 0;
+                        choices.find(choice => choice.height <= cctvQuality)
+                            ?.height ?? 0;
                 }
                 popupLog("CCTV quality choices loaded", { choices });
                 return;
             }
-            await new Promise((resolve) =>
-                window.setTimeout(resolve, 1000)
-            );
+            await new Promise(resolve => window.setTimeout(resolve, 1000));
         }
-        popupLog(
-            "CCTV quality choices unavailable; using fallback ladder"
-        );
+        popupLog("CCTV quality choices unavailable; using fallback ladder");
     }
 
     function connectPopupPort() {
@@ -306,9 +303,9 @@
         // lost while storage or tab state is being read.
         browser.runtime.onMessage.addListener(onRuntimeMessage);
         const [activeTab, stored] = await Promise.all([
-            browser.tabs.query({ active: true, currentWindow: true }).then(
-                tabs => tabs[0]
-            ),
+            browser.tabs
+                .query({ active: true, currentWindow: true })
+                .then(tabs => tabs[0]),
             browser.storage.local.get(["bilibiliQuality", "cctvQuality"])
         ]);
         popupTabId = activeTab?.id;
@@ -418,7 +415,8 @@
                     mediaType = message.data.defaultMediaType;
                 }
                 devices = message.data.devices;
-                connectedTransportIds = message.data.connectedTransportIds ?? [];
+                connectedTransportIds =
+                    message.data.connectedTransportIds ?? [];
                 if (connectedTransportIds.length > 0) isConnecting = false;
                 updateKnownApp();
                 break;
@@ -699,9 +697,7 @@
                 on:change={setCctvQuality}
             >
                 <option value={0}>{_("popupCctvQualityAuto")}</option>
-                {#each cctvQualityChoices.length > 0
-                        ? cctvQualityChoices
-                        : CCTV_FALLBACK_QUALITY_CHOICES as choice (choice.height)}
+                {#each cctvQualityChoices.length > 0 ? cctvQualityChoices : CCTV_FALLBACK_QUALITY_CHOICES as choice (choice.height)}
                     <option value={choice.height}>{choice.label}P</option>
                 {/each}
             </select>

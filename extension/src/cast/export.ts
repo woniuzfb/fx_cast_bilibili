@@ -112,7 +112,9 @@ export function ensureInit(opts?: EnsureInitOpts): Promise<CastPort> {
             pageMessaging.extension.close();
             if (existingPort === openedPort) existingPort = undefined;
             rejectInit(
-                new Error("Cast background connection closed during initialization")
+                new Error(
+                    "Cast background connection closed during initialization"
+                )
             );
         });
 

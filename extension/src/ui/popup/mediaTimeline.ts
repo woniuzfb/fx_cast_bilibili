@@ -111,7 +111,9 @@ export function updatePopupMediaTimeline(
 ): PopupMediaTimeline {
     const mediaId = sample.mediaId ?? "";
     const mediaChanged =
-        Boolean(previous.mediaId) && Boolean(mediaId) && mediaId !== previous.mediaId;
+        Boolean(previous.mediaId) &&
+        Boolean(mediaId) &&
+        mediaId !== previous.mediaId;
     const next: PopupMediaTimeline = mediaChanged
         ? { mediaId, currentTime: 0, updatedAt: 0, duration: 0 }
         : { ...previous, mediaId: mediaId || previous.mediaId };
@@ -215,10 +217,7 @@ export function updatePopupMediaTimeline(
                 next.reloadHoldTime = undefined;
                 next.reloadExpiresAt = undefined;
             }
-        } else if (
-            next.updatedAt === 0 ||
-            currentTime !== next.currentTime
-        ) {
+        } else if (next.updatedAt === 0 || currentTime !== next.currentTime) {
             next.currentTime = currentTime;
             next.updatedAt = sample.now;
             // The hold expired without a settled report (e.g. failed reload);

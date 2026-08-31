@@ -1,26 +1,26 @@
 import type { TypedPort } from "./lib/TypedPort";
 
 import type {
-  ReceiverSelection,
-  ReceiverSelectorMediaMessage,
-  ReceiverSelectorReceiverMessage,
+    ReceiverSelection,
+    ReceiverSelectorMediaMessage,
+    ReceiverSelectorReceiverMessage
 } from "./background/ReceiverSelector";
 
 import type {
-  CastSessionCreatedDetails,
-  CastSessionUpdatedDetails,
-  MediaStatus,
-  ReceiverStatus,
-  SenderMediaMessage,
-  SenderMessage,
+    CastSessionCreatedDetails,
+    CastSessionUpdatedDetails,
+    MediaStatus,
+    ReceiverStatus,
+    SenderMediaMessage,
+    SenderMessage
 } from "./cast/sdk/types";
 import type { ApiConfig, Receiver, SessionRequest } from "./cast/sdk/classes";
 
 import type {
-  ReceiverDevice,
-  ReceiverSelectorAppInfo,
-  ReceiverSelectorMediaType,
-  ReceiverSelectorPageInfo,
+    ReceiverDevice,
+    ReceiverSelectorAppInfo,
+    ReceiverSelectorMediaType,
+    ReceiverSelectorPageInfo
 } from "./types";
 import type { ReceiverAction } from "./cast/sdk/enums";
 
@@ -44,87 +44,87 @@ import type { PongReport } from "../../shared/pongReport";
  * components.
  */
 type ExtensionMessageDefinitions = {
-  /** Initial data to send to selector popup. */
-  "popup:init": {
-    tabId: number;
-    appInfo?: ReceiverSelectorAppInfo;
-    pageInfo?: ReceiverSelectorPageInfo;
-    devices: ReceiverDevice[];
-    isBridgeCompatible: boolean;
-    connectedTransportIds?: string[];
-    defaultMediaType?: ReceiverSelectorMediaType;
-    availableMediaTypes?: ReceiverSelectorMediaType;
-  };
-  /** Updates selector popup with new data. */
-  "popup:update": {
-    devices: ReceiverDevice[];
-    isBridgeCompatible: boolean;
-    connectedTransportIds?: string[];
-    defaultMediaType?: ReceiverSelectorMediaType;
-    availableMediaTypes?: ReceiverSelectorMediaType;
-  };
+    /** Initial data to send to selector popup. */
+    "popup:init": {
+        tabId: number;
+        appInfo?: ReceiverSelectorAppInfo;
+        pageInfo?: ReceiverSelectorPageInfo;
+        devices: ReceiverDevice[];
+        isBridgeCompatible: boolean;
+        connectedTransportIds?: string[];
+        defaultMediaType?: ReceiverSelectorMediaType;
+        availableMediaTypes?: ReceiverSelectorMediaType;
+    };
+    /** Updates selector popup with new data. */
+    "popup:update": {
+        devices: ReceiverDevice[];
+        isBridgeCompatible: boolean;
+        connectedTransportIds?: string[];
+        defaultMediaType?: ReceiverSelectorMediaType;
+        availableMediaTypes?: ReceiverSelectorMediaType;
+    };
 
-  /**
-   * Sent from the selector popup when a receiver has been
-   * selected.
-   */
-  "main:receiverSelected": ReceiverSelection;
-  /**
-   * Sent from the selector popup when a receiver has been
-   * stopped. Used to provide cast API receiver action updates.
-   */
-  "main:receiverStopped": { deviceId: string };
+    /**
+     * Sent from the selector popup when a receiver has been
+     * selected.
+     */
+    "main:receiverSelected": ReceiverSelection;
+    /**
+     * Sent from the selector popup when a receiver has been
+     * stopped. Used to provide cast API receiver action updates.
+     */
+    "main:receiverStopped": { deviceId: string };
 
-  /**
-   * Tells the cast manager to provide the cast API instance with
-   * receiver data.
-   */
-  "main:initializeCastSdk": { apiConfig: ApiConfig };
-  "cast:initialized": { isAvailable: boolean };
+    /**
+     * Tells the cast manager to provide the cast API instance with
+     * receiver data.
+     */
+    "main:initializeCastSdk": { apiConfig: ApiConfig };
+    "cast:initialized": { isAvailable: boolean };
 
-  /**
-   * Sent to the cast API when a session is requested or stopped via
-   * the extension UI.
-   */
-  "cast:receiverAction": { receiver: Receiver; action: ReceiverAction };
+    /**
+     * Sent to the cast API when a session is requested or stopped via
+     * the extension UI.
+     */
+    "cast:receiverAction": { receiver: Receiver; action: ReceiverAction };
 
-  /**
-   * Sent from the cast API to trigger receiver selection on session
-   * request.
-   */
-  "main:requestSession": {
-    sessionRequest: SessionRequest;
-    /** Skip receiver selection (allowed for trusted instances only). */
-    receiverDevice?: ReceiverDevice;
-  };
-  /** Return message to the cast API when a selection is cancelled. */
-  "cast:sessionRequestCancelled": undefined;
+    /**
+     * Sent from the cast API to trigger receiver selection on session
+     * request.
+     */
+    "main:requestSession": {
+        sessionRequest: SessionRequest;
+        /** Skip receiver selection (allowed for trusted instances only). */
+        receiverDevice?: ReceiverDevice;
+    };
+    /** Return message to the cast API when a selection is cancelled. */
+    "cast:sessionRequestCancelled": undefined;
 
-  "main:requestSessionById": { sessionId: string };
-  "main:leaveSession": void;
+    "main:requestSessionById": { sessionId: string };
+    "main:leaveSession": void;
 
-  "cast:instanceCreated": { isAvailable: boolean };
-  "cast:receiverAvailabilityUpdated": { isAvailable: boolean };
+    "cast:instanceCreated": { isAvailable: boolean };
+    "cast:receiverAvailabilityUpdated": { isAvailable: boolean };
 
-  "cast:sessionCreated": CastSessionCreatedDetails & {
-    receiver: Receiver;
-    media?: MediaStatus;
-  };
-  "cast:sessionUpdated": CastSessionUpdatedDetails;
-  "cast:sessionDisconnected": { sessionId: string };
+    "cast:sessionCreated": CastSessionCreatedDetails & {
+        receiver: Receiver;
+        media?: MediaStatus;
+    };
+    "cast:sessionUpdated": CastSessionUpdatedDetails;
+    "cast:sessionDisconnected": { sessionId: string };
 
-  /** Allows the selector popup to send cast NS_RECEIVER messages. */
-  "main:sendReceiverMessage": ReceiverSelectorReceiverMessage;
-  /** Allows the selector popup to send cast NS_MEDIA messages. */
-  "main:sendMediaMessage": ReceiverSelectorMediaMessage;
+    /** Allows the selector popup to send cast NS_RECEIVER messages. */
+    "main:sendReceiverMessage": ReceiverSelectorReceiverMessage;
+    /** Allows the selector popup to send cast NS_MEDIA messages. */
+    "main:sendMediaMessage": ReceiverSelectorMediaMessage;
 
-  /**
-   * Tells the device manager to clear its device list and re-connect
-   * to the bridge.
-   */
-  "main:refreshDeviceManager": void;
+    /**
+     * Tells the device manager to clear its device list and re-connect
+     * to the bridge.
+     */
+    "main:refreshDeviceManager": void;
 
-  "mirroringPopup:init": { device: ReceiverDevice };
+    "mirroringPopup:init": { device: ReceiverDevice };
 };
 
 /**
@@ -134,270 +134,270 @@ type ExtensionMessageDefinitions = {
  *   app/src/bridge/messaging.ts > MessageDefinitions
  */
 type BridgeMessageDefinitions = {
-  /**
-   * First message sent by the extension to the bridge.Responds directly with
-   * version string of the bridge to compare.
-   *
-   * Still uses `:/` message separator for compat talking to older bridge
-   * versions.
-   */
-  "bridge:getInfo": undefined;
-  "bridge:/getInfo": undefined;
-
-  /**
-   * Tells a bridge to begin service discovery (and whether to
-   * establish connections to monitor the status of the receiver
-   * devices).
-   */
-  "bridge:startDiscovery": {
-    shouldWatchStatus: boolean;
     /**
-     * Half-dead watchdog timeouts (ms) for the bridge. Optional so older
-     * bridges ignore them and the bridge falls back to its own defaults.
-     *   - remote: platform status connection (remote.ts)
-     *   - session: active cast session socket (Session.ts)
+     * First message sent by the extension to the bridge.Responds directly with
+     * version string of the bridge to compare.
+     *
+     * Still uses `:/` message separator for compat talking to older bridge
+     * versions.
      */
-    remoteHeartbeatStaleMs?: number;
-    sessionHeartbeatStaleMs?: number;
-  };
+    "bridge:getInfo": undefined;
+    "bridge:/getInfo": undefined;
 
-  /**
-   * Sent to extension from the bridge whenever a receiver device is
-   * found.
-   */
-  "main:deviceUp": { deviceId: string; deviceInfo: ReceiverDevice };
-  /**
-   * Sent to extension from the bridge whenever a previously found
-   * receiver device is lost.
-   */
-  "main:deviceDown": { deviceId: string };
+    /**
+     * Tells a bridge to begin service discovery (and whether to
+     * establish connections to monitor the status of the receiver
+     * devices).
+     */
+    "bridge:startDiscovery": {
+        shouldWatchStatus: boolean;
+        /**
+         * Half-dead watchdog timeouts (ms) for the bridge. Optional so older
+         * bridges ignore them and the bridge falls back to its own defaults.
+         *   - remote: platform status connection (remote.ts)
+         *   - session: active cast session socket (Session.ts)
+         */
+        remoteHeartbeatStaleMs?: number;
+        sessionHeartbeatStaleMs?: number;
+    };
 
-  /**
-   * Sent to the extension from the bridge whenever a
-   * `RECEIVER_STATUS` message (`NS_RECEIVER`) is received.
-   */
-  "main:receiverDeviceStatusUpdated": {
-    deviceId: string;
-    status: ReceiverStatus;
-  };
-  /**
-   * Sent to the extension from the bridge whenever a
-   * `MEDIA_STATUS` message (`NS_RECEIVER`) is received.
-   */
-  "main:receiverDeviceMediaStatusUpdated": {
-    deviceId: string;
-    status: MediaStatus;
-  };
+    /**
+     * Sent to extension from the bridge whenever a receiver device is
+     * found.
+     */
+    "main:deviceUp": { deviceId: string; deviceInfo: ReceiverDevice };
+    /**
+     * Sent to extension from the bridge whenever a previously found
+     * receiver device is lost.
+     */
+    "main:deviceDown": { deviceId: string };
 
-  /**
-   * Sent to the bridge when non-session related receiver messages
-   * need to be sent (e.g. volume control, application stop, etc...).
-   */
-  "bridge:sendReceiverMessage": {
-    deviceId: string;
-    message: SenderMessage;
-  };
-  /**
-   * Sent to the bridge when the receiver selector media UI is used
-   * to control media playback.
-   */
-  "bridge:sendMediaMessage": {
-    deviceId: string;
-    message: SenderMediaMessage;
-  };
+    /**
+     * Sent to the extension from the bridge whenever a
+     * `RECEIVER_STATUS` message (`NS_RECEIVER`) is received.
+     */
+    "main:receiverDeviceStatusUpdated": {
+        deviceId: string;
+        status: ReceiverStatus;
+    };
+    /**
+     * Sent to the extension from the bridge whenever a
+     * `MEDIA_STATUS` message (`NS_RECEIVER`) is received.
+     */
+    "main:receiverDeviceMediaStatusUpdated": {
+        deviceId: string;
+        status: MediaStatus;
+    };
 
-  /**
-   * Sent to bridge from cast API instance when a session request is
-   * initiated.
-   */
-  "bridge:createCastSession": {
-    appId: string;
-    receiverDevice: ReceiverDevice;
-  };
-  /**
-   * Connects to, and sends a `STOP` message on the `NS_RECEIVER`
-   * channel for the given receiver device.
-   */
-  "bridge:stopCastSession": {
-    receiverDevice: ReceiverDevice;
-  };
+    /**
+     * Sent to the bridge when non-session related receiver messages
+     * need to be sent (e.g. volume control, application stop, etc...).
+     */
+    "bridge:sendReceiverMessage": {
+        deviceId: string;
+        message: SenderMessage;
+    };
+    /**
+     * Sent to the bridge when the receiver selector media UI is used
+     * to control media playback.
+     */
+    "bridge:sendMediaMessage": {
+        deviceId: string;
+        message: SenderMediaMessage;
+    };
 
-  /**
-   * Sent to cast API instances whenever a session is created or
-   * updates. Updated details is a mutable subset of session details
-   * otherwise fixed on creation.
-   */
-  "main:castSessionCreated": CastSessionCreatedDetails;
-  "main:castSessionUpdated": CastSessionUpdatedDetails;
+    /**
+     * Sent to bridge from cast API instance when a session request is
+     * initiated.
+     */
+    "bridge:createCastSession": {
+        appId: string;
+        receiverDevice: ReceiverDevice;
+    };
+    /**
+     * Connects to, and sends a `STOP` message on the `NS_RECEIVER`
+     * channel for the given receiver device.
+     */
+    "bridge:stopCastSession": {
+        receiverDevice: ReceiverDevice;
+    };
 
-  /**
-   * Sent to cast API instances whenever a session is stopped.
-   */
-  "cast:sessionStopped": {
-    sessionId: string;
-  };
+    /**
+     * Sent to cast API instances whenever a session is created or
+     * updates. Updated details is a mutable subset of session details
+     * otherwise fixed on creation.
+     */
+    "main:castSessionCreated": CastSessionCreatedDetails;
+    "main:castSessionUpdated": CastSessionUpdatedDetails;
 
-  /**
-   * Heartbeat/PONG timing report from a cast connection's platform
-   * socket, emitted ONLY when the live-calibrated threshold diverges from
-   * the hard-coded HEARTBEAT_STALE_MS (steady state stays quiet). Logged
-   * in the extension background console to tune the half-dead watchdog.
-   * `source` identifies which watchdog to adjust:
-   *   - "session" -> Session.ts DEFAULT_HEARTBEAT_STALE_MS
-   *   - "remote"  -> remote.ts DEFAULT_HEARTBEAT_STALE_MS
-   * `report` uses the shared PongReport type (shared/pongReport.d.ts), the
-   * single source of truth also imported by the bridge — no longer a
-   * hand-duplicated shape.
-   */
-  "main:pongDiagnostics": {
-    source: "session" | "remote";
-    sessionId?: string;
-    deviceId?: string;
-    configuredThresholdMs: number;
-    report: PongReport;
-  };
+    /**
+     * Sent to cast API instances whenever a session is stopped.
+     */
+    "cast:sessionStopped": {
+        sessionId: string;
+    };
 
-  /**
-   * Sent to bridge from cast API instance whenever an `NS_RECEIVER`
-   * message needs to be sent.
-   */
-  "bridge:sendCastReceiverMessage": {
-    sessionId: string;
-    messageData: SenderMessage;
-    messageId: string;
-  };
+    /**
+     * Heartbeat/PONG timing report from a cast connection's platform
+     * socket, emitted ONLY when the live-calibrated threshold diverges from
+     * the hard-coded HEARTBEAT_STALE_MS (steady state stays quiet). Logged
+     * in the extension background console to tune the half-dead watchdog.
+     * `source` identifies which watchdog to adjust:
+     *   - "session" -> Session.ts DEFAULT_HEARTBEAT_STALE_MS
+     *   - "remote"  -> remote.ts DEFAULT_HEARTBEAT_STALE_MS
+     * `report` uses the shared PongReport type (shared/pongReport.d.ts), the
+     * single source of truth also imported by the bridge — no longer a
+     * hand-duplicated shape.
+     */
+    "main:pongDiagnostics": {
+        source: "session" | "remote";
+        sessionId?: string;
+        deviceId?: string;
+        configuredThresholdMs: number;
+        report: PongReport;
+    };
 
-  /**
-   * Sent to bridge from cast API instance whenever a application
-   * session message needs to be sent (via
-   * `chrome.cast.Session#sendMessage`).
-   */
-  "bridge:sendCastSessionMessage": {
-    sessionId: string;
-    namespace: string;
-    messageData: object | string;
-    messageId: string;
-  };
-  /**
-   * Sent to cast API instance from bridge when session message
-   * received from a receiver device.
-   */
-  "cast:sessionMessageReceived": {
-    sessionId: string;
-    namespace: string;
-    messageData: string;
-  };
+    /**
+     * Sent to bridge from cast API instance whenever an `NS_RECEIVER`
+     * message needs to be sent.
+     */
+    "bridge:sendCastReceiverMessage": {
+        sessionId: string;
+        messageData: SenderMessage;
+        messageId: string;
+    };
 
-  /**
-   * Sent to cast API instance from bridge whenever a message
-   * operation is completed. If an error ocurred, an error string will
-   * be passed as the `error` data property.
-   */
-  "cast:impl_sendMessage": {
-    sessionId: string;
-    messageId: string;
-    error?: string;
-  };
+    /**
+     * Sent to bridge from cast API instance whenever a application
+     * session message needs to be sent (via
+     * `chrome.cast.Session#sendMessage`).
+     */
+    "bridge:sendCastSessionMessage": {
+        sessionId: string;
+        namespace: string;
+        messageData: object | string;
+        messageId: string;
+    };
+    /**
+     * Sent to cast API instance from bridge when session message
+     * received from a receiver device.
+     */
+    "cast:sessionMessageReceived": {
+        sessionId: string;
+        namespace: string;
+        messageData: string;
+    };
 
-  /**
-   * Sent to the bridge to start an HTTP media server at a given file
-   * path on the given port.
-   */
-  "bridge:startMediaServer": {
-    requestId: string;
-    filePath: string;
-    port: number;
-  };
-  "bridge:startRemoteMediaServer": {
-    requestId: string;
-    mediaUrl: string;
-    audioUrl?: string;
-    referer: string;
-    contentType: string;
-    port: number;
-    startTime?: number;
-    /** Live HLS relay mode (CCTV live): bridge rewrites the playlist and
-     *  proxies segments through this machine. */
-    hlsLive?: boolean;
-    /** Enables verbose bridge relay logging and LAN debug playlist endpoints. */
-    cctvDebugEnabled?: boolean;
-    /** User-Agent for the bridge's upstream CDN requests (live relay). The
-     *  extension resolves the real Chrome UA from docs/ua.json so the CDN
-     *  doesn't throttle/serve degraded edges to an unknown client. */
-    userAgent?: string;
-  };
-  /**
-   * Sent to media sender from bridge when the media server is ready
-   * to serve files.
-   */
-  "mediaCast:mediaServerStarted": {
-    requestId: string;
-    mediaPath: string;
-    subtitlePaths: string[];
-    localAddress: string;
-    mode?: "proxy" | "dash-remux";
-    /** DASH remux: requested seek target and the probed keyframe the
-     *  playlist is actually padded to (diagnostics). */
-    startTime?: number;
-    padBaseSeconds?: number;
-    /** Full source duration reported by ffprobe when available. */
-    pageDuration?: number;
-    /** Synthetic DVR (CCTV live): offset of the live edge in the VOD
-     *  timeline at builtAtMs; it advances with wall clock from there.
-     *  Used to clamp forward seeks to published segments. */
-    liveEdgeBaseSeconds?: number;
-    builtAtMs?: number;
-    /** Synthetic DVR (CCTV live): segment cadence in seconds. The receiver
-     *  fetches one segment per stepSeconds while alive; the sender keys its
-     *  auto-recovery liveness timeout on it. */
-    stepSeconds?: number;
-  };
-  /**
-   * Sent to bridge to stop HTTP media server.
-   */
-  "bridge:stopMediaServer": { requestId?: string; force?: boolean };
-  /**
-   * Sent to media sender from bridge when the media server has
-   * stopped.
-   */
-  "mediaCast:mediaServerStopped": { requestId: string };
-  /** Live HLS relay diagnostics from the bridge, logged in the background
-   *  console by handleBridgeMessage (so relay activity is visible without
-   *  reading the bridge's stderr). */
-  "mediaCast:relayDebug": {
-    requestId: string;
-    event: string;
-    [key: string]: unknown;
-  };
-  /** Live relay: the receiver was served a media segment (/seg) beyond the
-   *  initial prebuffer window. Synthesized by the background from relayDebug
-   *  events and pushed to the page sender as the receiver-liveness signal for
-   *  auto-recovery: a receiver that keeps being served segments is alive,
-   *  whatever its media status says. `durationSeconds` is the slot's measured
-   *  content duration, so liveness credit is granted for what was actually
-   *  served. */
-  "mediaCast:relaySegmentRequested": { durationSeconds?: number };
-  /** Live relay: a cached prebuffer segment was served successfully. This is
-   *  separate from steady-state liveness because cached request cadence is
-   *  arbitrary; it only suppresses the prebuffer-stall fallback. */
-  "mediaCast:relayPrebufferSegmentRequested": Record<string, never>;
-  /**
-   * Sent to media sender from bridge when the media server has
-   * encountered an error.
-   */
-  "mediaCast:mediaServerError": { requestId: string; message: string };
+    /**
+     * Sent to cast API instance from bridge whenever a message
+     * operation is completed. If an error ocurred, an error string will
+     * be passed as the `error` data property.
+     */
+    "cast:impl_sendMessage": {
+        sessionId: string;
+        messageId: string;
+        error?: string;
+    };
+
+    /**
+     * Sent to the bridge to start an HTTP media server at a given file
+     * path on the given port.
+     */
+    "bridge:startMediaServer": {
+        requestId: string;
+        filePath: string;
+        port: number;
+    };
+    "bridge:startRemoteMediaServer": {
+        requestId: string;
+        mediaUrl: string;
+        audioUrl?: string;
+        referer: string;
+        contentType: string;
+        port: number;
+        startTime?: number;
+        /** Live HLS relay mode (CCTV live): bridge rewrites the playlist and
+         *  proxies segments through this machine. */
+        hlsLive?: boolean;
+        /** Enables verbose bridge relay logging and LAN debug playlist endpoints. */
+        cctvDebugEnabled?: boolean;
+        /** User-Agent for the bridge's upstream CDN requests (live relay). The
+         *  extension resolves the real Chrome UA from docs/ua.json so the CDN
+         *  doesn't throttle/serve degraded edges to an unknown client. */
+        userAgent?: string;
+    };
+    /**
+     * Sent to media sender from bridge when the media server is ready
+     * to serve files.
+     */
+    "mediaCast:mediaServerStarted": {
+        requestId: string;
+        mediaPath: string;
+        subtitlePaths: string[];
+        localAddress: string;
+        mode?: "proxy" | "dash-remux";
+        /** DASH remux: requested seek target and the probed keyframe the
+         *  playlist is actually padded to (diagnostics). */
+        startTime?: number;
+        padBaseSeconds?: number;
+        /** Full source duration reported by ffprobe when available. */
+        pageDuration?: number;
+        /** Synthetic DVR (CCTV live): offset of the live edge in the VOD
+         *  timeline at builtAtMs; it advances with wall clock from there.
+         *  Used to clamp forward seeks to published segments. */
+        liveEdgeBaseSeconds?: number;
+        builtAtMs?: number;
+        /** Synthetic DVR (CCTV live): segment cadence in seconds. The receiver
+         *  fetches one segment per stepSeconds while alive; the sender keys its
+         *  auto-recovery liveness timeout on it. */
+        stepSeconds?: number;
+    };
+    /**
+     * Sent to bridge to stop HTTP media server.
+     */
+    "bridge:stopMediaServer": { requestId?: string; force?: boolean };
+    /**
+     * Sent to media sender from bridge when the media server has
+     * stopped.
+     */
+    "mediaCast:mediaServerStopped": { requestId: string };
+    /** Live HLS relay diagnostics from the bridge, logged in the background
+     *  console by handleBridgeMessage (so relay activity is visible without
+     *  reading the bridge's stderr). */
+    "mediaCast:relayDebug": {
+        requestId: string;
+        event: string;
+        [key: string]: unknown;
+    };
+    /** Live relay: the receiver was served a media segment (/seg) beyond the
+     *  initial prebuffer window. Synthesized by the background from relayDebug
+     *  events and pushed to the page sender as the receiver-liveness signal for
+     *  auto-recovery: a receiver that keeps being served segments is alive,
+     *  whatever its media status says. `durationSeconds` is the slot's measured
+     *  content duration, so liveness credit is granted for what was actually
+     *  served. */
+    "mediaCast:relaySegmentRequested": { durationSeconds?: number };
+    /** Live relay: a cached prebuffer segment was served successfully. This is
+     *  separate from steady-state liveness because cached request cadence is
+     *  arbitrary; it only suppresses the prebuffer-stall fallback. */
+    "mediaCast:relayPrebufferSegmentRequested": Record<string, never>;
+    /**
+     * Sent to media sender from bridge when the media server has
+     * encountered an error.
+     */
+    "mediaCast:mediaServerError": { requestId: string; message: string };
 };
 
 type MessageDefinitions = ExtensionMessageDefinitions &
-  BridgeMessageDefinitions;
+    BridgeMessageDefinitions;
 
 interface MessageBase<K extends keyof MessageDefinitions> {
-  subject: K;
-  data: MessageDefinitions[K];
+    subject: K;
+    data: MessageDefinitions[K];
 }
 
 type Messages = {
-  [K in keyof MessageDefinitions]: MessageBase<K>;
+    [K in keyof MessageDefinitions]: MessageBase<K>;
 };
 
 /**
@@ -405,11 +405,11 @@ type Messages = {
  * all-optional keys.
  */
 type NarrowedMessage<L extends MessageBase<keyof MessageDefinitions>> =
-  L extends unknown
-    ? undefined extends L["data"]
-      ? Omit<L, "data"> & Partial<L>
-      : L
-    : never;
+    L extends unknown
+        ? undefined extends L["data"]
+            ? Omit<L, "data"> & Partial<L>
+            : L
+        : never;
 
 export type Port = TypedPort<Message>;
 export type Message = NarrowedMessage<Messages[keyof Messages]>;
@@ -418,31 +418,31 @@ export type Message = NarrowedMessage<Messages[keyof Messages]>;
  * Typed WebExtension-style messaging utility class.
  */
 export default new (class Messenger {
-  connect(connectInfo: { name: string }) {
-    return browser.runtime.connect(connectInfo) as Port;
-  }
+    connect(connectInfo: { name: string }) {
+        return browser.runtime.connect(connectInfo) as Port;
+    }
 
-  connectTab(tabId: number, connectInfo: { name: string; frameId: number }) {
-    return browser.tabs.connect(tabId, connectInfo) as Port;
-  }
+    connectTab(tabId: number, connectInfo: { name: string; frameId: number }) {
+        return browser.tabs.connect(tabId, connectInfo) as Port;
+    }
 
-  sendMessage(
-    message: Message,
-    options?: browser.runtime._SendMessageOptions
-  ): Promise<any>;
-  sendMessage(
-    extensionId: string,
-    options?: browser.runtime._SendMessageOptions
-  ): Promise<any>;
-  sendMessage(
-    messageOrExtensionId: string | Message,
-    options?: browser.runtime._SendMessageOptions
-  ) {
-    return browser.runtime.sendMessage(messageOrExtensionId, options);
-  }
+    sendMessage(
+        message: Message,
+        options?: browser.runtime._SendMessageOptions
+    ): Promise<any>;
+    sendMessage(
+        extensionId: string,
+        options?: browser.runtime._SendMessageOptions
+    ): Promise<any>;
+    sendMessage(
+        messageOrExtensionId: string | Message,
+        options?: browser.runtime._SendMessageOptions
+    ) {
+        return browser.runtime.sendMessage(messageOrExtensionId, options);
+    }
 
-  onConnect = browser.runtime.onConnect as WebExtEvent<(port: Port) => void>;
-  onMessage = browser.runtime.onMessage as WebExtEvent<
-    (message: Message, sender: browser.runtime.MessageSender) => void
-  >;
+    onConnect = browser.runtime.onConnect as WebExtEvent<(port: Port) => void>;
+    onMessage = browser.runtime.onMessage as WebExtEvent<
+        (message: Message, sender: browser.runtime.MessageSender) => void
+    >;
 })();

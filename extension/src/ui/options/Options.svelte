@@ -386,7 +386,9 @@
             <Option
                 id="bleRemoteSeekBackwardSeconds"
                 label={_("optionsBleRemoteSeekBackwardSeconds")}
-                description={_("optionsBleRemoteSeekBackwardSecondsDescription")}
+                description={_(
+                    "optionsBleRemoteSeekBackwardSecondsDescription"
+                )}
                 type="number"
                 required
                 min="1"

@@ -1,19 +1,12 @@
 {
     "extends": "../tsconfig",
-    "include": [
-        "./src/**/*",
-        "./@types/**/*"
-    ],
+    "include": ["./src/**/*", "./@types/**/*"],
     "compilerOptions": {
         // ES2020.BigInt is required by the CCTV live decryptor: the WASM player
         // is built with WASM_BIGINT, so its i64 `func60_TEA` argument must be a
         // BigInt at runtime (BigInt(0)). Without this lib the `BigInt` global is
         // unresolved (TS2583) under the repo's `target: es6`.
-        "lib": [
-            "ES2020.String",
-            "ES2020.BigInt",
-            "DOM"
-        ],
+        "lib": ["ES2020.String", "ES2020.BigInt", "DOM"],
         "verbatimModuleSyntax": false
     }
 }

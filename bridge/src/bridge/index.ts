@@ -168,9 +168,7 @@ export function run(messaging: Messenger) {
             case "bridge:sendReceiverMessage": {
                 const { deviceId, message: receiverMessage } = message.data;
                 try {
-                    remotes
-                        .get(deviceId)
-                        ?.sendReceiverMessage(receiverMessage);
+                    remotes.get(deviceId)?.sendReceiverMessage(receiverMessage);
                 } catch (err) {
                     // Sends throw once the underlying connection is gone.
                     console.warn(
@@ -179,9 +177,7 @@ export function run(messaging: Messenger) {
                             deviceId,
                             type: receiverMessage.type,
                             error:
-                                err instanceof Error
-                                    ? err.message
-                                    : String(err)
+                                err instanceof Error ? err.message : String(err)
                         }
                     );
                 }
@@ -198,9 +194,7 @@ export function run(messaging: Messenger) {
                             deviceId,
                             type: mediaMessage.type,
                             error:
-                                err instanceof Error
-                                    ? err.message
-                                    : String(err)
+                                err instanceof Error ? err.message : String(err)
                         }
                     );
                 }
@@ -213,9 +207,7 @@ export function run(messaging: Messenger) {
                 // idle TCP) the platform connection can be dead, which
                 // would leave the popup stuck at "casting..." with no
                 // RECEIVER_STATUS updates.
-                remotes
-                    .get(message.data.receiverDevice.id)
-                    ?.ensureConnected();
+                remotes.get(message.data.receiverDevice.id)?.ensureConnected();
 
                 handleCastMessage(messaging, message, sessionHeartbeatStaleMs);
                 break;
@@ -242,15 +234,16 @@ export function run(messaging: Messenger) {
                     cctvDebugEnabled,
                     userAgent
                 } = message.data;
-                if (cctvDebugEnabled) console.error("[fx_cast_bilibili] proxy requested", {
-                    requestId,
-                    host: new URL(mediaUrl).hostname,
-                    hasSeparateAudio: Boolean(audioUrl),
-                    port,
-                    startTime,
-                    hlsLive,
-                    hasUserAgent: Boolean(userAgent)
-                });
+                if (cctvDebugEnabled)
+                    console.error("[fx_cast_bilibili] proxy requested", {
+                        requestId,
+                        host: new URL(mediaUrl).hostname,
+                        hasSeparateAudio: Boolean(audioUrl),
+                        port,
+                        startTime,
+                        hlsLive,
+                        hasUserAgent: Boolean(userAgent)
+                    });
                 void queueMediaServerCommand(() =>
                     startRemoteMediaServer(
                         messaging,

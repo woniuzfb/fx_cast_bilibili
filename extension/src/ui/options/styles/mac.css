@@ -18,5 +18,5 @@ input[type="radio"] {
 }
 
 input[type="number"] {
-  padding-inline-end: 4px;
+    padding-inline-end: 4px;
 }

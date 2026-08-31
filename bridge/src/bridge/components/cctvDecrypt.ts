@@ -57,166 +57,182 @@
  * segments carry video on 256/257. Returns -1 if not found.
  */
 function findVideoPid(buf: Uint8Array, packetCount: number): number {
-  let pmtPid = -1;
-  for (let p = 0; p < packetCount; p++) {
-    const i = p * 188;
-    if (buf[i] !== 0x47) break;
-    const pid = ((buf[i + 1]! & 0x1f) << 8) | buf[i + 2]!;
-    const pusi = (buf[i + 1]! & 0x40) >>> 6;
-    const afc = (buf[i + 3]! & 0x30) >>> 4;
-    if (afc === 2) continue; // adaptation only, no payload
-    let o = i + 4;
-    if (afc === 3) o += 1 + buf[o]!;
-    if (pid === 0 && pmtPid < 0) {
-      if (pusi) o += 1 + buf[o]!; // pointer_field
-      const sectionLen = ((buf[o + 1]! & 0x0f) << 8) | buf[o + 2]!;
-      const end = o + 3 + sectionLen - 4; // exclude CRC32
-      let e = o + 8;
-      while (e + 4 <= end) {
-        const prog = (buf[e]! << 8) | buf[e + 1]!;
-        const mapPid = ((buf[e + 2]! & 0x1f) << 8) | buf[e + 3]!;
-        if (prog !== 0) { pmtPid = mapPid; break; }
-        e += 4;
-      }
-    } else if (pid === pmtPid && pmtPid >= 0) {
-      if (pusi) o += 1 + buf[o]!;
-      const sectionLen = ((buf[o + 1]! & 0x0f) << 8) | buf[o + 2]!;
-      const end = o + 3 + sectionLen - 4;
-      const progInfoLen = ((buf[o + 10]! & 0x0f) << 8) | buf[o + 11]!;
-      let e = o + 12 + progInfoLen;
-      while (e + 5 <= end) {
-        const streamType = buf[e]!;
-        const esPid = ((buf[e + 1]! & 0x1f) << 8) | buf[e + 2]!;
-        const esInfoLen = ((buf[e + 3]! & 0x0f) << 8) | buf[e + 4]!;
-        // 0x1b = H.264, 0x24 = H.265, 0x1c = AAC-in-TS variants seen on CCTV.
-        if (streamType === 0x1b || streamType === 0x24 || streamType === 0x1c) {
-          return esPid;
+    let pmtPid = -1;
+    for (let p = 0; p < packetCount; p++) {
+        const i = p * 188;
+        if (buf[i] !== 0x47) break;
+        const pid = ((buf[i + 1]! & 0x1f) << 8) | buf[i + 2]!;
+        const pusi = (buf[i + 1]! & 0x40) >>> 6;
+        const afc = (buf[i + 3]! & 0x30) >>> 4;
+        if (afc === 2) continue; // adaptation only, no payload
+        let o = i + 4;
+        if (afc === 3) o += 1 + buf[o]!;
+        if (pid === 0 && pmtPid < 0) {
+            if (pusi) o += 1 + buf[o]!; // pointer_field
+            const sectionLen = ((buf[o + 1]! & 0x0f) << 8) | buf[o + 2]!;
+            const end = o + 3 + sectionLen - 4; // exclude CRC32
+            let e = o + 8;
+            while (e + 4 <= end) {
+                const prog = (buf[e]! << 8) | buf[e + 1]!;
+                const mapPid = ((buf[e + 2]! & 0x1f) << 8) | buf[e + 3]!;
+                if (prog !== 0) {
+                    pmtPid = mapPid;
+                    break;
+                }
+                e += 4;
+            }
+        } else if (pid === pmtPid && pmtPid >= 0) {
+            if (pusi) o += 1 + buf[o]!;
+            const sectionLen = ((buf[o + 1]! & 0x0f) << 8) | buf[o + 2]!;
+            const end = o + 3 + sectionLen - 4;
+            const progInfoLen = ((buf[o + 10]! & 0x0f) << 8) | buf[o + 11]!;
+            let e = o + 12 + progInfoLen;
+            while (e + 5 <= end) {
+                const streamType = buf[e]!;
+                const esPid = ((buf[e + 1]! & 0x1f) << 8) | buf[e + 2]!;
+                const esInfoLen = ((buf[e + 3]! & 0x0f) << 8) | buf[e + 4]!;
+                // 0x1b = H.264, 0x24 = H.265, 0x1c = AAC-in-TS variants seen on CCTV.
+                if (
+                    streamType === 0x1b ||
+                    streamType === 0x24 ||
+                    streamType === 0x1c
+                ) {
+                    return esPid;
+                }
+                e += 5 + esInfoLen;
+            }
         }
-        e += 5 + esInfoLen;
-      }
     }
-  }
-  return -1;
+    return -1;
 }
 
 // ---------------------------------------------------------------- TS parsing
 
 /** Parsed layout of one TS packet within the input buffer. */
 interface TsPacketInfo {
-  index: number; // packet index; byte offset = index * 188
-  pusi: boolean;
-  afc: number; // adaptation_field_control
-  adaptLen: number; // adaptation_field_length when afc === 3
-  payloadStart: number; // absolute byte offset of the payload
+    index: number; // packet index; byte offset = index * 188
+    pusi: boolean;
+    afc: number; // adaptation_field_control
+    adaptLen: number; // adaptation_field_length when afc === 3
+    payloadStart: number; // absolute byte offset of the payload
 }
 
 /** A video PES frame: the run of video-PID packets from one PUSI to the next. */
 interface PesFrame {
-  packets: TsPacketInfo[];
-  pesHdrLen: number; // 9 + PES_header_data_length
-  payload: Buffer; // concatenated packet payloads (PES header + ES)
+    packets: TsPacketInfo[];
+    pesHdrLen: number; // 9 + PES_header_data_length
+    payload: Buffer; // concatenated packet payloads (PES header + ES)
 }
 
 interface ParseResult {
-  frames: PesFrame[];
-  /** First packet index where 0x47 sync broke; -1 when the segment is whole. */
-  syncLostAt: number;
+    frames: PesFrame[];
+    /** First packet index where 0x47 sync broke; -1 when the segment is whole. */
+    syncLostAt: number;
 }
 
 function parseVideoPesFrames(
-  buf: Buffer,
-  packetCount: number,
-  videoPid: number
+    buf: Buffer,
+    packetCount: number,
+    videoPid: number
 ): ParseResult {
-  const frames: PesFrame[] = [];
-  let cur:
-    | { packets: TsPacketInfo[]; pesHdrLen: number; parts: Buffer[] }
-    | undefined;
-  let syncLostAt = -1;
-  for (let p = 0; p < packetCount; p++) {
-    const i = p * 188;
-    if (buf[i] !== 0x47) {
-      syncLostAt = p;
-      break;
+    const frames: PesFrame[] = [];
+    let cur:
+        | { packets: TsPacketInfo[]; pesHdrLen: number; parts: Buffer[] }
+        | undefined;
+    let syncLostAt = -1;
+    for (let p = 0; p < packetCount; p++) {
+        const i = p * 188;
+        if (buf[i] !== 0x47) {
+            syncLostAt = p;
+            break;
+        }
+        const pid = ((buf[i + 1]! & 0x1f) << 8) | buf[i + 2]!;
+        if (pid !== videoPid) continue;
+        const pusi = (buf[i + 1]! & 0x40) !== 0;
+        const afc = (buf[i + 3]! & 0x30) >>> 4;
+        if (afc !== 1 && afc !== 3) continue; // no payload
+        const adaptLen = afc === 3 ? buf[i + 4]! : 0;
+        const payloadStart = i + 4 + (afc === 3 ? 1 + adaptLen : 0);
+        if (payloadStart >= i + 188) continue;
+        const info: TsPacketInfo = {
+            index: p,
+            pusi,
+            afc,
+            adaptLen,
+            payloadStart
+        };
+        if (pusi) {
+            if (cur) {
+                frames.push({
+                    packets: cur.packets,
+                    pesHdrLen: cur.pesHdrLen,
+                    payload: Buffer.concat(cur.parts)
+                });
+            }
+            if (payloadStart + 9 > i + 188) {
+                cur = undefined; // PES header doesn't fit; drop this frame
+                continue;
+            }
+            cur = {
+                packets: [info],
+                pesHdrLen: 9 + buf[payloadStart + 8]!,
+                parts: []
+            };
+        } else if (cur) {
+            cur.packets.push(info);
+        }
+        cur?.parts.push(buf.subarray(payloadStart, i + 188));
     }
-    const pid = ((buf[i + 1]! & 0x1f) << 8) | buf[i + 2]!;
-    if (pid !== videoPid) continue;
-    const pusi = (buf[i + 1]! & 0x40) !== 0;
-    const afc = (buf[i + 3]! & 0x30) >>> 4;
-    if (afc !== 1 && afc !== 3) continue; // no payload
-    const adaptLen = afc === 3 ? buf[i + 4]! : 0;
-    const payloadStart = i + 4 + (afc === 3 ? 1 + adaptLen : 0);
-    if (payloadStart >= i + 188) continue;
-    const info: TsPacketInfo = { index: p, pusi, afc, adaptLen, payloadStart };
-    if (pusi) {
-      if (cur) {
+    if (cur) {
         frames.push({
-          packets: cur.packets,
-          pesHdrLen: cur.pesHdrLen,
-          payload: Buffer.concat(cur.parts),
+            packets: cur.packets,
+            pesHdrLen: cur.pesHdrLen,
+            payload: Buffer.concat(cur.parts)
         });
-      }
-      if (payloadStart + 9 > i + 188) {
-        cur = undefined; // PES header doesn't fit; drop this frame
-        continue;
-      }
-      cur = {
-        packets: [info],
-        pesHdrLen: 9 + buf[payloadStart + 8]!,
-        parts: [],
-      };
-    } else if (cur) {
-      cur.packets.push(info);
     }
-    cur?.parts.push(buf.subarray(payloadStart, i + 188));
-  }
-  if (cur) {
-    frames.push({
-      packets: cur.packets,
-      pesHdrLen: cur.pesHdrLen,
-      payload: Buffer.concat(cur.parts),
-    });
-  }
-  return { frames, syncLostAt };
+    return { frames, syncLostAt };
 }
 
 // ------------------------------------------------------------------- H.264
 
 interface Nal {
-  sc: Buffer; // start code (00 00 01 or 00 00 00 01)
-  body: Buffer; // NAL header byte + RBSP
+    sc: Buffer; // start code (00 00 01 or 00 00 00 01)
+    body: Buffer; // NAL header byte + RBSP
 }
 
 /** Split an ES buffer (PES payload with Annex-B start codes) into NALs. */
 function splitNals(es: Buffer, from: number): Nal[] {
-  const nals: Nal[] = [];
-  const findStartCode = (pos: number): number => {
-    for (let i = pos; i + 3 < es.length; i++) {
-      if (es[i] === 0 && es[i + 1] === 0 && es[i + 2] === 1) return i;
-      if (
-        i + 4 < es.length &&
-        es[i] === 0 &&
-        es[i + 1] === 0 &&
-        es[i + 2] === 0 &&
-        es[i + 3] === 1
-      ) {
-        return i;
-      }
+    const nals: Nal[] = [];
+    const findStartCode = (pos: number): number => {
+        for (let i = pos; i + 3 < es.length; i++) {
+            if (es[i] === 0 && es[i + 1] === 0 && es[i + 2] === 1) return i;
+            if (
+                i + 4 < es.length &&
+                es[i] === 0 &&
+                es[i + 1] === 0 &&
+                es[i + 2] === 0 &&
+                es[i + 3] === 1
+            ) {
+                return i;
+            }
+        }
+        return -1;
+    };
+    let pos = from;
+    while (pos < es.length) {
+        const sc = findStartCode(pos);
+        if (sc < 0) break;
+        const scLen = es[sc + 2] === 1 ? 3 : 4;
+        const nalStart = sc + scLen;
+        let next = findStartCode(nalStart);
+        if (next < 0) next = es.length;
+        nals.push({
+            sc: es.subarray(sc, nalStart),
+            body: es.subarray(nalStart, next)
+        });
+        pos = next;
     }
-    return -1;
-  };
-  let pos = from;
-  while (pos < es.length) {
-    const sc = findStartCode(pos);
-    if (sc < 0) break;
-    const scLen = es[sc + 2] === 1 ? 3 : 4;
-    const nalStart = sc + scLen;
-    let next = findStartCode(nalStart);
-    if (next < 0) next = es.length;
-    nals.push({ sc: es.subarray(sc, nalStart), body: es.subarray(nalStart, next) });
-    pos = next;
-  }
-  return nals;
+    return nals;
 }
 
 // ------------------------------------------------------- TEA (sub58 semantics)
@@ -225,25 +241,29 @@ const TEA_DELTA = 0x9e3779b9;
 
 /** 16-round TEA decrypt of one 8-byte block, little-endian, key at keyOff. */
 function teaDecryptBlock(buf: Buffer, off: number, keyOff: number): void {
-  let v0 = buf.readUInt32LE(off);
-  let v1 = buf.readUInt32LE(off + 4);
-  const k0 = buf.readUInt32LE(keyOff);
-  const k1 = buf.readUInt32LE(keyOff + 4);
-  const k2 = buf.readUInt32LE(keyOff + 8);
-  const k3 = buf.readUInt32LE(keyOff + 12);
-  for (let round = 16; round >= 1; round--) {
-    const sum = Math.imul(TEA_DELTA, round) >>> 0;
-    v1 =
-      (v1 -
-        ((((v0 << 4) >>> 0) + k2) ^ ((v0 + sum) >>> 0) ^ ((v0 >>> 5) + k3))) >>>
-      0;
-    v0 =
-      (v0 -
-        ((((v1 << 4) >>> 0) + k0) ^ ((v1 + sum) >>> 0) ^ ((v1 >>> 5) + k1))) >>>
-      0;
-  }
-  buf.writeUInt32LE(v0, off);
-  buf.writeUInt32LE(v1, off + 4);
+    let v0 = buf.readUInt32LE(off);
+    let v1 = buf.readUInt32LE(off + 4);
+    const k0 = buf.readUInt32LE(keyOff);
+    const k1 = buf.readUInt32LE(keyOff + 4);
+    const k2 = buf.readUInt32LE(keyOff + 8);
+    const k3 = buf.readUInt32LE(keyOff + 12);
+    for (let round = 16; round >= 1; round--) {
+        const sum = Math.imul(TEA_DELTA, round) >>> 0;
+        v1 =
+            (v1 -
+                ((((v0 << 4) >>> 0) + k2) ^
+                    ((v0 + sum) >>> 0) ^
+                    ((v0 >>> 5) + k3))) >>>
+            0;
+        v0 =
+            (v0 -
+                ((((v1 << 4) >>> 0) + k0) ^
+                    ((v1 + sum) >>> 0) ^
+                    ((v1 >>> 5) + k1))) >>>
+            0;
+    }
+    buf.writeUInt32LE(v0, off);
+    buf.writeUInt32LE(v1, off + 4);
 }
 
 /**
@@ -256,35 +276,40 @@ function teaDecryptBlock(buf: Buffer, off: number, keyOff: number): void {
  * NAL. Returns a new, possibly shorter buffer.
  */
 function decryptSliceNal(nal: Buffer): Buffer {
-  // `_nalplay2` treats the first 32 bytes as prefix/key material and samples
-  // one 8-byte block per 80-byte stride. Without a complete first stride,
-  // the live path leaves the slice untouched instead of calling sub58.
-  if (nal.length < 112) return Buffer.from(nal);
+    // `_nalplay2` treats the first 32 bytes as prefix/key material and samples
+    // one 8-byte block per 80-byte stride. Without a complete first stride,
+    // the live path leaves the slice untouched instead of calling sub58.
+    if (nal.length < 112) return Buffer.from(nal);
 
-  const b = Buffer.from(nal);
-  let len = b.length;
-  // sub58's conditional removal uses a *signed* compare on the byte after
-  // the 03: it drops 00 00 03 when that byte is < 4 signed (0..3 or 0x80+).
-  let j = 0;
-  while (j < len - 3) {
-    if (b[j] === 0 && b[j + 1] === 0 && b[j + 2] === 3 && b.readInt8(j + 3) < 4) {
-      b.copy(b, j + 2, j + 3, len); // memmove left
-      b[len - 1] = 0;
-      len--;
-      j++; // sub58 resumes scanning at j+1
-      continue;
+    const b = Buffer.from(nal);
+    let len = b.length;
+    // sub58's conditional removal uses a *signed* compare on the byte after
+    // the 03: it drops 00 00 03 when that byte is < 4 signed (0..3 or 0x80+).
+    let j = 0;
+    while (j < len - 3) {
+        if (
+            b[j] === 0 &&
+            b[j + 1] === 0 &&
+            b[j + 2] === 3 &&
+            b.readInt8(j + 3) < 4
+        ) {
+            b.copy(b, j + 2, j + 3, len); // memmove left
+            b[len - 1] = 0;
+            len--;
+            j++; // sub58 resumes scanning at j+1
+            continue;
+        }
+        j++;
     }
-    j++;
-  }
-  const lim = (len - 32) >> 3;
-  let k = 0;
-  while (k < lim) {
-    const off = 32 + k * 8;
-    if (off + 8 > len) break; // safety; the loop bound already guarantees fit
-    teaDecryptBlock(b, off, 16);
-    k += 10;
-  }
-  return b.subarray(0, len);
+    const lim = (len - 32) >> 3;
+    let k = 0;
+    while (k < lim) {
+        const off = 32 + k * 8;
+        if (off + 8 > len) break; // safety; the loop bound already guarantees fit
+        teaDecryptBlock(b, off, 16);
+        k += 10;
+    }
+    return b.subarray(0, len);
 }
 
 // NOTE: no re-escaping after decryption. The decrypted slice is ALREADY a
@@ -302,8 +327,8 @@ function decryptSliceNal(nal: Buffer): Buffer {
 // ----------------------------------------------------------- TS rebuilding
 
 interface PesTransform {
-  frame: PesFrame;
-  newPayload: Buffer; // (possibly rewritten) PES header + transformed ES
+    frame: PesFrame;
+    newPayload: Buffer; // (possibly rewritten) PES header + transformed ES
 }
 
 /**
@@ -318,154 +343,166 @@ interface PesTransform {
  * the region after syncLostAt (truncated download tail) is copied raw.
  */
 function rebuildSegment(
-  input: Buffer,
-  packetCount: number,
-  videoPid: number,
-  transforms: PesTransform[],
-  syncLostAt: number,
-  diagnostics: MutableCctvDecryptDiagnostics
+    input: Buffer,
+    packetCount: number,
+    videoPid: number,
+    transforms: PesTransform[],
+    syncLostAt: number,
+    diagnostics: MutableCctvDecryptDiagnostics
 ): Buffer {
-  const byFirstPacket = new Map<number, PesTransform>();
-  const consumed = new Set<number>();
-  for (const t of transforms) {
-    byFirstPacket.set(t.frame.packets[0]!.index, t);
-    for (const p of t.frame.packets) consumed.add(p.index);
-  }
-  const lastGood = syncLostAt >= 0 ? syncLostAt : packetCount;
-
-  // Seed the CC sequence so the first emitted video packet keeps its
-  // original counter value; everything after increments from there.
-  let cc = -1;
-  for (let p = 0; p < lastGood; p++) {
-    const i = p * 188;
-    const pid = ((input[i + 1]! & 0x1f) << 8) | input[i + 2]!;
-    if (pid === videoPid) {
-      cc = (input[i + 3]! & 0x0f) - 1;
-      break;
+    const byFirstPacket = new Map<number, PesTransform>();
+    const consumed = new Set<number>();
+    for (const t of transforms) {
+        byFirstPacket.set(t.frame.packets[0]!.index, t);
+        for (const p of t.frame.packets) consumed.add(p.index);
     }
-  }
-  const nextCc = (): number => {
-    cc = (cc + 1) & 0x0f;
-    return cc;
-  };
+    const lastGood = syncLostAt >= 0 ? syncLostAt : packetCount;
 
-  const chunks: Buffer[] = [];
-
-  const emitRaw = (p: number): void => {
-    const pkt = Buffer.from(input.subarray(p * 188, p * 188 + 188));
-    const pid = ((pkt[1]! & 0x1f) << 8) | pkt[2]!;
-    if (pid === videoPid) pkt[3] = (pkt[3]! & 0xf0) | nextCc();
-    chunks.push(pkt);
-  };
-
-  const emitPayloadPacket = (
-    byte1: number,
-    byte2: number,
-    adaptation: Buffer | undefined,
-    payload: Buffer
-  ): void => {
-    const pkt = Buffer.alloc(188, 0xff);
-    pkt[0] = 0x47;
-    pkt[1] = byte1;
-    pkt[2] = byte2;
-    pkt[3] = (adaptation ? 0x30 : 0x10) | nextCc();
-    let o = 4;
-    if (adaptation) {
-      adaptation.copy(pkt, o);
-      o += adaptation.length;
-    }
-    payload.copy(pkt, o);
-    chunks.push(pkt);
-  };
-
-  const emitFrame = (t: PesTransform): void => {
-    const { frame, newPayload } = t;
-    const originalPackets = frame.packets.length;
-    let emitted = 0;
-    let pos = 0;
-    for (let k = 0; k < frame.packets.length && pos < newPayload.length; k++) {
-      const p = frame.packets[k]!;
-      const i = p.index * 188;
-      // Keep the original header bits (TEI/PUSI/priority + PID) of each
-      // reused packet; only the CC nibble (and possibly AFC) changes.
-      const byte1 = input[i + 1]!;
-      const byte2 = input[i + 2]!;
-      const capacity = 188 - 4 - (p.afc === 3 ? 1 + p.adaptLen : 0);
-      const take = Math.min(capacity, newPayload.length - pos);
-      const isLast = pos + take === newPayload.length;
-      let adaptation: Buffer | undefined;
-      if (p.afc === 3) {
-        const orig = input.subarray(i + 4, p.payloadStart); // len byte + content
-        if (isLast && take < capacity) {
-          // Extend the adaptation field with 0xFF stuffing after the
-          // original content (PCR position inside the field is preserved).
-          const extra = capacity - take;
-          adaptation = Buffer.concat([Buffer.from(orig), Buffer.alloc(extra, 0xff)]);
-          adaptation[0] = (adaptation[0]! + extra) & 0xff;
-        } else {
-          adaptation = Buffer.from(orig);
+    // Seed the CC sequence so the first emitted video packet keeps its
+    // original counter value; everything after increments from there.
+    let cc = -1;
+    for (let p = 0; p < lastGood; p++) {
+        const i = p * 188;
+        const pid = ((input[i + 1]! & 0x1f) << 8) | input[i + 2]!;
+        if (pid === videoPid) {
+            cc = (input[i + 3]! & 0x0f) - 1;
+            break;
         }
-      } else if (isLast && take < 184) {
-        const stuff = 184 - take; // >= 1
-        adaptation = Buffer.alloc(stuff, 0xff);
-        adaptation[0] = stuff - 1;
-      }
-      emitPayloadPacket(byte1, byte2, adaptation, newPayload.subarray(pos, pos + take));
-      pos += take;
-      emitted++;
     }
-    // The PES grew past its original packet count: insert new packets.
-    while (pos < newPayload.length) {
-      const take = Math.min(184, newPayload.length - pos);
-      let adaptation: Buffer | undefined;
-      if (take < 184) {
-        const stuff = 184 - take;
-        adaptation = Buffer.alloc(stuff, 0xff);
-        adaptation[0] = stuff - 1;
-      }
-      emitPayloadPacket(
-        (videoPid >> 8) & 0x1f, // TEI=0, PUSI=0, priority=0
-        videoPid & 0xff,
-        adaptation,
-        newPayload.subarray(pos, pos + take)
-      );
-      pos += take;
-      emitted++;
-    }
-    if (emitted > originalPackets) {
-      diagnostics.insertedPacketCount += emitted - originalPackets;
-    }
-  };
+    const nextCc = (): number => {
+        cc = (cc + 1) & 0x0f;
+        return cc;
+    };
 
-  for (let p = 0; p < lastGood; p++) {
-    const t = byFirstPacket.get(p);
-    if (t) {
-      emitFrame(t);
-      continue;
+    const chunks: Buffer[] = [];
+
+    const emitRaw = (p: number): void => {
+        const pkt = Buffer.from(input.subarray(p * 188, p * 188 + 188));
+        const pid = ((pkt[1]! & 0x1f) << 8) | pkt[2]!;
+        if (pid === videoPid) pkt[3] = (pkt[3]! & 0xf0) | nextCc();
+        chunks.push(pkt);
+    };
+
+    const emitPayloadPacket = (
+        byte1: number,
+        byte2: number,
+        adaptation: Buffer | undefined,
+        payload: Buffer
+    ): void => {
+        const pkt = Buffer.alloc(188, 0xff);
+        pkt[0] = 0x47;
+        pkt[1] = byte1;
+        pkt[2] = byte2;
+        pkt[3] = (adaptation ? 0x30 : 0x10) | nextCc();
+        let o = 4;
+        if (adaptation) {
+            adaptation.copy(pkt, o);
+            o += adaptation.length;
+        }
+        payload.copy(pkt, o);
+        chunks.push(pkt);
+    };
+
+    const emitFrame = (t: PesTransform): void => {
+        const { frame, newPayload } = t;
+        const originalPackets = frame.packets.length;
+        let emitted = 0;
+        let pos = 0;
+        for (
+            let k = 0;
+            k < frame.packets.length && pos < newPayload.length;
+            k++
+        ) {
+            const p = frame.packets[k]!;
+            const i = p.index * 188;
+            // Keep the original header bits (TEI/PUSI/priority + PID) of each
+            // reused packet; only the CC nibble (and possibly AFC) changes.
+            const byte1 = input[i + 1]!;
+            const byte2 = input[i + 2]!;
+            const capacity = 188 - 4 - (p.afc === 3 ? 1 + p.adaptLen : 0);
+            const take = Math.min(capacity, newPayload.length - pos);
+            const isLast = pos + take === newPayload.length;
+            let adaptation: Buffer | undefined;
+            if (p.afc === 3) {
+                const orig = input.subarray(i + 4, p.payloadStart); // len byte + content
+                if (isLast && take < capacity) {
+                    // Extend the adaptation field with 0xFF stuffing after the
+                    // original content (PCR position inside the field is preserved).
+                    const extra = capacity - take;
+                    adaptation = Buffer.concat([
+                        Buffer.from(orig),
+                        Buffer.alloc(extra, 0xff)
+                    ]);
+                    adaptation[0] = (adaptation[0]! + extra) & 0xff;
+                } else {
+                    adaptation = Buffer.from(orig);
+                }
+            } else if (isLast && take < 184) {
+                const stuff = 184 - take; // >= 1
+                adaptation = Buffer.alloc(stuff, 0xff);
+                adaptation[0] = stuff - 1;
+            }
+            emitPayloadPacket(
+                byte1,
+                byte2,
+                adaptation,
+                newPayload.subarray(pos, pos + take)
+            );
+            pos += take;
+            emitted++;
+        }
+        // The PES grew past its original packet count: insert new packets.
+        while (pos < newPayload.length) {
+            const take = Math.min(184, newPayload.length - pos);
+            let adaptation: Buffer | undefined;
+            if (take < 184) {
+                const stuff = 184 - take;
+                adaptation = Buffer.alloc(stuff, 0xff);
+                adaptation[0] = stuff - 1;
+            }
+            emitPayloadPacket(
+                (videoPid >> 8) & 0x1f, // TEI=0, PUSI=0, priority=0
+                videoPid & 0xff,
+                adaptation,
+                newPayload.subarray(pos, pos + take)
+            );
+            pos += take;
+            emitted++;
+        }
+        if (emitted > originalPackets) {
+            diagnostics.insertedPacketCount += emitted - originalPackets;
+        }
+    };
+
+    for (let p = 0; p < lastGood; p++) {
+        const t = byFirstPacket.get(p);
+        if (t) {
+            emitFrame(t);
+            continue;
+        }
+        if (consumed.has(p)) continue; // emitted as part of its frame already
+        emitRaw(p);
     }
-    if (consumed.has(p)) continue; // emitted as part of its frame already
-    emitRaw(p);
-  }
-  // Truncated tail (partial packet / desynced region) verbatim.
-  if (lastGood * 188 < input.length) {
-    chunks.push(input.subarray(lastGood * 188));
-  }
-  return Buffer.concat(chunks);
+    // Truncated tail (partial packet / desynced region) verbatim.
+    if (lastGood * 188 < input.length) {
+        chunks.push(input.subarray(lastGood * 188));
+    }
+    return Buffer.concat(chunks);
 }
 
 // ------------------------------------------------------------------ driver
 
 export interface CctvDecryptDiagnostics {
-  packetCount: number;
-  processedPackets: number;
-  videoPid: number;
-  pesCount: number;
-  transformedPesCount: number;
-  skippedIncompletePesCount: number;
-  sliceNalCount: number;
-  idrNalCount: number;
-  insertedPacketCount: number;
-  outputBytes: number;
+    packetCount: number;
+    processedPackets: number;
+    videoPid: number;
+    pesCount: number;
+    transformedPesCount: number;
+    skippedIncompletePesCount: number;
+    sliceNalCount: number;
+    idrNalCount: number;
+    insertedPacketCount: number;
+    outputBytes: number;
 }
 
 type MutableCctvDecryptDiagnostics = CctvDecryptDiagnostics;
@@ -477,117 +514,121 @@ type MutableCctvDecryptDiagnostics = CctvDecryptDiagnostics;
  * nothing to transform) the input is returned unchanged.
  */
 export function decryptCctvSegment(
-  input: Buffer,
-  onDiagnostics?: (diagnostics: CctvDecryptDiagnostics) => void
+    input: Buffer,
+    onDiagnostics?: (diagnostics: CctvDecryptDiagnostics) => void
 ): Buffer {
-  const packetCount = Math.floor(input.length / 188);
-  const diagnostics: MutableCctvDecryptDiagnostics = {
-    packetCount,
-    processedPackets: 0,
-    videoPid: -1,
-    pesCount: 0,
-    transformedPesCount: 0,
-    skippedIncompletePesCount: 0,
-    sliceNalCount: 0,
-    idrNalCount: 0,
-    insertedPacketCount: 0,
-    outputBytes: input.length,
-  };
-  try {
-    const videoPid = findVideoPid(input, packetCount);
-    diagnostics.videoPid = videoPid;
-    if (videoPid < 0) {
-      onDiagnostics?.(diagnostics);
-      return input; // not a recognizable CCTV H.264 TS; pass through
-    }
-
-    const { frames, syncLostAt } = parseVideoPesFrames(
-      input,
-      packetCount,
-      videoPid
-    );
-    diagnostics.processedPackets = syncLostAt >= 0 ? syncLostAt : packetCount;
-
-    const transforms: PesTransform[] = [];
-    for (const frame of frames) {
-      diagnostics.pesCount++;
-      const payload = frame.payload;
-      if (
-        payload.length < frame.pesHdrLen ||
-        payload[0] !== 0 ||
-        payload[1] !== 0 ||
-        payload[2] !== 1
-      ) {
-        diagnostics.skippedIncompletePesCount++;
-        continue;
-      }
-      // PES_packet_length counts bytes following the six-byte fixed prefix.
-      // A CDN response may be truncated while still ending on a complete
-      // 188-byte TS packet, so sync-byte checks alone cannot detect it.
-      const declared =
-        payload[4] !== 0 || payload[5] !== 0
-          ? 6 + ((payload[4]! << 8) | payload[5]!)
-          : 0;
-      if (declared !== 0 && payload.length < declared) {
-        diagnostics.skippedIncompletePesCount++;
-        continue;
-      }
-
-      const nals = splitNals(payload, frame.pesHdrLen);
-      const parts: Buffer[] = [];
-      let touched = false;
-      for (const nal of nals) {
-        const nalType = nal.body.length > 0 ? nal.body[0]! & 0x1f : -1;
-        if (nalType === 1 || nalType === 5) {
-          diagnostics.sliceNalCount++;
-          if (nalType === 5) diagnostics.idrNalCount++;
-          parts.push(nal.sc, decryptSliceNal(nal.body));
-          touched = true;
-        } else {
-          parts.push(nal.sc, nal.body);
+    const packetCount = Math.floor(input.length / 188);
+    const diagnostics: MutableCctvDecryptDiagnostics = {
+        packetCount,
+        processedPackets: 0,
+        videoPid: -1,
+        pesCount: 0,
+        transformedPesCount: 0,
+        skippedIncompletePesCount: 0,
+        sliceNalCount: 0,
+        idrNalCount: 0,
+        insertedPacketCount: 0,
+        outputBytes: input.length
+    };
+    try {
+        const videoPid = findVideoPid(input, packetCount);
+        diagnostics.videoPid = videoPid;
+        if (videoPid < 0) {
+            onDiagnostics?.(diagnostics);
+            return input; // not a recognizable CCTV H.264 TS; pass through
         }
-      }
-      if (!touched) continue;
-      diagnostics.transformedPesCount++;
 
-      const pesHdr = Buffer.from(payload.subarray(0, frame.pesHdrLen));
-      const newEs = Buffer.concat(parts);
-      // PES_packet_length: 0 means unbounded (legal for video in TS) and
-      // stays 0; a bounded length is recomputed, falling back to 0 if the
-      // transformed PES outgrows the 16-bit field.
-      const oldLength = (pesHdr[4]! << 8) | pesHdr[5]!;
-      if (oldLength !== 0) {
-        const newLength = pesHdr.length + newEs.length - 6;
-        if (newLength <= 0xffff) {
-          pesHdr[4] = newLength >> 8;
-          pesHdr[5] = newLength & 0xff;
-        } else {
-          pesHdr[4] = 0;
-          pesHdr[5] = 0;
+        const { frames, syncLostAt } = parseVideoPesFrames(
+            input,
+            packetCount,
+            videoPid
+        );
+        diagnostics.processedPackets =
+            syncLostAt >= 0 ? syncLostAt : packetCount;
+
+        const transforms: PesTransform[] = [];
+        for (const frame of frames) {
+            diagnostics.pesCount++;
+            const payload = frame.payload;
+            if (
+                payload.length < frame.pesHdrLen ||
+                payload[0] !== 0 ||
+                payload[1] !== 0 ||
+                payload[2] !== 1
+            ) {
+                diagnostics.skippedIncompletePesCount++;
+                continue;
+            }
+            // PES_packet_length counts bytes following the six-byte fixed prefix.
+            // A CDN response may be truncated while still ending on a complete
+            // 188-byte TS packet, so sync-byte checks alone cannot detect it.
+            const declared =
+                payload[4] !== 0 || payload[5] !== 0
+                    ? 6 + ((payload[4]! << 8) | payload[5]!)
+                    : 0;
+            if (declared !== 0 && payload.length < declared) {
+                diagnostics.skippedIncompletePesCount++;
+                continue;
+            }
+
+            const nals = splitNals(payload, frame.pesHdrLen);
+            const parts: Buffer[] = [];
+            let touched = false;
+            for (const nal of nals) {
+                const nalType = nal.body.length > 0 ? nal.body[0]! & 0x1f : -1;
+                if (nalType === 1 || nalType === 5) {
+                    diagnostics.sliceNalCount++;
+                    if (nalType === 5) diagnostics.idrNalCount++;
+                    parts.push(nal.sc, decryptSliceNal(nal.body));
+                    touched = true;
+                } else {
+                    parts.push(nal.sc, nal.body);
+                }
+            }
+            if (!touched) continue;
+            diagnostics.transformedPesCount++;
+
+            const pesHdr = Buffer.from(payload.subarray(0, frame.pesHdrLen));
+            const newEs = Buffer.concat(parts);
+            // PES_packet_length: 0 means unbounded (legal for video in TS) and
+            // stays 0; a bounded length is recomputed, falling back to 0 if the
+            // transformed PES outgrows the 16-bit field.
+            const oldLength = (pesHdr[4]! << 8) | pesHdr[5]!;
+            if (oldLength !== 0) {
+                const newLength = pesHdr.length + newEs.length - 6;
+                if (newLength <= 0xffff) {
+                    pesHdr[4] = newLength >> 8;
+                    pesHdr[5] = newLength & 0xff;
+                } else {
+                    pesHdr[4] = 0;
+                    pesHdr[5] = 0;
+                }
+            }
+            transforms.push({
+                frame,
+                newPayload: Buffer.concat([pesHdr, newEs])
+            });
         }
-      }
-      transforms.push({ frame, newPayload: Buffer.concat([pesHdr, newEs]) });
-    }
 
-    if (transforms.length === 0) {
-      onDiagnostics?.(diagnostics);
-      return input; // nothing decryptable; pass through
-    }
+        if (transforms.length === 0) {
+            onDiagnostics?.(diagnostics);
+            return input; // nothing decryptable; pass through
+        }
 
-    const out = rebuildSegment(
-      input,
-      packetCount,
-      videoPid,
-      transforms,
-      syncLostAt,
-      diagnostics
-    );
-    diagnostics.outputBytes = out.length;
-    onDiagnostics?.(diagnostics);
-    return out;
-  } catch {
-    // Never throw on malformed input: pass the segment through untouched.
-    onDiagnostics?.(diagnostics);
-    return input;
-  }
+        const out = rebuildSegment(
+            input,
+            packetCount,
+            videoPid,
+            transforms,
+            syncLostAt,
+            diagnostics
+        );
+        diagnostics.outputBytes = out.length;
+        onDiagnostics?.(diagnostics);
+        return out;
+    } catch {
+        // Never throw on malformed input: pass the segment through untouched.
+        onDiagnostics?.(diagnostics);
+        return input;
+    }
 }

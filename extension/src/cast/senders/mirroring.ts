@@ -122,17 +122,22 @@ export default class MirroringSender {
         const pc = new RTCPeerConnection();
         this.peerConnection = pc;
 
-        this.session?.addMessageListener(NS_FX_CAST_BILIBILI, async (_ns, message) => {
-            const parsedMessage = JSON.parse(message) as MirroringAppMessage;
-            switch (parsedMessage.subject) {
-                case "peerConnectionAnswer":
-                    pc.setRemoteDescription(parsedMessage.data);
-                    break;
-                case "iceCandidate":
-                    pc.addIceCandidate(parsedMessage.data);
-                    break;
+        this.session?.addMessageListener(
+            NS_FX_CAST_BILIBILI,
+            async (_ns, message) => {
+                const parsedMessage = JSON.parse(
+                    message
+                ) as MirroringAppMessage;
+                switch (parsedMessage.subject) {
+                    case "peerConnectionAnswer":
+                        pc.setRemoteDescription(parsedMessage.data);
+                        break;
+                    case "iceCandidate":
+                        pc.addIceCandidate(parsedMessage.data);
+                        break;
+                }
             }
-        });
+        );
 
         pc.addEventListener("negotiationneeded", async () => {
             const offer = await pc.createOffer();
