@@ -856,7 +856,15 @@ export default class MediaSender {
             const pageDuration = elementDuration ?? bridgePageDuration;
             mediaInfo.customData = {
                 dashRemux: true,
-                ...(pageDuration !== undefined ? { pageDuration } : {})
+                ...(pageDuration !== undefined ? { pageDuration } : {}),
+                // The LOAD position (absolute video time): the page's playback
+                // position when the cast started. The popup seeds its timeline
+                // here so the seek bar shows the real position as soon as it
+                // appears, instead of 00:00 until the receiver's first settled
+                // report.
+                ...(Number.isFinite(dashStartTime)
+                    ? { dashStart: dashStartTime }
+                    : {})
             };
         } else if (this.isHlsDvr && bridgePageDuration !== undefined) {
             // Synthetic DVR (CCTV): the popup needs the synthesized duration for

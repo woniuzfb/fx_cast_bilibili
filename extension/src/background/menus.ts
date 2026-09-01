@@ -5,6 +5,8 @@ import { MenuId } from "../menuIds";
 
 import castManager, { CastInstanceDestroyedError } from "./castManager";
 import { CCTV_LIVE_PAGE_RE, launchCctvSender } from "./cctvLive";
+import { injectSenderFile } from "./injectSender";
+import { flattenInjectionResults } from "./injectLog";
 
 const _ = browser.i18n.getMessage;
 
@@ -360,11 +362,18 @@ export async function launchBilibiliSender(tabId: number, quality = 0) {
             }) as any,
             args: [quality, debugEnabled]
         });
-        const senderResults = await browser.scripting.executeScript({
-            target: { tabId },
-            files: ["cast/senders/bilibili.js"]
-        });
-        void bilibiliDebug("Bilibili sender execution result", senderResults);
+        const senderResults = await injectSenderFile(
+            tabId,
+            "cast/senders/bilibili.js"
+        );
+        // Log ALWAYS (not gated by bilibiliDebug) and flattened: a script that
+        // fails to load/evaluate in the page still resolves here with the real
+        // cause in each result's `error` field, which the console otherwise
+        // hides inside a collapsed `Array [ {…} ]`.
+        logger.info(
+            "Bilibili sender execution result",
+            flattenInjectionResults(senderResults)
+        );
     } catch (err) {
         logger.error("Failed to execute Bilibili sender", err);
         await browser.notifications.create({

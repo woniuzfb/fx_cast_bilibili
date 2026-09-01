@@ -811,11 +811,20 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                 const selection = await getReceiverSelection({
                     castInstance: instance
                 });
-                logger.info("Receiver selection completed", {
-                    selected: Boolean(selection),
-                    deviceId: selection?.device.id,
-                    mediaType: selection?.mediaType
-                });
+                // Distinguish a real selection from the popup being closed
+                // without clicking Cast (selector cancelled -> null), instead
+                // of logging `selected: false` plus two undefined fields.
+                if (selection) {
+                    logger.info("Receiver selection completed", {
+                        tabId: instance.contentContext?.tabId,
+                        deviceId: selection.device.id,
+                        mediaType: selection.mediaType
+                    });
+                } else {
+                    logger.info("Receiver selection cancelled", {
+                        tabId: instance.contentContext?.tabId
+                    });
+                }
 
                 // Handle cancellation
                 if (!selection) {

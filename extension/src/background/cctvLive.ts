@@ -2,6 +2,8 @@ import logger from "../lib/logger";
 import { getChromeUserAgentString } from "../lib/userAgents";
 
 import castManager, { CastInstanceDestroyedError } from "./castManager";
+import { injectSenderFile } from "./injectSender";
+import { flattenInjectionResults } from "./injectLog";
 import {
     handleCapturedCctvTsSegment,
     isCctvPageCaptureActive,
@@ -596,7 +598,20 @@ async function resolveLiveStreamUrl(tabId: number): Promise<string> {
                 });
             }
         }
-        logger.info("cdrmld delivery probe trail", { tabId, streamId, probes });
+        // probes joined into one string: a nested Array [ {…} ] collapses in
+        // the console preview and hides which CDN base failed and why.
+        logger.info("cdrmld delivery probe trail", {
+            tabId,
+            streamId,
+            probes: probes
+                .map(
+                    probe =>
+                        `${probe.base} ${probe.ok ? "ok" : "fail"} (${
+                            probe.detail
+                        })`
+                )
+                .join(" | ")
+        });
         if (!resolved) {
             throw new Error(
                 `此频道的 cdrmld (H.264) 交付在所有已知 CDN 上都不可用 (probed: ${probes
@@ -1036,11 +1051,13 @@ export function initCctvLive() {
                                   }
                               ]
                     );
+                // Labels joined into one string so the ladder is visible
+                // inline instead of a collapsed (5) […] array.
                 logger.info(
                     "CCTV quality choices served from captured master",
                     {
                         tabId: tab?.id,
-                        choices
+                        choices: choices.map(choice => choice.label).join(", ")
                     }
                 );
                 return { choices };
@@ -1135,10 +1152,17 @@ export async function launchCctvSender(tabId: number, height = 0) {
             return;
         }
 
-        await browser.scripting.executeScript({
-            target: { tabId },
-            files: ["cast/senders/cctv.js"]
-        });
+        const senderResults = await injectSenderFile(
+            tabId,
+            "cast/senders/cctv.js"
+        );
+        // Log ALWAYS and flattened: a cctv.js that fails to load/evaluate in the
+        // page still resolves here with the real cause in each result's `error`
+        // field, which the console otherwise hides inside a collapsed array.
+        logger.info(
+            "CCTV sender execution result",
+            flattenInjectionResults(senderResults)
+        );
     } catch (err) {
         logger.error("Failed to execute CCTV sender", err);
         await browser.notifications.create({

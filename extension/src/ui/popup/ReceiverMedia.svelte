@@ -57,6 +57,7 @@
         dashRemux?: boolean;
         hlsDvr?: boolean;
         pageDuration?: number;
+        dashStart?: number;
     } => {
         const customData = status.media?.customData;
         return customData && typeof customData === "object"
@@ -64,6 +65,7 @@
                   dashRemux?: boolean;
                   hlsDvr?: boolean;
                   pageDuration?: number;
+                  dashStart?: number;
               })
             : {};
     })();
@@ -97,7 +99,11 @@
             contentId: status.media?.contentId,
             playerSettled:
                 status.playerState === PlayerState.PLAYING ||
-                status.playerState === PlayerState.PAUSED
+                status.playerState === PlayerState.PAUSED,
+            isPlaying: status.playerState === PlayerState.PLAYING,
+            hlsDvr: Boolean(dashRemuxData.hlsDvr),
+            dashRemux: Boolean(dashRemuxData.dashRemux),
+            dashStart: dashRemuxData.dashStart
         });
         if (nextTimeline !== timeline) timeline = nextTimeline;
     }

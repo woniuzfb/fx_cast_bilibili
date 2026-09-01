@@ -140,6 +140,21 @@
     let isPreparingSelector = false;
     let selectionRequiresRefresh = false;
     let autoCastTimeoutId: number | undefined;
+    /**
+     * Watchdog for a receiver selector that never opens. The popup shows
+     * "Preparing receiver selector..." until it receives popup:init from the
+     * background (sent when the selector actually opens). If any link in the
+     * castCurrentTab -> sender inject -> requestSession -> getReceiverSelection
+     * -> popup:init chain silently breaks (e.g. a stale page<->background
+     * messaging channel after the background event page was recycled), that
+     * message never arrives and the popup would hang on "Preparing..." forever.
+     * This watchdog auto-retries the cast once, then surfaces a manual Retry.
+     */
+    let selectorWatchdogId: number | undefined;
+    let selectorStalled = false;
+    let selectorRetried = false;
+    let selectorAttemptGeneration = 0;
+    const SELECTOR_WATCHDOG_MS = 6000;
 
     /**
      * The browser-action popup cannot be inspected directly (no right-click ->
@@ -165,6 +180,47 @@
             });
     }
 
+    function clearSelectorWatchdog() {
+        if (selectorWatchdogId !== undefined) {
+            window.clearTimeout(selectorWatchdogId);
+            selectorWatchdogId = undefined;
+        }
+    }
+
+    /**
+     * Arm (or re-arm) the watchdog that recovers a selector which never opened.
+     * If popup:init has not arrived when it fires, auto-retry the cast once;
+     * on a second timeout, stop preparing and surface a manual Retry so the
+     * popup can never hang silently on "Preparing receiver selector...".
+     */
+    function armSelectorWatchdog(generation: number) {
+        clearSelectorWatchdog();
+        selectorWatchdogId = window.setTimeout(() => {
+            if (generation !== selectorAttemptGeneration) return;
+            selectorWatchdogId = undefined;
+            if (hasSelectorContext) return; // selector opened; nothing to do
+            if (!selectorRetried) {
+                selectorRetried = true;
+                popupLog(
+                    "selector did not open in time; auto-retrying cast once"
+                );
+                void castCurrentTab();
+                return;
+            }
+            popupLog(
+                "selector still did not open after retry; surfacing manual retry"
+            );
+            isPreparingSelector = false;
+            selectorStalled = true;
+        }, SELECTOR_WATCHDOG_MS);
+    }
+
+    function retrySelector() {
+        selectorStalled = false;
+        selectorRetried = false;
+        void castCurrentTab();
+    }
+
     async function castCurrentTab(selection?: {
         device: ReceiverDevice;
         mediaType: ReceiverSelectorMediaType;
@@ -174,7 +230,10 @@
             deviceId: selection?.device.id,
             mediaType: selection?.mediaType
         });
+        const generation = ++selectorAttemptGeneration;
         isPreparingSelector = true;
+        selectorStalled = false;
+        armSelectorWatchdog(generation);
         try {
             await browser.runtime.sendMessage({
                 subject: "action:castCurrentTab",
@@ -188,9 +247,12 @@
                       }
             });
         } catch (err) {
+            if (generation !== selectorAttemptGeneration) return;
             isPreparingSelector = false;
             isConnecting = false;
-            popupLog("castCurrentTab failed", {
+            selectorStalled = true;
+            clearSelectorWatchdog();
+            popupLog("castCurrentTab failed; surfacing manual retry", {
                 err: err instanceof Error ? err.message : String(err)
             });
         }
@@ -372,6 +434,7 @@
         if (autoCastTimeoutId !== undefined) {
             window.clearTimeout(autoCastTimeoutId);
         }
+        clearSelectorWatchdog();
         browser.runtime.onMessage.removeListener(onRuntimeMessage);
         port?.disconnect();
         resizeObserver.disconnect();
@@ -398,6 +461,10 @@
                     window.clearTimeout(autoCastTimeoutId);
                     autoCastTimeoutId = undefined;
                 }
+                clearSelectorWatchdog();
+                ++selectorAttemptGeneration;
+                selectorStalled = false;
+                selectorRetried = false;
                 isPreparingSelector = false;
                 popupLog("popup:init received -> hasSelectorContext=true", {
                     appId: message.data.appInfo?.sessionRequest?.appId,
@@ -637,7 +704,16 @@
 <svelte:window on:keydown={handleKeyDown} />
 
 {#if !hasSelectorContext}
-    <div class="banner banner--info">Preparing receiver selector...</div>
+    {#if selectorStalled}
+        <div class="banner banner--info">
+            Couldn't open the receiver selector.
+            <button type="button" class="banner__retry" on:click={retrySelector}>
+                Retry
+            </button>
+        </div>
+    {:else}
+        <div class="banner banner--info">Preparing receiver selector...</div>
+    {/if}
 {/if}
 
 {#if !isBridgeCompatible}

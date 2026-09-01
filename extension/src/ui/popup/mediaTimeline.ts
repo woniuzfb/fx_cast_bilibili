@@ -47,6 +47,37 @@ export interface PopupMediaSample {
      * transient reset that would otherwise flash the bar to 0.
      */
     playerSettled?: boolean;
+    /**
+     * True when the receiver reports PlayerState=PLAYING. Used together with
+     * hlsDvr below to start the estimate clock before the first real position.
+     */
+    isPlaying?: boolean;
+    /**
+     * True for the CCTV synthetic DVR (customData.hlsDvr). Its playlist is a
+     * 2-hour VOD (~1800 segments), and while the receiver builds the event
+     * timeline for it, Chromecast HLS reports currentTime=-1 (see
+     * cast/senders/media.ts) even though the receiver is already PLAYING and
+     * its clock runs from the LOAD position (always 0 for this media). Only
+     * for this media do we seed the timeline at 0 and let the wall-clock
+     * estimate advance; other media (e.g. Bilibili DASH remux loading at the
+     * page position) keep waiting for the first real report.
+     */
+    hlsDvr?: boolean;
+    /**
+     * True for Bilibili DASH remux media (customData.dashRemux). Like the CCTV
+     * synthetic DVR it has a synthetic receiver timeline, and during the
+     * bridge remux restart the receiver reports transient positions (0) from
+     * unsettled states before real playback begins.
+     */
+    dashRemux?: boolean;
+    /**
+     * The LOAD position (absolute video time) for Bilibili DASH remux media
+     * (customData.dashStart) — the page's playback position when the cast
+     * started. Seeds a fresh timeline so the seek bar shows the real position
+     * from the moment it appears, instead of 00:00 until the first settled
+     * receiver report.
+     */
+    dashStart?: unknown;
 }
 
 /**
@@ -150,7 +181,21 @@ export function updatePopupMediaTimeline(
     // already owns the freeze via seekPending, and a genuine media change
     // resets everything, so neither arms this hold. This only freezes the
     // displayed position number; it never affects seek-bar visibility.
-    const hadRealPosition = !mediaChanged && previous.updatedAt > 0;
+    // CCTV synthetic DVR / Bilibili DASH remux only: their startup sequences
+    // must not arm the hold. The synthetic DVR flaps PLAYING -> BUFFERING ->
+    // PLAYING in its first seconds while the receiver is still establishing
+    // its event timeline, and the position then is 0 (or the -1 sentinel). A
+    // DASH remux load likewise reports transient 0s from unsettled states
+    // while the bridge restarts. Freezing at 0 protects nothing, but it does
+    // block the wall-clock estimate for the full 15s hold window — exactly the
+    // "bar stuck at 00:00 for ~18s, then jumps to ~00:18 when the hold
+    // expires" symptom. For these media a real (positive) position is
+    // required to arm the hold; other media keep the previous behavior.
+    const hadRealPosition =
+        !mediaChanged &&
+        previous.updatedAt > 0 &&
+        ((sample.hlsDvr !== true && sample.dashRemux !== true) ||
+            previous.currentTime > 0);
     const sampleSettled = sample.playerSettled === true;
     const contentIdChanged =
         !mediaChanged &&
@@ -179,7 +224,23 @@ export function updatePopupMediaTimeline(
         sample.now < next.reloadExpiresAt;
 
     const currentTime = Number(sample.currentTime);
-    if (Number.isFinite(currentTime) && currentTime >= 0) {
+    // A real, reportable position. Chromecast reports currentTime=-1 while its
+    // event timeline is being established (see PopupMediaSample.isPlaying) —
+    // that sentinel is not a position and must not seed or move the timeline.
+    const hasReportedPosition =
+        Number.isFinite(currentTime) && currentTime >= 0;
+    // CCTV synthetic DVR / Bilibili DASH remux: a position from an unsettled
+    // state (IDLE/BUFFERING) is a startup transient. A 0 reported at IDLE
+    // precedes actual playback by the receiver's whole startup, so anchoring
+    // on it runs the estimate fast and the first real position then snaps the
+    // bar backwards (or leaves it stuck at 00:00 through the load). For these
+    // media only settled (PLAYING/PAUSED) reports may anchor; other media keep
+    // anchoring from any valid position as before.
+    const positionReportUsable =
+        hasReportedPosition &&
+        (sample.playerSettled === true ||
+            (sample.hlsDvr !== true && sample.dashRemux !== true));
+    if (positionReportUsable) {
         if (seekPending) {
             // Only a report near the target confirms the seek; older stream
             // positions are stale and must not yank the bar back.
@@ -225,6 +286,40 @@ export function updatePopupMediaTimeline(
             next.reloadHoldTime = undefined;
             next.reloadExpiresAt = undefined;
         }
+    } else if (
+        next.updatedAt === 0 &&
+        sample.hlsDvr === true &&
+        sample.isPlaying
+    ) {
+        // CCTV synthetic DVR only: no valid position yet (the -1 sentinel),
+        // but the receiver is already playing and its clock started at the
+        // LOAD position (always 0 for this media). Seed the timeline there so
+        // the wall-clock estimate advances from the start; the first real
+        // position report then lands on the estimate instead of producing a
+        // 00:00 -> 00:18 jump. Seeding only ever happens on a fresh timeline
+        // (updatedAt === 0), so seek confirm windows and reload holds (both
+        // require a prior real position) are unaffected.
+        next.currentTime = 0;
+        next.updatedAt = sample.now;
+    } else if (
+        next.updatedAt === 0 &&
+        sample.dashRemux === true &&
+        Number.isFinite(Number(sample.dashStart)) &&
+        Number(sample.dashStart) >= 0
+    ) {
+        // Bilibili DASH remux: seed at the LOAD position (the page's playback
+        // position when the cast started) as soon as the media status carries
+        // it, so the seek bar shows the real position from the moment it
+        // appears. Until the receiver settles into PLAYING the early reports
+        // are transient 0s (ignored above), so without this seed the bar sits
+        // at 00:00 and then jumps to the real position once playback starts.
+        // The estimate does not advance until PLAYING, and the first settled
+        // report (≈ dashStart + elapsed) lands on the seed, so there is no
+        // jump either way. Seeding only ever happens on a fresh timeline
+        // (updatedAt === 0); seeks and reloads keep the timeline fresh and are
+        // owned by the seek-confirm / reload-hold logic.
+        next.currentTime = Number(sample.dashStart);
+        next.updatedAt = sample.now;
     }
 
     if (
