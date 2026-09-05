@@ -124,10 +124,13 @@
                     appInfo?.sessionRequest?.capabilities
                 );
 
-            /** Mirroring requires video output capability. */
+            /** Mirroring requires video output capability (and is only
+             * possible on Chromecast receivers — Roku devices have no
+             * mirroring channel). */
             case ReceiverSelectorMediaType.Screen:
-                return !!(
-                    device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT
+                return (
+                    !!(device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT) &&
+                    device.deviceType !== "roku"
                 );
         }
 

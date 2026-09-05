@@ -19,6 +19,13 @@ export interface ReceiverDevice {
     port: number;
     status?: ReceiverStatus;
     mediaStatus?: MediaStatus;
+    /**
+     * Receiver protocol family. "cast" (Chromecast) when absent (older
+     * bridges never sent it); "roku" devices are emulated as cast sessions
+     * by the bridge over the ECP protocol, but do not support screen
+     * mirroring.
+     */
+    deviceType?: "cast" | "roku";
 }
 
 export enum ReceiverSelectorMediaType {

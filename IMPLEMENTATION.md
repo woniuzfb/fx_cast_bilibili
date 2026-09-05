@@ -89,6 +89,37 @@ When an incoming connection is received the daemon acts as a native messaging se
 
 Since the daemon is just a WebSocket server, it can configured to be used remotely, so the bridge doesn't have to be running on the same machine as the extension. However, remote connections could cause performance issues due to increased latency and may be unstable or insecure. Local media casting will also be unavailable.
 
+## Roku Support
+
+Roku devices (ECP protocol, HTTP port 8060) appear alongside Chromecast receivers in the device list. The integration (referencing [QuickCast's](https://github.com/ace68078/chrome-cast-extension) Roku implementation) lives almost entirely in the bridge under `bridge/src/bridge/components/roku/`:
+
+| Module          | Role                                                                                                                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `ecp.ts`        | ECP HTTP client: `/query/device-info`, `/query/apps`, `/query/media-player`, `/launch/<appId>`, `/keypress/<key>`                          |
+| `deviceBrowser.ts` | SSDP discovery (`M-SEARCH` for `roku:ecp` + NOTIFY alive/byebye) with `/query/device-info` health probes; emits `main:deviceUp/Down`    |
+| `session.ts`    | `RokuSession` — emulates the Chromecast session surface over ECP (see below)                                                              |
+| `remote.ts`     | `RokuRemote` — device-level status polling and session-less popup media controls                                                          |
+
+### Session emulation
+
+`ReceiverDevice.deviceType` (`"cast"` default, `"roku"`) selects the session implementation in the bridge. `RokuSession` translates the Chromecast protocol surface the extension already speaks into ECP calls:
+
+-   `bridge:createCastSession` → session is created immediately (no launch round-trip; the media player channel is launched later, on LOAD, exactly like the Default Media Receiver).
+-   `LOAD` (media namespace) → ECP launch of the Roku Media Player channel (`2213`, falling back to Play On Roku `15985` via `/query/apps`), with `mediaUrl`/title/format params derived from the media info. The media URL may point at the bridge's LAN media server (bilibili DASH remux, CCTV live relay), which the Roku fetches directly.
+-   `PLAY`/`PAUSE` → `/keypress` (state-aware: ECP's Play key is a toggle on some firmware).
+-   `SEEK` → re-launch with a `mediaPosition` param (ECP has no absolute seek).
+-   `STOP` → `/keypress/Home`, then `cast:sessionStopped`.
+-   Playback state is polled from `/query/media-player` every 2.5s and pushed to senders as `MEDIA_STATUS` updates; `GET_STATUS` requests are answered from the last polled state.
+
+Because the emulation sits below the cast SDK, **all senders work unchanged**: the generic media sender, the bilibili sender (DASH remux via the bridge proxy) and the CCTV live sender.
+
+### Limitations
+
+-   No screen mirroring (`Screen` media type is disabled for Roku devices in the receiver selector).
+-   Volume is approximated with relative `VolumeUp`/`VolumeDown` keypresses (ECP has no volume query).
+-   Subtitle track selection has no ECP equivalent and is ignored.
+-   Seeks restart the media player channel (brief reload flash).
+
 ## WebExtension Permissions
 
 | Permission        | Description                                        | Usage                                                                                                                                              |

@@ -294,6 +294,28 @@ body {
 .media__seek-bar {
     flex: 1;
 }
+.media__seek-bar--readonly {
+    align-items: center;
+    display: flex;
+    height: var(--slider-track-height);
+    overflow: hidden;
+    pointer-events: none;
+    position: relative;
+}
+.media__seek-bar--readonly::before {
+    background: var(--slider-track-color);
+    content: "";
+    inset: 0;
+    position: absolute;
+}
+.media__seek-bar-fill {
+    background: var(--slider-fill-color);
+    height: 100%;
+    left: 0;
+    position: absolute;
+    top: 0;
+    width: var(--media-progress);
+}
 .media__seek-tooltip {
     --tooltip-color: var(--button-background);
     --tooltip-arrow-height: 5px;

@@ -1,7 +1,6 @@
 import logger from "../lib/logger";
 import options from "../lib/options";
 import bridge, { type BridgeInfo } from "../lib/bridge";
-import { baseConfigStorage, fetchBaseConfig } from "../lib/chromecastConfigApi";
 
 import defaultOptions from "../defaultOptions";
 import messaging from "../messaging";
@@ -90,30 +89,6 @@ async function notifyBridgeCompat() {
     }
 }
 
-/**
- * Updates locally-stored base config data if never downloaded or since
- * expired.
- */
-async function cacheBaseConfig() {
-    const { baseConfigUpdated } = await baseConfigStorage.get(
-        "baseConfigUpdated"
-    );
-
-    // If never updated or updated more than 48 hours ago
-    if (
-        !baseConfigUpdated ||
-        (Date.now() - baseConfigUpdated) / 1000 >= 172800
-    ) {
-        logger.info("Fetching updated Chromecast base config...");
-        const baseConfig = await fetchBaseConfig();
-        if (baseConfig) {
-            await baseConfigStorage.set({
-                baseConfig,
-                baseConfigUpdated: Date.now()
-            });
-        }
-    }
-}
 
 let isInitialized = false;
 
@@ -258,5 +233,4 @@ async function init() {
 }
 
 cacheUaInfo();
-cacheBaseConfig();
 init();

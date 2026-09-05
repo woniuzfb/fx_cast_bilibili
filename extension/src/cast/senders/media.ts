@@ -265,6 +265,12 @@ export default class MediaSender {
      * detection loop) or the sender is stopped.
      */
     private recoveryRetryTimer?: number;
+    /** A submitted recovery LOAD is not successful until the new relay serves
+     * receiver traffic. This independent watchdog survives a missing media
+     * callback/sync loop and retries instead of dead-ending on a black screen. */
+    private recoveryActivityTimer?: number;
+    private recoveryAwaitingRelayActivity = false;
+    private recoveryGeneration = 0;
     /** Backoff for consecutive failed recovery attempts (reset on success). */
     private recoveryRetryBackoffMs = 0;
     /** Base/cap for the failed-recovery retry backoff. */
@@ -351,6 +357,8 @@ export default class MediaSender {
         this.dashSyncHold = false;
         this.dashTightenSync = false;
         this.suspendMediaElementSync();
+        this.clearRecoveryActivityWatchdog();
+        this.clearRecoveryRetry();
 
         if (this.receiverActionListener) {
             cast.removeReceiverActionListener(this.receiverActionListener);
@@ -489,6 +497,7 @@ export default class MediaSender {
             const message = ev.data as Message | undefined;
             const subject = message?.subject;
             if (subject === "mediaCast:relaySegmentRequested") {
+                this.confirmRecoveryRelayActivity("steady-state-segment");
                 const now = Date.now();
                 const measured = (
                     message?.data as { durationSeconds?: number } | undefined
@@ -511,6 +520,7 @@ export default class MediaSender {
                     creditSeconds * 1000;
                 this.relayStaleLogged = false;
             } else if (subject === "mediaCast:relayPrebufferSegmentRequested") {
+                this.confirmRecoveryRelayActivity("prebuffer-segment");
                 this.lastPrebufferSegmentRequestAt = Date.now();
                 this.relayStaleLogged = false;
             }
@@ -730,7 +740,9 @@ export default class MediaSender {
                 dashStartTime,
                 this.remoteProxy.hlsLive,
                 this.remoteProxy.userAgent,
-                cctvDebugEnabled
+                cctvDebugEnabled,
+                Boolean(this.remoteProxy.audioUrl) &&
+                    this.session?.receiver.label.startsWith("roku-") === true
             );
             if (this.stopped || loadId !== this.dashLoadId) {
                 this.stopOwnedMediaServer(requestId);
@@ -1441,6 +1453,8 @@ export default class MediaSender {
                     tighten: this.dashTightenSync,
                     playerState: boundMedia?.playerState,
                     estimatedTime: boundMedia?.getEstimatedTime(),
+                    receiverLabel: this.session?.receiver.label,
+                    isDashRemux: this.isDashRemux,
                     mediaCount: this.session?.media?.length,
                     boundMediaSessionId: boundMedia?.mediaSessionId,
                     pageTime: mediaElement.currentTime,
@@ -1671,8 +1685,6 @@ export default class MediaSender {
                 Number.isFinite(rawEstimatedTime) &&
                 rawEstimatedTime >= 0
             ) {
-                // DASH remux playlists are padded, so receiver positions are already
-                // in absolute video time and match the page timeline directly.
                 const estimatedTime = rawEstimatedTime;
                 const drift = Math.abs(
                     mediaElement.currentTime - estimatedTime
@@ -1745,8 +1757,28 @@ export default class MediaSender {
                     });
                     break;
                 case cast.media.PlayerState.PAUSED:
+                    if (!gated && !mediaElement.paused) suppressPause++;
+                    mediaElement.pause();
+                    break;
                 case cast.media.PlayerState.BUFFERING:
                 case cast.media.PlayerState.IDLE:
+                    if (this.isHlsDvr) {
+                        // The CCTV page player supplies the live watermark and
+                        // cdnFutureMode heartbeat. Receiver startup/recovery states
+                        // must not pause it or the relay can starve at the edge.
+                        if (mediaElement.paused) {
+                            if (!gated) suppressPlay++;
+                            void mediaElement.play().catch(err => {
+                                if (!gated)
+                                    suppressPlay = Math.max(0, suppressPlay - 1);
+                                logger.error(
+                                    "Failed to keep CCTV page playback alive",
+                                    err
+                                );
+                            });
+                        }
+                        break;
+                    }
                     if (!gated && !mediaElement.paused) suppressPause++;
                     mediaElement.pause();
                     break;
@@ -1833,7 +1865,8 @@ export default class MediaSender {
         startTime = 0,
         hlsLive = false,
         userAgent?: string,
-        cctvDebugEnabled = false
+        cctvDebugEnabled = false,
+        rokuDashPrebuffer = false
     ): Promise<{
         mediaPath: string;
         localAddress: string;
@@ -1926,7 +1959,8 @@ export default class MediaSender {
                 contentType,
                 port,
                 startTime,
-                hlsLive
+                hlsLive,
+                rokuDashPrebuffer
             });
             this.port.postMessage({
                 subject: "bridge:startRemoteMediaServer",
@@ -1939,6 +1973,7 @@ export default class MediaSender {
                     port,
                     startTime,
                     hlsLive,
+                    rokuDashPrebuffer,
                     cctvDebugEnabled,
                     userAgent
                 }
@@ -1982,10 +2017,13 @@ export default class MediaSender {
         // We are attempting now: cancel any pending watchdog retry so a scheduled
         // attempt can't overlap this one.
         this.clearRecoveryRetry();
+        this.clearRecoveryActivityWatchdog();
         this.recoverInFlight = true;
+        const recoveryGeneration = ++this.recoveryGeneration;
+        this.recoveryAwaitingRelayActivity = true;
         try {
             this.logRecovery("info", "Receiver media recovery starting", {
-                resumeMode: "continueAfterLastServedSegment"
+                resumeMode: "rokuFullHistoricalLookback"
             });
 
             // Cleanly disconnect the old pipeline FIRST — the same ordering as
@@ -1997,22 +2035,21 @@ export default class MediaSender {
 
             const reloadStartedAt = Date.now();
             await this.loadMedia();
-            const reloadCompletedAt = Date.now();
+            const reloadSubmittedAt = Date.now();
             this.recoverNotBeforeAt =
-                reloadCompletedAt + this.relayActivityTimeoutMs();
-            // Success: a fresh reload restored the media-element sync loop (via
-            // addMediaElementListeners), so normal death detection is back in
-            // charge. Drop the failure backoff and any pending watchdog retry.
-            this.recoveryRetryBackoffMs = 0;
-            this.clearRecoveryRetry();
+                reloadSubmittedAt + this.relayActivityTimeoutMs();
+            // loadMedia returns after relay preparation and LOAD submission; the
+            // callback does not prove that Roku consumed the new relay. Keep a
+            // separate watchdog until a prebuffer/steady-state segment is served.
             this.logRecovery(
                 "info",
-                "Receiver media recovery reload completed",
-                {
-                    reloadElapsedMs: reloadCompletedAt - reloadStartedAt
-                }
+                "Receiver media recovery reload submitted",
+                { reloadElapsedMs: reloadSubmittedAt - reloadStartedAt }
             );
+            this.armRecoveryActivityWatchdog(recoveryGeneration);
         } catch (err) {
+            this.recoveryAwaitingRelayActivity = false;
+            this.clearRecoveryActivityWatchdog();
             // A failed reload tore down the media-element sync loop
             // (suspendMediaElementSync) without rebuilding it, so nothing else will
             // retry. Grow the backoff and arm the watchdog to try again.
@@ -2036,6 +2073,62 @@ export default class MediaSender {
         } finally {
             this.recoverInFlight = false;
         }
+    }
+
+    private confirmRecoveryRelayActivity(source: string) {
+        if (!this.recoveryAwaitingRelayActivity) return;
+        this.recoveryAwaitingRelayActivity = false;
+        this.clearRecoveryActivityWatchdog();
+        this.recoveryRetryBackoffMs = 0;
+        this.clearRecoveryRetry();
+        this.logRecovery(
+            "info",
+            "Receiver media recovery consumption confirmed",
+            { source }
+        );
+    }
+
+    private clearRecoveryActivityWatchdog() {
+        if (this.recoveryActivityTimer !== undefined) {
+            window.clearTimeout(this.recoveryActivityTimer);
+            this.recoveryActivityTimer = undefined;
+        }
+    }
+
+    private armRecoveryActivityWatchdog(generation: number) {
+        if (!this.recoveryAwaitingRelayActivity || this.stopped) return;
+        this.clearRecoveryActivityWatchdog();
+        const timeoutMs = Math.max(
+            30_000,
+            this.relayActivityTimeoutMs() * 3
+        );
+        this.recoveryActivityTimer = window.setTimeout(() => {
+            this.recoveryActivityTimer = undefined;
+            if (
+                this.stopped ||
+                generation !== this.recoveryGeneration ||
+                !this.recoveryAwaitingRelayActivity
+            ) {
+                return;
+            }
+            this.recoveryAwaitingRelayActivity = false;
+            this.recoveryRetryBackoffMs = Math.min(
+                MediaSender.RECOVERY_RETRY_MAX_MS,
+                this.recoveryRetryBackoffMs > 0
+                    ? Math.round(this.recoveryRetryBackoffMs * 1.5)
+                    : MediaSender.RECOVERY_RETRY_BASE_MS
+            );
+            this.recoverNotBeforeAt = Date.now() + this.recoveryRetryBackoffMs;
+            this.logRecovery(
+                "error",
+                "Recovery reload produced no relay activity",
+                {
+                    timeoutMs,
+                    nextRetryInMs: this.recoveryRetryBackoffMs
+                }
+            );
+            this.scheduleRecoveryRetry();
+        }, timeoutMs);
     }
 
     /** Cancel a pending failed-recovery watchdog retry, if any. */

@@ -2,6 +2,7 @@ import bridge from "../lib/bridge";
 import {
     type BaseConfig,
     baseConfigStorage,
+    fetchBaseConfig,
     getAppTag
 } from "../lib/chromecastConfigApi";
 import logger from "../lib/logger";
@@ -18,6 +19,7 @@ import {
 
 import type { ApiConfig } from "../cast/sdk/classes";
 import { AutoJoinPolicy, ReceiverAction } from "../cast/sdk/enums";
+import { MediaInfo } from "../cast/sdk/media/classes";
 import { createReceiver } from "../cast/utils";
 
 import ReceiverSelector, {
@@ -35,6 +37,16 @@ import {
     isCctvPageCaptureActive,
     pauseCctvPageCaptureIngest
 } from "./cctvPageCapture";
+
+async function logRokuDebug(message: string, data: unknown) {
+    try {
+        const opts = await options.getAll();
+        if (!opts.cctvDebugEnabled && !opts.bilibiliDebugEnabled) return;
+        logger.info(message, data);
+    } catch {
+        // Debug logging must never affect session message handling.
+    }
+}
 
 type AnyPort = Port | TypedMessagePort<Message>;
 
@@ -330,7 +342,61 @@ const allowedContentMessages: Array<Message["subject"]> = [
 ];
 
 /** Chromecast base config to check compatibility with audio devices. */
-let baseConfig: BaseConfig;
+let baseConfig: BaseConfig | undefined;
+let baseConfigLoad: Promise<BaseConfig | undefined> | undefined;
+
+/** CCTV and Bilibili senders already provide concrete video media. Their
+ * receiver selector does not need Google's app audio-only compatibility tag,
+ * so never start a baseconfig request from those page flows. */
+function skipsChromecastBaseConfig(pageUrl?: string): boolean {
+    if (!pageUrl) return false;
+    try {
+        const url = new URL(pageUrl);
+        const host = url.hostname.toLowerCase();
+        if (host === "tv.cctv.com" && url.pathname.startsWith("/live/")) {
+            return true;
+        }
+        return (
+            (host === "www.bilibili.com" || host === "m.bilibili.com") &&
+            url.pathname.startsWith("/video/")
+        );
+    } catch {
+        return false;
+    }
+}
+
+async function loadChromecastBaseConfig(): Promise<BaseConfig | undefined> {
+    if (Array.isArray(baseConfig?.app_tags)) return baseConfig;
+    if (baseConfigLoad) return baseConfigLoad;
+
+    baseConfigLoad = (async () => {
+        try {
+            const stored = await baseConfigStorage.get("baseConfig");
+            if (Array.isArray(stored.baseConfig?.app_tags)) {
+                baseConfig = stored.baseConfig;
+                return baseConfig;
+            }
+        } catch (err) {
+            logger.error("Failed to get Chromecast base config!", err);
+        }
+
+        const fetched = await fetchBaseConfig();
+        if (!fetched) return undefined;
+        baseConfig = fetched;
+        try {
+            await baseConfigStorage.set({
+                baseConfig: fetched,
+                baseConfigUpdated: Date.now()
+            });
+        } catch (err) {
+            logger.error("Failed to cache Chromecast base config!", err);
+        }
+        return fetched;
+    })().finally(() => {
+        baseConfigLoad = undefined;
+    });
+    return baseConfigLoad;
+}
 /** Shared receiver selector. */
 const receiverSelectors = new Map<number, ReceiverSelector>();
 
@@ -350,6 +416,55 @@ const activeInstances = new Set<CastInstance>();
 
 /** Map of active session IDs to session info objects. */
 const activeSessions = new Map<string, CastSession>();
+
+/** Firefox may remove a tab without delivering pagehide/beforeunload to the
+ * sender. Stop every session owned by that tab through the still-live bridge. */
+browser.tabs.onRemoved.addListener(tabId => {
+    for (const instance of [...activeInstances]) {
+        if (instance.contentContext?.tabId !== tabId || !instance.session) {
+            continue;
+        }
+        const { session } = instance;
+        const receiverDevice = deviceManager.getDeviceById(session.deviceId);
+        logger.info("Tab closed; stopping owned Cast session", {
+            tabId,
+            deviceId: session.deviceId,
+            sessionId: session.sessionId,
+            hasReceiverDevice: Boolean(receiverDevice)
+        });
+        if (instance.bridgeMessageListener) {
+            session.bridgePort.onMessage.removeListener(
+                instance.bridgeMessageListener
+            );
+            delete instance.bridgeMessageListener;
+        }
+        activeInstances.delete(instance);
+
+        // DeviceManager owns an independent, persistent native connection, so
+        // this STOP survives destruction of the page/content port.
+        deviceManager.sendReceiverMessage(session.deviceId, {
+            type: "STOP",
+            requestId: Date.now(),
+            sessionId: session.sessionId
+        });
+
+        if (receiverDevice) {
+            session.bridgePort.postMessage({
+                subject: "bridge:stopCastSession",
+                data: { receiverDevice }
+            });
+        }
+        session.bridgePort.postMessage({
+            subject: "bridge:stopMediaServer",
+            data: { force: true }
+        });
+    }
+});
+
+/** Device ownership captured when a live relay request is sent to the bridge.
+ * Relay lifecycle messages can arrive after instance.session has been cleared,
+ * so optimistic media must not depend on that mutable pointer. */
+const liveRelayDeviceByRequestId = new Map<string, string>();
 
 /** Keeps track of cast API instances and provides bridge messaging. */
 const castManager = new (class {
@@ -576,8 +691,7 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
         // requestId is required on the bridge protocol envelope, but repeating the
         // full UUID in every high-volume segment log wastes the Firefox console
         // preview budget and hides the actual decrypt diagnostics.
-        const { event, requestId: _requestId, ...rest } = message.data;
-        void _requestId;
+        const { event, requestId, ...rest } = message.data;
         const stored = (await browser.storage.sync.get("options")) as {
             options?: { cctvDebugEnabled?: boolean };
         };
@@ -607,6 +721,50 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
                 data: {}
             });
         }
+
+        // Optimistic early session media for the CCTV synthetic-DVR live
+        // relay. The real LOAD media is only published by RokuSession (via
+        // main:rokuSessionMedia) once the initial prebuffer has filled AND
+        // the Roku has started consuming the relay — seconds to tens of
+        // seconds after the cast button was clicked, which is why the popup
+        // progress bar used to appear only when playback actually began.
+        // The DVR window params are already known the moment the bridge
+        // builds the frozen playlist, so register an equivalent MediaInfo
+        // now and let deviceManager surface the bar immediately. The real
+        // LOAD media replaces this entry once consumption is observed; a
+        // relay stop/error clears it (see mediaCast:mediaServerStopped /
+        // mediaCast:mediaServerError below).
+        if (event === "synthetic DVR playlist constructed") {
+            const deviceId = liveRelayDeviceByRequestId.get(requestId);
+            const totalDurationSeconds = rest.totalDurationSeconds;
+            if (
+                deviceId &&
+                typeof totalDurationSeconds === "number" &&
+                totalDurationSeconds > 0
+            ) {
+                const media = new MediaInfo("", "application/x-mpegurl");
+                media.duration = totalDurationSeconds;
+                media.customData = {
+                    hlsDvr: true,
+                    pageDuration: totalDurationSeconds,
+                    // Marks the entry as optimistic so a relay stop/error
+                    // can clear it without touching real LOAD media.
+                    optimisticRelayMedia: true,
+                    ...(typeof rest.liveEdgeBaseSeconds === "number"
+                        ? { dvrLiveEdgeBaseSeconds: rest.liveEdgeBaseSeconds }
+                        : {}),
+                    // The bridge built the playlist as it emitted this
+                    // event, so receipt time is within milliseconds of the
+                    // real builtAtMs (it only feeds the seek clamp).
+                    dvrBuiltAtMs: Date.now()
+                };
+                deviceManager.setRokuSessionMedia(
+                    deviceId,
+                    `relay:${requestId}`,
+                    media
+                );
+            }
+        }
         return;
     }
 
@@ -632,6 +790,22 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             const tabId = instance.contentContext?.tabId;
             if (tabId !== undefined && isCctvPageCaptureActive(tabId)) {
                 pauseCctvPageCaptureIngest(tabId, message.data.requestId);
+            }
+            // Drop an optimistic early session-media entry (registered from
+            // the "synthetic DVR playlist constructed" relay event above)
+            // when its relay goes away before the real LOAD media was ever
+            // published — otherwise the stale entry keeps merging into
+            // future device statuses. Real LOAD-published entries are left
+            // untouched.
+            const relayDeviceId = liveRelayDeviceByRequestId.get(
+                message.data.requestId
+            );
+            if (relayDeviceId) {
+                deviceManager.clearOptimisticRokuSessionMedia(
+                    relayDeviceId,
+                    message.data.requestId
+                );
+                liveRelayDeviceByRequestId.delete(message.data.requestId);
             }
             break;
         }
@@ -683,6 +857,70 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
                 subject: "cast:sessionUpdated",
                 data: message.data
             });
+            break;
+
+        case "main:dashRemuxDebug": {
+            logger.info(`DASH remux ${message.data.event}`, {
+                requestId: message.data.requestId,
+                details: message.data.details
+            });
+            break;
+        }
+
+        case "main:rokuSessionMediaDebug": {
+            // RokuSession sends over the SESSION bridge connection, so this
+            // message arrives here in castManager — not on the deviceManager
+            // connection where the twin handler lives (deviceManager.ts).
+            // Without this case the session-side debug was silently dropped
+            // and never reached the background console, making the Roku
+            // consume/register flow invisible.
+            const { deviceId, event, ...rest } = message.data;
+            void logRokuDebug(
+                `Roku session media [${deviceId}] ${event}`,
+                rest
+            );
+            break;
+        }
+
+        case "main:rokuSessionMedia": {
+            // The emulated RokuSession runs in its own bridge process
+            // (every connectNative spawns one), so the sessionMedia
+            // registry it registers into is invisible to RokuRemote's
+            // buildStatusMedia in the device-discovery process. The
+            // session publishes its LOAD media here instead; the device
+            // manager merges it into the device media status.
+            deviceManager.setRokuSessionMedia(
+                message.data.deviceId,
+                message.data.sessionId,
+                message.data.media
+            );
+            break;
+        }
+
+        case "cast:sessionStopped": {
+            const sessionId = message.data.sessionId;
+            const session = instance.session;
+
+            // RokuSession tears itself down directly over ECP and therefore
+            // does not produce the Chromecast application's `applicationClosed`
+            // event that normally removes background ownership. Clear the
+            // instance/active-session state here when the bridge reports the
+            // terminal session event so the popup immediately stops treating
+            // the receiver as owned (and never reaches Stop timed out - Retry).
+            if (session?.sessionId === sessionId) {
+                activeSessions.delete(sessionId);
+                delete instance.session;
+                refreshReceiverSelector();
+
+                if (instance.contentContext?.tabId !== undefined) {
+                    updateActionState(
+                        ActionState.Default,
+                        instance.contentContext.tabId
+                    );
+                }
+            }
+            break;
+        }
     }
 
     instance.contentPort.postMessage(message);
@@ -711,6 +949,13 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
 
     switch (message.subject) {
         case "bridge:startRemoteMediaServer": {
+            if (message.data.hlsLive && instance.session) {
+                liveRelayDeviceByRequestId.set(
+                    message.data.requestId,
+                    instance.session.deviceId
+                );
+            }
+
             // CCTV live relay (initial cast AND every recovery rebuild): start the
             // page TS capture session for this tab. The endpoint is armed only when
             // the relay reports listening (mediaServerStarted). cdrmld-seeded relays
@@ -802,6 +1047,7 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                 break;
             }
 
+            let pendingRokuMediaDeviceId: string | undefined;
             try {
                 logger.info("Waiting for receiver selection", {
                     tabId: instance.contentContext?.tabId,
@@ -853,6 +1099,11 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                     break;
                 }
 
+                if (selection.device.deviceType === "roku") {
+                    pendingRokuMediaDeviceId = selection.device.id;
+                    deviceManager.beginRokuMediaLoad(selection.device.id);
+                }
+
                 instance.contentPort.postMessage({
                     subject: "cast:receiverAction",
                     data: {
@@ -863,7 +1114,20 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
 
                 logger.info("Creating Cast session", {
                     deviceId: selection.device.id,
-                    appId: sessionRequest.appId
+                    appId: sessionRequest.appId,
+                    deviceType: selection.device.deviceType,
+                    preCreatePlayerState:
+                        deviceManager.getDeviceById(selection.device.id)
+                            ?.mediaStatus?.playerState,
+                    preCreateCurrentTime:
+                        deviceManager.getDeviceById(selection.device.id)
+                            ?.mediaStatus?.currentTime,
+                    preCreateMediaSessionId:
+                        deviceManager.getDeviceById(selection.device.id)
+                            ?.mediaStatus?.mediaSessionId,
+                    preCreateContentId:
+                        deviceManager.getDeviceById(selection.device.id)
+                            ?.mediaStatus?.media?.contentId
                 });
                 const session = await createCastSession({
                     instance,
@@ -883,6 +1147,11 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                     }
                 });
             } catch (err) {
+                if (pendingRokuMediaDeviceId) {
+                    deviceManager.cancelRokuMediaLoad(
+                        pendingRokuMediaDeviceId
+                    );
+                }
                 logger.error("Session request failed in cast manager", err);
                 instance.contentPort.postMessage({
                     subject: "cast:sessionRequestCancelled"
@@ -1124,19 +1393,17 @@ async function getReceiverSelection(selectionOpts: {
 
     let appInfo: Optional<ReceiverSelectorAppInfo>;
     if (selectionOpts.castInstance?.apiConfig) {
-        if (!baseConfig) {
-            try {
-                ({ baseConfig } = await baseConfigStorage.get("baseConfig"));
-            } catch (err) {
-                throw logger.error("Failed to get Chromecast base config!");
-            }
-        }
+        // CCTV/Bilibili page senders do not use app_tags. Avoid both storage
+        // loading and the external baseconfig request for those click flows.
+        const config = skipsChromecastBaseConfig(pageInfo?.url)
+            ? undefined
+            : await loadChromecastBaseConfig();
 
         appInfo = {
             sessionRequest: selectionOpts.castInstance.apiConfig.sessionRequest,
             isRequestAppAudioCompatible: getAppTag(
-                baseConfig,
-                selectionOpts.castInstance.apiConfig?.sessionRequest.appId
+                config,
+                selectionOpts.castInstance.apiConfig.sessionRequest.appId
             )?.supports_audio_only
         };
 

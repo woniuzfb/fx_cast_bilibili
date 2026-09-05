@@ -100,7 +100,8 @@ export type SenderMessage =
     | (ReqBase & { type: "STOP"; sessionId?: string })
     | (ReqBase & { type: "GET_STATUS" })
     | (ReqBase & { type: "GET_APP_AVAILABILITY"; appId: string[] })
-    | (ReqBase & { type: "SET_VOLUME"; volume: Partial<Volume> });
+    | (ReqBase & { type: "SET_VOLUME"; volume: Partial<Volume> })
+    | (ReqBase & { type: "VOLUME_UP" | "VOLUME_DOWN" });
 
 export type ReceiverMessage =
     | (ReqBase & { type: "RECEIVER_STATUS"; status: ReceiverStatus })

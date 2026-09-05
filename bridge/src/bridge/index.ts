@@ -4,6 +4,10 @@ import { handleCastMessage } from "./components/cast";
 import CastDeviceBrowser from "./components/cast/deviceBrowser";
 import Remote from "./components/cast/remote";
 
+import { handleRokuMessage, handleRokuSessionMessage } from "./components/roku";
+import RokuDeviceBrowser from "./components/roku/deviceBrowser";
+import RokuRemote from "./components/roku/remote";
+
 import {
     mediaServerRequestId,
     startMediaServer,
@@ -15,6 +19,9 @@ import { applicationVersion } from "../../config.json";
 
 let deviceBrowser: CastDeviceBrowser | null = null;
 const remotes = new Map<string, Remote>();
+/** Roku devices discovered alongside cast devices; keyed by device ID. */
+let rokuDeviceBrowser: RokuDeviceBrowser | null = null;
+const rokuRemotes = new Map<string, RokuRemote>();
 let shutdownPromise: Promise<void> | undefined;
 let mediaServerCommandQueue: Promise<void> = Promise.resolve();
 
@@ -43,8 +50,12 @@ function shutdown(exitCode: number) {
     shutdownPromise = (async () => {
         deviceBrowser?.stop();
         deviceBrowser = null;
+        rokuDeviceBrowser?.stop();
+        rokuDeviceBrowser = null;
         for (const remote of remotes.values()) remote.disconnect();
         remotes.clear();
+        for (const remote of rokuRemotes.values()) remote.disconnect();
+        rokuRemotes.clear();
         try {
             await stopMediaServer();
         } catch (err) {
@@ -162,11 +173,90 @@ export function run(messaging: Messenger) {
                 });
 
                 deviceBrowser.start();
+
+                // Roku discovery runs in parallel; devices surface through
+                // the same main:deviceUp/main:deviceDown messages with
+                // deviceType: "roku" so the extension treats them uniformly.
+                rokuDeviceBrowser = new RokuDeviceBrowser();
+
+                rokuDeviceBrowser.on("deviceUp", device => {
+                    messaging.sendMessage({
+                        subject: "main:deviceUp",
+                        data: {
+                            deviceId: device.id,
+                            deviceInfo: device
+                        }
+                    });
+
+                    if (shouldWatchStatus) {
+                        rokuRemotes.set(
+                            device.id,
+                            new RokuRemote(device, {
+                                onReceiverStatusUpdate(status) {
+                                    messaging.sendMessage({
+                                        subject:
+                                            "main:receiverDeviceStatusUpdated",
+                                        data: {
+                                            deviceId: device.id,
+                                            status
+                                        }
+                                    });
+                                },
+                                onMediaStatusUpdate(status) {
+                                    if (!status) return;
+                                    messaging.sendMessage({
+                                        subject:
+                                            "main:receiverDeviceMediaStatusUpdated",
+                                        data: {
+                                            deviceId: device.id,
+                                            status
+                                        }
+                                    });
+                                },
+                                // Flattened buildStatusMedia snapshot: the
+                                // nested MediaInformation/customData would
+                                // otherwise collapse as `{…}` in the Firefox
+                                // background console preview.
+                                onStatusMediaDebug(debug) {
+                                    messaging.sendMessage({
+                                        subject: "main:rokuStatusMediaDebug",
+                                        data: debug
+                                    });
+                                }
+                            })
+                        );
+                    }
+                });
+
+                rokuDeviceBrowser.on("deviceDown", deviceId => {
+                    messaging.sendMessage({
+                        subject: "main:deviceDown",
+                        data: { deviceId }
+                    });
+
+                    if (shouldWatchStatus) {
+                        if (rokuRemotes.has(deviceId)) {
+                            rokuRemotes.get(deviceId)?.disconnect();
+                            rokuRemotes.delete(deviceId);
+                        }
+                    }
+                });
+
+                rokuDeviceBrowser.start();
                 break;
             }
 
             case "bridge:sendReceiverMessage": {
                 const { deviceId, message: receiverMessage } = message.data;
+
+                // Roku devices route their NS_RECEIVER translations through
+                // the ECP-backed remote.
+                const rokuRemote = rokuRemotes.get(deviceId);
+                if (rokuRemote) {
+                    rokuRemote.sendReceiverMessage(receiverMessage);
+                    break;
+                }
+
                 try {
                     remotes.get(deviceId)?.sendReceiverMessage(receiverMessage);
                 } catch (err) {
@@ -185,6 +275,13 @@ export function run(messaging: Messenger) {
             }
             case "bridge:sendMediaMessage": {
                 const { deviceId, message: mediaMessage } = message.data;
+
+                const rokuRemote = rokuRemotes.get(deviceId);
+                if (rokuRemote) {
+                    rokuRemote.sendMediaMessage(mediaMessage);
+                    break;
+                }
+
                 try {
                     remotes.get(deviceId)?.sendMediaMessage(mediaMessage);
                 } catch (err) {
@@ -202,6 +299,13 @@ export function run(messaging: Messenger) {
             }
 
             case "bridge:createCastSession": {
+                // Roku targets never speak the castv2 protocol; the Roku
+                // components emulate the session surface over ECP instead.
+                if (message.data.receiverDevice.deviceType === "roku") {
+                    handleRokuMessage(messaging, message);
+                    break;
+                }
+
                 // Heal the device's status watcher before creating the
                 // session: after long idle periods (system sleep, dropped
                 // idle TCP) the platform connection can be dead, which
@@ -210,6 +314,16 @@ export function run(messaging: Messenger) {
                 remotes.get(message.data.receiverDevice.id)?.ensureConnected();
 
                 handleCastMessage(messaging, message, sessionHeartbeatStaleMs);
+                break;
+            }
+
+            case "bridge:stopCastSession": {
+                if (message.data.receiverDevice.deviceType === "roku") {
+                    handleRokuMessage(messaging, message);
+                    break;
+                }
+
+                handleCastMessage(messaging, message);
                 break;
             }
 
@@ -231,6 +345,7 @@ export function run(messaging: Messenger) {
                     port,
                     startTime,
                     hlsLive,
+                    rokuDashPrebuffer,
                     cctvDebugEnabled,
                     userAgent
                 } = message.data;
@@ -256,7 +371,8 @@ export function run(messaging: Messenger) {
                         startTime,
                         hlsLive,
                         userAgent,
-                        cctvDebugEnabled
+                        cctvDebugEnabled,
+                        rokuDashPrebuffer
                     )
                 );
                 break;
@@ -277,7 +393,11 @@ export function run(messaging: Messenger) {
             }
 
             default: {
-                handleCastMessage(messaging, message);
+                // Session-scoped messages for emulated Roku sessions are
+                // routed first; castv2 sessions are the fallback.
+                if (!handleRokuSessionMessage(messaging, message)) {
+                    handleCastMessage(messaging, message);
+                }
             }
         }
     });

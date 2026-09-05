@@ -521,9 +521,12 @@
 >
     <img
         class="receiver__icon"
-        src="icons/{device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT
-            ? 'device-video.svg'
-            : 'device-audio.svg'}"
+        src={device.deviceType === "roku"
+            ? "icons/device-roku.svg"
+            : `icons/${device.capabilities &
+              ReceiverDeviceCapabilities.VIDEO_OUT
+                ? "device-video.svg"
+                : "device-audio.svg"}`}
         alt=""
         height="24"
         width="24"
@@ -620,6 +623,10 @@
                 on:trackChanged={ev =>
                     handleMediaTrackChange(ev.detail.activeTrackIds)}
                 on:volumeChanged={ev => handleVolumeChange(ev.detail)}
+                on:volumeDown={() =>
+                    sendReceiverMessage({ type: "VOLUME_DOWN" })}
+                on:volumeUp={() =>
+                    sendReceiverMessage({ type: "VOLUME_UP" })}
             />
         </div>
     {/if}

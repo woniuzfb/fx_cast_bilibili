@@ -25,7 +25,7 @@ export interface SenderApplication {
     url: Nullable<string>;
 }
 
-enum VolumeControlType {
+export enum VolumeControlType {
     ATTENUATION = "attenuation",
     FIXED = "fixed",
     MASTER = "master"
@@ -40,7 +40,7 @@ export interface Volume {
 
 // Media
 
-enum IdleReason {
+export enum IdleReason {
     CANCELLED = "CANCELLED",
     INTERRUPTED = "INTERRUPTED",
     FINISHED = "FINISHED",
@@ -71,14 +71,14 @@ enum MetadataType {
     AUDIOBOOK_CHAPTER
 }
 
-enum PlayerState {
+export enum PlayerState {
     IDLE = "IDLE",
     PLAYING = "PLAYING",
     PAUSED = "PAUSED",
     BUFFERING = "BUFFERING"
 }
 
-enum RepeatMode {
+export enum RepeatMode {
     OFF = "REPEAT_OFF",
     ALL = "REPEAT_ALL",
     SINGLE = "REPEAT_SINGLE",
@@ -176,7 +176,7 @@ type Metadata =
     | PhotoMediaMetadata
     | TvShowMediaMetadata;
 
-interface MediaInformation {
+export interface MediaInformation {
     atvEntity?: string;
     breakClips?: BreakClip[];
     breaks?: Break[];
@@ -336,7 +336,8 @@ export type SenderMessage =
     | (ReqBase & { type: "STOP"; sessionId: string })
     | (ReqBase & { type: "GET_STATUS" })
     | (ReqBase & { type: "GET_APP_AVAILABILITY"; appId: string[] })
-    | (ReqBase & { type: "SET_VOLUME"; volume: Volume });
+    | (ReqBase & { type: "SET_VOLUME"; volume: Volume })
+    | (ReqBase & { type: "VOLUME_UP" | "VOLUME_DOWN" });
 
 export type ReceiverMessage =
     | (ReqBase & { type: "RECEIVER_STATUS"; status: ReceiverStatus })

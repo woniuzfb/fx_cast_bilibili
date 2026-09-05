@@ -22,6 +22,34 @@ let dashServerGeneration = 0;
 const dashAuxProcesses = new Set<ChildProcess>();
 
 /**
+ * Observers notified on EVERY request reaching the live HLS relay (any path,
+ * including playlist/segment/capture traffic). Purely observational
+ * instrumentation for Roku session emulation (roku/session.ts uses it to learn
+ * when the device has begun consuming a freshly launched relay URL): observers
+ * can never block, alter, or gate serving, and no other relay behavior reads
+ * them. Chromecast paths are unaffected.
+ */
+export interface LiveRelayClientRequestInfo {
+    /** Normalized client host (IPv6-mapped prefix stripped). */
+    clientHost: string;
+    /** Request path, e.g. "/index.m3u8" or "/seg". */
+    path: string;
+    /** True only for the Roku-marked live playlist request. */
+    isRokuPlaylist: boolean;
+    relaySessionId?: string;
+}
+type LiveRelayClientObserver = (info: LiveRelayClientRequestInfo) => void;
+const liveRelayClientObservers = new Set<LiveRelayClientObserver>();
+export function observeLiveRelayClientRequests(
+    observer: LiveRelayClientObserver
+): () => void {
+    liveRelayClientObservers.add(observer);
+    return () => {
+        liveRelayClientObservers.delete(observer);
+    };
+}
+
+/**
  * Live-relay continuation state: the seed playlist URL and the highest
  * upstream sequence whose bytes were successfully served to the receiver.
  * This follows slot remaps and concatenated ranges, so recovery resumes after
@@ -42,6 +70,9 @@ let liveRelayContinuation:
           bootstrapThroughSequence?: number;
           /** Last wall-clock ms a relay under this seed served a segment. */
           lastServedAtMs?: number;
+          /** Roku reads every segment advertised by its sliding playlist, so its
+           * furthest HTTP request is not a playback-position continuation cursor. */
+          receiverMode?: "roku" | "cast";
       }
     | undefined;
 
@@ -330,7 +361,8 @@ async function startDashRemuxServer(
     audioUrl: string,
     referer: string,
     port: number,
-    startTime = 0
+    startTime = 0,
+    rokuDashPrebuffer = false
 ) {
     if (!remoteHostAllowed(videoUrl) || !remoteHostAllowed(audioUrl)) {
         messaging.sendMessage({
@@ -377,9 +409,138 @@ async function startDashRemuxServer(
     // full source duration used when the page media element has no duration yet.
     let keyframeResolved = false;
     let probedDuration: number | undefined;
-    const rewritePlaylist = (raw: string) => {
-        const padCount = Math.floor(padBaseSeconds / padSegmentSeconds);
-        const padRemainder = padBaseSeconds - padCount * padSegmentSeconds;
+
+    // Roku-only DASH presentation. Chromecast never sets rokuDashPrebuffer, so
+    // its EVENT playlist and streaming-file serving stay unchanged.
+    //
+    // Previous attempts that still jittered:
+    //   1. In-memory prebuffer via readFile — ffmpeg writes the final filename
+    //      while the segment is open, so readFile cached a truncated TS.
+    //   2. Windowing by "highest segment Roku requested" — Media Assistant
+    //      prefetches every advertised URI, so the window raced to the ffmpeg
+    //      write frontier in a few playlist reloads.
+    // This path instead: temp_file so a named .ts is already closed, refuse to
+    // list/serve a segment until the next file exists (or ENDLIST), and drip
+    // the EVENT prefix at 1x wall clock from the first Roku playlist fetch.
+    const ROKU_DASH_PREBUFFER_SEGMENTS = 12;
+    const ROKU_DASH_SEGMENT_SECONDS = 4;
+    const ROKU_DASH_CACHE_KEEP = 16;
+    const rokuDashSegmentCache = new Map<number, Buffer>();
+    let rokuDashWindowStartedAt = 0;
+
+    const dashSegmentPath = (index: number) =>
+        path.join(tempDir, `segment-${String(index).padStart(6, "0")}.ts`);
+
+    const dashPathExists = (filePath: string) => {
+        try {
+            return fs.statSync(filePath).isFile();
+        } catch {
+            return false;
+        }
+    };
+
+    const listedDashSegmentIndexes = (rawPlaylist: string): number[] =>
+        [...rawPlaylist.matchAll(/^segment-(\d+)\.ts$/gm)].map(match =>
+            Number(match[1])
+        );
+
+    const isDashSegmentComplete = (index: number, rawPlaylist: string) => {
+        if (!dashPathExists(dashSegmentPath(index))) return false;
+        if (rawPlaylist.includes("#EXT-X-ENDLIST")) return true;
+        // ffmpeg has opened/renamed the next segment, so this one is closed.
+        return dashPathExists(dashSegmentPath(index + 1));
+    };
+
+    const highestCompleteDashSegment = (rawPlaylist: string): number => {
+        let highest = -1;
+        for (const index of listedDashSegmentIndexes(rawPlaylist)) {
+            if (!isDashSegmentComplete(index, rawPlaylist)) break;
+            highest = index;
+        }
+        return highest;
+    };
+
+    const readCompleteDashSegment = async (index: number): Promise<Buffer> => {
+        const cached = rokuDashSegmentCache.get(index);
+        if (cached) return cached;
+        const body = await fs.promises.readFile(dashSegmentPath(index));
+        rokuDashSegmentCache.set(index, body);
+        const keepFrom = Math.max(0, index - ROKU_DASH_CACHE_KEEP);
+        for (const key of rokuDashSegmentCache.keys()) {
+            if (key < keepFrom) rokuDashSegmentCache.delete(key);
+        }
+        return body;
+    };
+
+    const prebufferRokuDashRange = async (first: number, count: number) => {
+        for (let offset = 0; offset < count; offset++) {
+            await readCompleteDashSegment(first + offset);
+        }
+    };
+
+    const rokuVisibleThrough = (
+        completeHighest: number,
+        endList: boolean
+    ): number => {
+        if (completeHighest < 0) return -1;
+        if (endList) return completeHighest;
+        if (rokuDashWindowStartedAt === 0) {
+            return Math.min(completeHighest, ROKU_DASH_PREBUFFER_SEGMENTS - 1);
+        }
+        const elapsedSec = (Date.now() - rokuDashWindowStartedAt) / 1000;
+        const dripThrough =
+            ROKU_DASH_PREBUFFER_SEGMENTS -
+            1 +
+            Math.floor(elapsedSec / ROKU_DASH_SEGMENT_SECONDS);
+        return Math.min(completeHighest, dripThrough);
+    };
+
+    const limitRokuDashPlaylist = (
+        playlist: string,
+        visibleThrough: number,
+        allowEndList: boolean
+    ) => {
+        const lines = playlist.split("\n");
+        const out: string[] = [];
+        let pendingExtinf: string | undefined;
+        let truncated = false;
+        for (const line of lines) {
+            if (line.startsWith("#EXTINF:")) {
+                pendingExtinf = line;
+                continue;
+            }
+            const match = /^segment-(\d+)\.ts(?:\?.*)?$/.exec(line);
+            if (match) {
+                const index = Number(match[1]);
+                if (index <= visibleThrough) {
+                    if (pendingExtinf !== undefined) out.push(pendingExtinf);
+                    out.push(line);
+                } else {
+                    truncated = true;
+                }
+                pendingExtinf = undefined;
+                continue;
+            }
+            if (pendingExtinf !== undefined) {
+                out.push(pendingExtinf);
+                pendingExtinf = undefined;
+            }
+            if (line === "#EXT-X-ENDLIST" && (truncated || !allowEndList)) {
+                continue;
+            }
+            if (line === "#EXT-X-INDEPENDENT-SEGMENTS") continue;
+            out.push(line);
+        }
+        return out.join("\n");
+    };
+
+    const rewritePlaylist = (raw: string, omitPadding = false) => {
+        const padCount = omitPadding
+            ? 0
+            : Math.floor(padBaseSeconds / padSegmentSeconds);
+        const padRemainder = omitPadding
+            ? 0
+            : padBaseSeconds - padCount * padSegmentSeconds;
         let padsInserted = padCount <= 0 && padRemainder <= 0.05;
         return raw
             .split("\n")
@@ -418,6 +579,7 @@ async function startDashRemuxServer(
         "-hide_banner",
         "-loglevel",
         "warning",
+        ...(rokuDashPrebuffer ? ["-fflags", "+genpts"] : []),
         ...networkTimeoutArgs,
         "-headers",
         inputHeaders,
@@ -436,6 +598,16 @@ async function startDashRemuxServer(
         "1:a:0",
         "-c",
         "copy",
+        ...(rokuDashPrebuffer
+            ? [
+                  "-avoid_negative_ts",
+                  "make_zero",
+                  "-muxdelay",
+                  "0",
+                  "-muxpreload",
+                  "0"
+              ]
+            : []),
         // Default Media Receiver accepts traditional MPEG-TS HLS more reliably
         // than fragmented MP4 HLS on older Chromecast generations.
         "-f",
@@ -449,7 +621,13 @@ async function startDashRemuxServer(
         "-hls_segment_type",
         "mpegts",
         "-hls_flags",
-        "independent_segments",
+        rokuDashPrebuffer
+            ? // temp_file: the public filename is only created after the
+              // segment is closed. Do not advertise independent_segments —
+              // copy-mode Bilibili GOPs are often open, and that tag makes
+              // Roku reset the decoder at every segment boundary.
+              "temp_file"
+            : "independent_segments",
         "-hls_segment_filename",
         path.join(tempDir, "segment-%06d.ts"),
         playlistPath
@@ -612,7 +790,26 @@ async function startDashRemuxServer(
     dashRemuxProcess = remuxProcess;
     let stderr = "";
     remuxProcess.stderr?.on("data", chunk => {
-        stderr = (stderr + String(chunk)).slice(-8000);
+        const text = String(chunk);
+        stderr = (stderr + text).slice(-8000);
+        const progress = text
+            .split(/\r?\n|\r/)
+            .filter(line =>
+                /(?:frame=|fps=|speed=|drop=|error|failed|non-monoton)/i.test(
+                    line
+                )
+            )
+            .slice(-3);
+        if (progress.length) {
+            messaging.sendMessage({
+                subject: "main:dashRemuxDebug",
+                data: {
+                    event: "ffmpeg",
+                    requestId,
+                    details: JSON.stringify({ progress })
+                }
+            });
+        }
     });
     remuxProcess.on("error", err => {
         if (dashRemuxProcess !== remuxProcess) return;
@@ -639,7 +836,30 @@ async function startDashRemuxServer(
         }
     });
     const server = http.createServer(async (req, res) => {
-        const pathname = decodeURIComponent((req.url ?? "/").split("?", 1)[0]);
+        const requestStartedAt = Date.now();
+        const requestUrl = req.url ?? "/";
+        const clientHost = (req.socket.remoteAddress ?? "").replace(
+            /^::ffff:/,
+            ""
+        );
+        res.on("finish", () => {
+            messaging.sendMessage({
+                subject: "main:dashRemuxDebug",
+                data: {
+                    event: "response",
+                    requestId,
+                    details: JSON.stringify({
+                        method: req.method,
+                        path: requestUrl,
+                        clientHost,
+                        status: res.statusCode,
+                        elapsedMs: Date.now() - requestStartedAt,
+                        contentLength: res.getHeader("Content-Length")
+                    })
+                }
+            });
+        });
+        const pathname = decodeURIComponent(requestUrl.split("?", 1)[0]);
         const filename = path.basename(pathname);
         if (!filename || filename !== pathname.slice(1)) {
             res.writeHead(404).end();
@@ -654,7 +874,58 @@ async function startDashRemuxServer(
                     path.join(tempDir, filename),
                     "utf8"
                 );
-                const body = rewritePlaylist(raw);
+                const omitPadding =
+                    new URL(requestUrl, "http://localhost").searchParams.get(
+                        "fxcastNoPad"
+                    ) === "1";
+                const rewritten = rewritePlaylist(raw, omitPadding);
+                let body = rewritten;
+                let rokuWindowed = false;
+                let rokuVisible = -1;
+                let rokuCompleteHighest = -1;
+                if (rokuDashPrebuffer) {
+                    if (!rokuDashWindowStartedAt) {
+                        rokuDashWindowStartedAt = Date.now();
+                    }
+                    rokuCompleteHighest = highestCompleteDashSegment(raw);
+                    const endList = raw.includes("#EXT-X-ENDLIST");
+                    rokuVisible = rokuVisibleThrough(
+                        rokuCompleteHighest,
+                        endList
+                    );
+                    const allowEndList =
+                        endList &&
+                        rokuVisible >= 0 &&
+                        rokuVisible === rokuCompleteHighest;
+                    body = limitRokuDashPlaylist(
+                        rewritten,
+                        rokuVisible,
+                        allowEndList
+                    );
+                    rokuWindowed = true;
+                }
+                const segmentNames = [
+                    ...body.matchAll(/(?:pad|segment-[^\s?]+)\.ts/g)
+                ].map(match => match[0]);
+                messaging.sendMessage({
+                    subject: "main:dashRemuxDebug",
+                    data: {
+                        event: "playlist",
+                        requestId,
+                        details: JSON.stringify({
+                            clientHost,
+                            bytes: Buffer.byteLength(body),
+                            segmentCount: segmentNames.length,
+                            firstSegment: segmentNames[0],
+                            lastSegment: segmentNames.at(-1),
+                            endList: body.includes("#EXT-X-ENDLIST"),
+                            rokuWindowed,
+                            rokuVisibleThrough: rokuVisible,
+                            rokuCompleteHighest,
+                            rokuCacheEntries: rokuDashSegmentCache.size
+                        })
+                    }
+                });
                 res.writeHead(200, {
                     "Access-Control-Allow-Origin": "*",
                     "Cache-Control": "no-store",
@@ -667,6 +938,7 @@ async function startDashRemuxServer(
             }
             return;
         }
+        const rokuDashSegmentMatch = /^segment-(\d+)\.ts$/.exec(filename);
         const filePath = path.join(tempDir, filename);
         try {
             if (filename === "pad.ts" && padReady) {
@@ -683,17 +955,89 @@ async function startDashRemuxServer(
                     return;
                 }
             }
-            const stat = await fs.promises.stat(filePath);
+            let bufferedBody: Buffer | undefined;
+            let rokuCacheHit = false;
+            if (rokuDashPrebuffer && rokuDashSegmentMatch) {
+                const segmentIndex = Number(rokuDashSegmentMatch[1]);
+                const rawPlaylist = await fs.promises
+                    .readFile(playlistPath, "utf8")
+                    .catch(() => "");
+                if (!isDashSegmentComplete(segmentIndex, rawPlaylist)) {
+                    res.writeHead(503, {
+                        "Access-Control-Allow-Origin": "*",
+                        "Cache-Control": "no-store",
+                        "Retry-After": "1"
+                    }).end();
+                    return;
+                }
+                bufferedBody = rokuDashSegmentCache.get(segmentIndex);
+                rokuCacheHit = bufferedBody !== undefined;
+                if (!bufferedBody) {
+                    bufferedBody = await readCompleteDashSegment(segmentIndex);
+                }
+            }
+            const stat = bufferedBody
+                ? { size: bufferedBody.length, mtimeMs: Date.now() }
+                : await fs.promises.stat(filePath);
             const type = filename.endsWith(".ts")
                 ? "video/mp2t"
                 : "application/octet-stream";
+            if (filename.endsWith(".ts")) {
+                messaging.sendMessage({
+                    subject: "main:dashRemuxDebug",
+                    data: {
+                        event: "segment",
+                        requestId,
+                        details: JSON.stringify({
+                            clientHost,
+                            filename,
+                            bytes: stat.size,
+                            modifiedAtMs: stat.mtimeMs,
+                            ageMs: Date.now() - stat.mtimeMs,
+                            rokuBuffered: bufferedBody !== undefined,
+                            rokuCacheHit,
+                            rokuCacheEntries: rokuDashSegmentCache.size
+                        })
+                    }
+                });
+            }
+            const range = req.headers.range;
+            if (bufferedBody && range) {
+                const bounds = range.substring(6).split("-");
+                const start = Number.parseInt(bounds[0] ?? "", 10);
+                const end = bounds[1]
+                    ? Number.parseInt(bounds[1], 10)
+                    : bufferedBody.length - 1;
+                if (
+                    Number.isFinite(start) &&
+                    Number.isFinite(end) &&
+                    start >= 0 &&
+                    end >= start &&
+                    end < bufferedBody.length
+                ) {
+                    const slice = bufferedBody.subarray(start, end + 1);
+                    res.writeHead(206, {
+                        "Access-Control-Allow-Origin": "*",
+                        "Accept-Ranges": "bytes",
+                        "Content-Range": `bytes ${start}-${end}/${bufferedBody.length}`,
+                        "Cache-Control": "no-cache",
+                        "Content-Type": type,
+                        "Content-Length": slice.length
+                    });
+                    if (req.method === "HEAD") res.end();
+                    else res.end(slice);
+                    return;
+                }
+            }
             res.writeHead(200, {
                 "Access-Control-Allow-Origin": "*",
+                ...(bufferedBody ? { "Accept-Ranges": "bytes" } : {}),
                 "Cache-Control": "no-cache",
                 "Content-Type": type,
                 "Content-Length": stat.size
             });
             if (req.method === "HEAD") res.end();
+            else if (bufferedBody) res.end(bufferedBody);
             else fs.createReadStream(filePath).pipe(res);
         } catch {
             res.writeHead(404).end();
@@ -765,6 +1109,32 @@ async function startDashRemuxServer(
                     (playlistDuration >= minimumPlaylistDuration ||
                         playlist.includes("#EXT-X-ENDLIST"))
                 ) {
+                    const endList = playlist.includes("#EXT-X-ENDLIST");
+                    const completeHighest =
+                        highestCompleteDashSegment(playlist);
+                    const completeCount = completeHighest + 1;
+                    const startupCount = Math.min(
+                        completeCount,
+                        ROKU_DASH_PREBUFFER_SEGMENTS
+                    );
+                    if (
+                        rokuDashPrebuffer &&
+                        startupCount < ROKU_DASH_PREBUFFER_SEGMENTS &&
+                        !endList
+                    ) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        continue;
+                    }
+                    if (rokuDashPrebuffer && startupCount > 0) {
+                        try {
+                            await prebufferRokuDashRange(0, startupCount);
+                        } catch {
+                            await new Promise(resolve =>
+                                setTimeout(resolve, 100)
+                            );
+                            continue;
+                        }
+                    }
                     messaging.sendMessage({
                         subject: "mediaCast:mediaServerStarted",
                         data: {
@@ -1491,6 +1861,8 @@ function countChangedBytes(before: Buffer, after: Buffer): number {
 
 /** Park/probe cadence while waiting on the page download watermark. */
 const PAGE_WATERMARK_POLL_INTERVAL_MS = 2000;
+/** Published-history replacement room for corrupt continuation prebuffer segments. */
+const PREBUFFER_HISTORY_REPLACEMENT_SLOTS = 6;
 /**
  * A future segment may return HTTP 200 while the CDN is still appending bytes
  * (cdnFutureMode only). Do not accept it until after its predicted publish
@@ -1689,9 +2061,14 @@ async function startLiveHlsRelayServer(
         previousContinuation.lastConsumedUpstreamSequence !== undefined &&
         (previousContinuation.lastServedAtMs ?? 0) >=
             Date.now() - LIVE_RELAY_CONTINUATION_MAX_AGE_MS;
-    const resumeAfterSequence = continuationAlive
-        ? previousContinuation!.lastConsumedUpstreamSequence
-        : undefined;
+    // Chromecast can continue after the last body served. Roku aggressively
+    // reads ahead through every advertised slot, so that value is a download
+    // frontier, not a playback frontier. Re-bootstrap Roku from the current
+    // upstream anchor's full historical lookback instead.
+    const resumeAfterSequence =
+        continuationAlive && previousContinuation!.receiverMode !== "roku"
+            ? previousContinuation!.lastConsumedUpstreamSequence
+            : undefined;
     // Computed here (not at its later first use) because the near-edge resume
     // rewind below depends on it: only cdnFutureMode relays poll the CDN for
     // unpublished future segments, and that polling is exactly what stalls a
@@ -1742,10 +2119,9 @@ async function startLiveHlsRelayServer(
     //
     // Rather than discarding the continuation and rebuilding the whole ~120s
     // historical window (which replays far more already-seen content than
-    // needed), rewind the resume point by EXACTLY the prebuffer deficit: move it
-    // back to anchor - prebufferNeed so the prebuffer sits entirely on published
-    // segments (fills from the CDN immediately, no future polling) while
-    // replaying the minimum number of segments. This stays a continuation — the
+    // needed), rewind by the prebuffer deficit plus a small bounded replacement
+    // cushion. Corrupt published segments can then be skipped while replacements
+    // still come from mature history rather than crossing the live edge. This stays a continuation — the
     // page-capture cache, supply boundary and continuation freshness are all
     // preserved; only the resume cursor slides back a few segments.
     if (
@@ -1760,14 +2136,16 @@ async function startLiveHlsRelayServer(
         );
         // Already-published segments available after the resume point.
         const publishedHistory = dvr.anchorSequence - dvr.firstSequence + 1;
-        if (publishedHistory < prebufferNeed) {
-            // Slide the resume cursor back just enough that prebufferNeed published
-            // segments precede the live edge. This is strictly a rewind: since
-            // publishedHistory < prebufferNeed we have
-            // anchor - prebufferNeed < resumeAfter, so it never advances. And
-            // prebufferNeed (60s) <= the historical window (120s), so the rewound
-            // point stays within the lookback a fresh cast would use.
-            const rewoundResumeAfter = dvr.anchorSequence - prebufferNeed;
+        if (
+            publishedHistory <
+            prebufferNeed + PREBUFFER_HISTORY_REPLACEMENT_SLOTS
+        ) {
+            // Reserve several extra mature segments before the requested runway.
+            // The normal forward-only discard mapping can then replace corrupt
+            // entries without touching anchor+1 or waiting for future publication.
+            const historyReplacementSlots = PREBUFFER_HISTORY_REPLACEMENT_SLOTS;
+            const rewoundResumeAfter =
+                dvr.anchorSequence - prebufferNeed - historyReplacementSlots;
             const rewound = buildDvr(rewoundResumeAfter);
             if (rewound) {
                 relayLog(
@@ -1780,6 +2158,7 @@ async function startLiveHlsRelayServer(
                         anchorSequence: dvr.anchorSequence,
                         publishedHistoryBefore: publishedHistory,
                         prebufferNeed,
+                        historyReplacementSlots,
                         stepSeconds: dvr.stepSeconds
                     }
                 );
@@ -1839,6 +2218,9 @@ async function startLiveHlsRelayServer(
         bootstrapThroughSequence,
         lastServedAtMs: continuationAlive
             ? previousContinuation!.lastServedAtMs
+            : undefined,
+        receiverMode: continuationAlive
+            ? previousContinuation!.receiverMode
             : undefined
     };
 
@@ -2984,6 +3366,56 @@ async function startLiveHlsRelayServer(
     // the playlist is finalized and relayReady flips.
     let relayReady = false;
 
+    /**
+     * Roku's Media Assistant aggressively reads a finite VOD playlist to its
+     * end. Give Roku a real sliding live view containing only pipeline slots
+     * that are already committed. Manifest reads are observational: this
+     * function never calls ensureSlot and therefore cannot move the supply
+     * frontier or bypass page-capture admission.
+     */
+    const buildRokuLivePlaylist = (): string | undefined => {
+        const maxWindowSlots = Math.max(
+            1,
+            Math.round(HISTORICAL_PLAYLIST_SECONDS / plan.stepSeconds)
+        );
+        let end = slots.length - 1;
+        while (end >= 0 && !slots[end]?.body) end--;
+        if (end < 0) return undefined;
+
+        let start = end;
+        while (
+            start > 0 &&
+            end - start + 1 < maxWindowSlots &&
+            slots[start - 1]?.body
+        ) {
+            start--;
+        }
+
+        const published = slots.slice(start, end + 1);
+        if (published.some(slot => !slot?.body)) return undefined;
+        const durations = published.map(
+            slot => slot?.durationSeconds ?? plan.stepSeconds
+        );
+        const targetDuration = Math.max(
+            1,
+            Math.ceil(Math.max(...durations, plan.stepSeconds))
+        );
+        const lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            `#EXT-X-TARGETDURATION:${targetDuration}`,
+            `#EXT-X-MEDIA-SEQUENCE:${plan.firstSequence + start}`
+        ];
+        for (let offset = 0; offset < published.length; offset++) {
+            const sequence = plan.firstSequence + start + offset;
+            lines.push(
+                `#EXTINF:${durations[offset]!.toFixed(3)},`,
+                `/seg?u=${encodeRelayUrl(plan.urlOf(sequence))}`
+            );
+        }
+        return `${lines.join("\n")}\n`;
+    };
+
     const server = http.createServer(async (req, res) => {
         let reqUrl: URL;
         try {
@@ -2992,6 +3424,38 @@ async function startLiveHlsRelayServer(
             res.writeHead(400).end();
             return;
         }
+
+        // Roku instrumentation (see observeLiveRelayClientRequests): fire and
+        // forget — observer errors must never affect serving.
+        const clientHost = (req.socket.remoteAddress ?? "").replace(
+            /^::ffff:/i,
+            ""
+        );
+        if (liveRelayClientObservers.size > 0) {
+            const relaySessionId =
+                reqUrl.searchParams.get("fxcastSession") ?? undefined;
+            for (const observer of liveRelayClientObservers) {
+                try {
+                    observer({
+                        clientHost,
+                        path: reqUrl.pathname,
+                        isRokuPlaylist:
+                            reqUrl.pathname === `/${LIVE_HLS_ENTRY_PATH}` &&
+                            reqUrl.searchParams.get("fxcastReceiver") ===
+                                "roku",
+                        relaySessionId
+                    });
+                } catch {
+                    /* observational only */
+                }
+            }
+        }
+
+        relayLog("relay request", {
+            method: req.method,
+            path: reqUrl.pathname,
+            clientHost
+        });
 
         if (reqUrl.pathname === "/cctv-page-capture") {
             if (
@@ -3073,17 +3537,46 @@ async function startLiveHlsRelayServer(
         });
 
         if (reqUrl.pathname === `/${LIVE_HLS_ENTRY_PATH}`) {
-            relayLog("synthetic DVR playlist served", {
-                bytes: Buffer.byteLength(servedPlaylist)
-            });
+            const isRoku = reqUrl.searchParams.get("fxcastReceiver") === "roku";
+            if (isRoku && liveRelayContinuation?.seedUrl === playlistUrl) {
+                liveRelayContinuation.receiverMode = "roku";
+            }
+            const playlist = isRoku ? buildRokuLivePlaylist() : servedPlaylist;
+            if (!playlist) {
+                res.writeHead(503, {
+                    "Cache-Control": "no-store",
+                    "Retry-After": "1"
+                });
+                res.end();
+                return;
+            }
+            relayLog(
+                isRoku
+                    ? "Roku sliding live playlist served"
+                    : "synthetic DVR playlist served",
+                {
+                    bytes: Buffer.byteLength(playlist),
+                    ...(isRoku
+                        ? {
+                              mediaSequence:
+                                  /^#EXT-X-MEDIA-SEQUENCE:(\d+)/m.exec(
+                                      playlist
+                                  )?.[1],
+                              segmentCount: (
+                                  playlist.match(/^#EXTINF:/gm) ?? []
+                              ).length
+                          }
+                        : {})
+                }
+            );
             res.writeHead(200, {
                 "Access-Control-Allow-Origin": "*",
                 "Cache-Control": "no-store",
                 "Content-Type": "application/x-mpegURL",
-                "Content-Length": Buffer.byteLength(servedPlaylist)
+                "Content-Length": Buffer.byteLength(playlist)
             });
             if (req.method === "HEAD") res.end();
-            else res.end(servedPlaylist);
+            else res.end(playlist);
             return;
         }
 
@@ -3672,7 +4165,8 @@ export async function startRemoteMediaServer(
     startTime = 0,
     hlsLive = false,
     userAgent?: string,
-    cctvDebugEnabled = false
+    cctvDebugEnabled = false,
+    rokuDashPrebuffer = false
 ) {
     if (hlsLive) {
         await startLiveHlsRelayServer(
@@ -3694,7 +4188,8 @@ export async function startRemoteMediaServer(
             audioUrl,
             referer,
             port,
-            startTime
+            startTime,
+            rokuDashPrebuffer
         );
         return;
     }

@@ -29,6 +29,8 @@
         next: void;
         trackChanged: { activeTrackIds: number[] };
         volumeChanged: Partial<Volume>;
+        volumeUp: void;
+        volumeDown: void;
     }>();
 
     export let status: MediaStatus;
@@ -56,6 +58,8 @@
     $: dashRemuxData = ((): {
         dashRemux?: boolean;
         hlsDvr?: boolean;
+        rokuLiveElapsed?: boolean;
+        optimisticRelayMedia?: boolean;
         pageDuration?: number;
         dashStart?: number;
     } => {
@@ -64,6 +68,8 @@
             ? (customData as {
                   dashRemux?: boolean;
                   hlsDvr?: boolean;
+                  rokuLiveElapsed?: boolean;
+                  optimisticRelayMedia?: boolean;
                   pageDuration?: number;
                   dashStart?: number;
               })
@@ -71,7 +77,14 @@
     })();
     // contentId carries a cache-busting query that changes on every remux
     // restart; strip it so the timeline isn't reset across seeks.
-    $: mediaId = status.media?.contentId?.split("?")[0];
+    // Optimistic Roku media deliberately has an empty contentId. Without an
+    // explicit generation id, updatePopupMediaTimeline treats it as the same
+    // anonymous media that was mounted from Roku's previous ECP status and
+    // retains that old currentTime. Give only the optimistic Roku generation a
+    // stable synthetic id; the real LOAD URL replaces it on consumption.
+    $: mediaId = dashRemuxData.optimisticRelayMedia
+        ? "fxcast:roku-optimistic"
+        : status.media?.contentId?.split("?")[0];
     // The receiver reports duration -1 (live sentinel) once playback of the
     // event playlist starts, and -1 is not nullish, so `??` alone never
     // falls back to pageDuration. Only trust positive durations.
@@ -108,13 +121,23 @@
         if (nextTimeline !== timeline) timeline = nextTimeline;
     }
     $: hasDuration = timeline.duration > 0;
+    $: isRokuLiveElapsed = Boolean(dashRemuxData.rokuLiveElapsed);
+    $: isOptimisticRelayMedia = Boolean(
+        dashRemuxData.optimisticRelayMedia
+    );
     $: isSeekable =
-        (status.supportedMediaCommands & _MediaCommand.SEEK) !== 0 ||
-        Boolean(dashRemuxData.dashRemux);
-    $: isLive = status.media?.streamType === StreamType.LIVE;
+        !isRokuLiveElapsed &&
+        ((status.supportedMediaCommands & _MediaCommand.SEEK) !== 0 ||
+            Boolean(dashRemuxData.dashRemux));
+    $: isLive =
+        status.media?.streamType === StreamType.LIVE || isRokuLiveElapsed;
 
-    // Whether the live receiver status currently backs a usable seek bar.
-    $: liveSeekBarReady = Boolean(status.media) && hasDuration && isSeekable;
+    // Roku CCTV exposes a sliding HLS window, so its popup bar is display-only.
+    // It still uses the finite DVR duration supplied by the sender.
+    $: liveSeekBarReady =
+        Boolean(status.media) &&
+        hasDuration &&
+        (isSeekable || isRokuLiveElapsed);
 
     /**
      * Once the seek bar has been usable this cast session, keep it shown for as
@@ -210,6 +233,7 @@
     // Diagnose seek bar visibility across popup reopens (gated behind the
     // Bilibili debug option by the background popup:debugLog listener).
     let lastSeekBarDebug = "";
+    let lastRokuMediaTrace = "";
     $: if (debugEnabled) {
         const seekBarDebug = JSON.stringify({
             showsSeekBar: showSeekBar,
@@ -229,6 +253,35 @@
                     data: {
                         message: "[ReceiverMedia] seek bar state",
                         data: JSON.parse(seekBarDebug)
+                    }
+                })
+                .catch(() => {});
+        }
+    }
+
+    $: if (debugEnabled && (isRokuLiveElapsed || isOptimisticRelayMedia)) {
+        const trace = JSON.stringify({
+            playerState: status.playerState,
+            currentTimeProp: status.currentTime,
+            mediaSessionId: status.mediaSessionId,
+            contentId: status.media?.contentId,
+            duration: status.media?.duration,
+            optimisticRelayMedia: isOptimisticRelayMedia,
+            timelineMediaId: timeline.mediaId,
+            timelineCurrentTime: timeline.currentTime,
+            timelineUpdatedAt: timeline.updatedAt,
+            estimatedCurrentTime: currentTime,
+            seekBarEverReady,
+            showSeekBar
+        });
+        if (trace !== lastRokuMediaTrace) {
+            lastRokuMediaTrace = trace;
+            void browser.runtime
+                .sendMessage({
+                    subject: "popup:debugLog",
+                    data: {
+                        message: "[ReceiverMedia] Roku media chronology",
+                        data: JSON.parse(trace)
                     }
                 })
                 .catch(() => {});
@@ -302,7 +355,8 @@
     // interval still smooths progress between receiver status reports.
     $: currentTime = estimatePopupMediaTime(
         timeline,
-        status.playerState === PlayerState.PLAYING,
+        status.playerState === PlayerState.PLAYING &&
+            !isOptimisticRelayMedia,
         Date.now()
     );
 
@@ -331,7 +385,8 @@
     function getEstimatedMediaTime() {
         return estimatePopupMediaTime(
             timeline,
-            status.playerState === PlayerState.PLAYING,
+            status.playerState === PlayerState.PLAYING &&
+                !isOptimisticRelayMedia,
             Date.now()
         );
     }
@@ -421,39 +476,58 @@
                     {formatTime(currentTime)}
                 </span>
                 <div class="media__seek-bar-container">
-                    <input
-                        type="range"
-                        class="slider media__seek-bar"
-                        class:slider--indeterminate={showBufferingShimmer}
-                        aria-label={_("popupMediaSeek")}
-                        max={timeline.duration}
-                        value={currentTime}
-                        on:change={ev => {
-                            if (seekHoverPosition) {
-                                ev.preventDefault();
-                                return;
-                            }
-                            seekTo(ev.currentTarget.valueAsNumber);
-                        }}
-                        on:click={() => {
-                            if (seekHoverPosition && timeline.duration) {
-                                seekTo(
+                    {#if isRokuLiveElapsed}
+                        <div
+                            class="slider media__seek-bar media__seek-bar--readonly"
+                            class:slider--indeterminate={showBufferingShimmer}
+                            role="progressbar"
+                            aria-label={_("popupMediaLive")}
+                            aria-valuemin="0"
+                            aria-valuemax={timeline.duration}
+                            aria-valuenow={Math.min(
+                                timeline.duration,
+                                Math.max(0, currentTime)
+                            )}
+                            style:--media-progress={`${Math.min(100, Math.max(0, (currentTime / timeline.duration) * 100))}%`}
+                        >
+                            <div class="media__seek-bar-fill" />
+                        </div>
+                    {:else}
+                        <input
+                            type="range"
+                            class="slider media__seek-bar"
+                            class:slider--indeterminate={showBufferingShimmer}
+                            aria-label={_("popupMediaSeek")}
+                            max={timeline.duration}
+                            value={currentTime}
+                            on:change={ev => {
+                                if (seekHoverPosition) {
+                                    ev.preventDefault();
+                                    return;
+                                }
+                                seekTo(ev.currentTarget.valueAsNumber);
+                            }}
+                            on:click={() => {
+                                if (seekHoverPosition && timeline.duration) {
+                                    seekTo(
+                                        timeline.duration *
+                                            (seekHoverPosition / 100)
+                                    );
+                                }
+                            }}
+                            use:onSeekMouseMove
+                        />
+                        {#if seekHoverPosition}
+                            <div
+                                class="media__seek-tooltip"
+                                style:--seek-hover-position="{seekHoverPosition}%"
+                            >
+                                {formatTime(
                                     timeline.duration *
                                         (seekHoverPosition / 100)
-                                );
-                            }
-                        }}
-                        use:onSeekMouseMove
-                    />
-                    {#if seekHoverPosition}
-                        <div
-                            class="media__seek-tooltip"
-                            style:--seek-hover-position="{seekHoverPosition}%"
-                        >
-                            {formatTime(
-                                timeline.duration * (seekHoverPosition / 100)
-                            )}
-                        </div>
+                                )}
+                            </div>
+                        {/if}
                     {/if}
                 </div>
                 <span class="media__remaining-time">
@@ -552,12 +626,6 @@
                 </select>
             {/if}
 
-            {#if isLive && !isSeekable}
-                <span class="media__live">
-                    {_("popupMediaLive")}
-                </span>
-            {/if}
-
             {#if device.status?.volume}
                 {@const volume = device.status?.volume}
                 {@const isMuted = volume.muted || volume.level === 0}
@@ -586,20 +654,37 @@
                             }
                         }}
                     />
-                    <input
-                        type="range"
-                        class="slider media__volume-slider"
-                        aria-label={_("popupMediaVolume")}
-                        disabled={!("level" in volume)}
-                        step="0.05"
-                        max={1}
-                        value={volume.muted ? 0 : volume.level}
-                        on:change={ev => {
-                            dispatch("volumeChanged", {
-                                level: ev.currentTarget.valueAsNumber
-                            });
-                        }}
-                    />
+                    {#if device.deviceType === "roku"}
+                        <button
+                            type="button"
+                            class="media__relative-volume-button"
+                            aria-label={`${_("popupMediaVolume")} -`}
+                            title={`${_("popupMediaVolume")} -`}
+                            on:click={() => dispatch("volumeDown")}
+                        >−</button>
+                        <button
+                            type="button"
+                            class="media__relative-volume-button"
+                            aria-label={`${_("popupMediaVolume")} +`}
+                            title={`${_("popupMediaVolume")} +`}
+                            on:click={() => dispatch("volumeUp")}
+                        >+</button>
+                    {:else}
+                        <input
+                            type="range"
+                            class="slider media__volume-slider"
+                            aria-label={_("popupMediaVolume")}
+                            disabled={!("level" in volume)}
+                            step="0.05"
+                            max={1}
+                            value={volume.muted ? 0 : volume.level}
+                            on:change={ev => {
+                                dispatch("volumeChanged", {
+                                    level: ev.currentTarget.valueAsNumber
+                                });
+                            }}
+                        />
+                    {/if}
                 </div>
             {/if}
         </div>

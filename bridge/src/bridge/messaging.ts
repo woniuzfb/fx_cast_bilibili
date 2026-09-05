@@ -3,6 +3,7 @@ import { TypedEmitter } from "tiny-typed-emitter";
 import { DecodeTransform, EncodeTransform } from "../transforms";
 
 import type {
+    MediaInformation,
     MediaStatus,
     ReceiverStatus,
     SenderMediaMessage,
@@ -144,6 +145,67 @@ type MessageDefinitions = {
     };
 
     /**
+     * Flattened RokuRemote.buildStatusMedia snapshot. Logged in the
+     * extension background console so duration / customData / branch
+     * decisions render inline instead of collapsing as `{…}`. Emitted
+     * only when the snapshot changes (the 3s ECP poll stays quiet).
+     */
+    "main:rokuStatusMediaDebug": {
+        deviceId: string;
+        branch: "session" | "loadedUrl" | "none" | "skippedIdle";
+        playerDuration: string;
+        isHlsDvr: string;
+        durationSource: "session" | "player" | "null" | "n/a";
+        duration: string;
+        rokuLiveElapsed: string;
+        loadedUrl: string;
+        loadedTitle: string;
+        lastState: string;
+        sessionMedia: string;
+        customDataIn: string;
+        customDataOut: string;
+        result: string;
+    };
+
+    /**
+     * Roku session-side lifecycle debug (consume observation, sessionMedia
+     * registration). Flattened primitives, logged in the extension background
+     * console — the bridge process's own console is not captured by the
+     * extension console export, so diagnostics MUST travel through messaging.
+     */
+    "main:rokuSessionMediaDebug": {
+        deviceId: string;
+        event: "consumeObserved" | "sessionMediaRegistered";
+        host: string;
+        clientHost?: string;
+        title: string;
+        duration: string;
+        customData: string;
+        fallback: string;
+    };
+
+    /** DASH remux diagnostics routed through Native Messaging framing. */
+    "main:dashRemuxDebug": {
+        event: "ffmpeg" | "response" | "playlist" | "segment";
+        requestId: string;
+        details: string;
+    };
+
+    /**
+     * Full LOAD media published by the emulated Roku session. The session
+     * runs in its own bridge process (every connectNative spawns one), so
+     * the in-process sessionMedia registry is invisible to RokuRemote in
+     * the device-discovery process. This message carries the same media
+     * over the session connection; the extension merges it into the device
+     * media status (deviceManager). `media: null` clears it (teardown).
+     */
+    "main:rokuSessionMedia": {
+        deviceId: string;
+        sessionId: string;
+        media: MediaInformation | null;
+    };
+
+    /**
      * Sent to bridge from cast API instance whenever an `NS_RECEIVER`
      * message needs to be sent.
      */
@@ -203,6 +265,8 @@ type MessageDefinitions = {
         port: number;
         startTime?: number;
         hlsLive?: boolean;
+        /** Hold Bilibili DASH readiness until Roku startup segments are closed, then drip a complete-only EVENT prefix. */
+        rokuDashPrebuffer?: boolean;
         cctvDebugEnabled?: boolean;
         userAgent?: string;
     };

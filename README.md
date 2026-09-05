@@ -7,6 +7,8 @@
 
 A Firefox extension that implements the Chromecast API and exposes it to web apps to enable cast support. Communication with receiver devices is handled by a companion application (bridge).
 
+Receiver devices are discovered over both mDNS (**Chromecast**) and SSDP (**Roku**). Roku devices are controlled via [ECP](https://developer.roku.com/docs/developer-program/dev-tools/external-control-api.md) — the bridge emulates a Chromecast session on top of it, so all senders (media, bilibili, CCTV) work against a Roku unchanged. Playback is handled by the Roku Media Player channel (falling back to Play On Roku), which fetches the media itself — proxied/relayed streams served by the bridge's LAN media server work as long as the Roku can reach this machine.
+
 ## Installing
 
 Install the Firefox extension (from within Firefox) and bridge application via the installer packages. These are two separate downloads that can be found on the [website](https://woniuzfb.github.io/fx_cast_bilibili/) or in the [GitHub releases](https://github.com/woniuzfb/fx_cast_bilibili/releases) section.

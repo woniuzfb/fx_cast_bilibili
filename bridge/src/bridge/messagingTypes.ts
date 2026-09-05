@@ -22,6 +22,13 @@ export interface ReceiverDevice {
     host: string;
     port: number;
     status?: ReceiverStatus;
+    /**
+     * Receiver protocol family. "cast" (Chromecast) when absent for
+     * backwards compatibility with older bridges/extensions; "roku" devices
+     * speak ECP (HTTP port 8060) and are emulated as cast sessions by the
+     * bridge's Roku components.
+     */
+    deviceType?: "cast" | "roku";
 }
 
 export interface CastSessionUpdatedDetails {
