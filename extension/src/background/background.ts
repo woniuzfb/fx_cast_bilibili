@@ -17,6 +17,7 @@ import {
     setCctvLiveQuality
 } from "./cctvLive";
 import { initWhitelist } from "./whitelist";
+import { initBilibiliPageCapture } from "./bilibiliPageCapture";
 import { initBleRemote } from "./bleRemote";
 import { cacheUaInfo } from "../lib/userAgents";
 
@@ -118,6 +119,7 @@ async function init() {
     await initWhitelist();
     initBleRemote();
     initCctvLive();
+    initBilibiliPageCapture();
 
     // Surface popup debug logs in the background console. The browser-action
     // popup can't be inspected directly, so Popup.svelte forwards its debug

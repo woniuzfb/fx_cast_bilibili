@@ -863,6 +863,7 @@
                                 ReceiverSelectorMediaType.None) &&
                             isDeviceCompatible(mediaType, device)}
                         isAnyConnecting={isConnecting}
+                        {isBilibiliPage}
                         bind:lastMenuShownDeviceId
                         on:cast={ev => onReceiverCast(ev.detail.device)}
                         on:stop={ev => onReceiverStop(ev.detail.device)}
@@ -887,6 +888,7 @@
                             ReceiverSelectorMediaType.None) &&
                         isDeviceCompatible(mediaType, device)}
                     isAnyConnecting={isConnecting}
+                    {isBilibiliPage}
                     bind:lastMenuShownDeviceId
                     on:cast={ev => onReceiverCast(ev.detail.device)}
                     on:stop={ev => onReceiverStop(ev.detail.device)}

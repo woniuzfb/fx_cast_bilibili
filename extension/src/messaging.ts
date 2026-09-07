@@ -382,6 +382,10 @@ type BridgeMessageDefinitions = {
         hlsLive?: boolean;
         /** Hold Bilibili DASH readiness until Roku startup segments are closed, then drip a complete-only EVENT prefix. */
         rokuDashPrebuffer?: boolean;
+        /** Seek remux restart: drop mid-file captured fragments so ffmpeg
+         *  cannot start at the previous page position. First play / overflow
+         *  omit this so already-buffered ranges stay usable. */
+        resetCaptureWindow?: boolean;
         /** Enables verbose bridge relay logging and LAN debug playlist endpoints. */
         cctvDebugEnabled?: boolean;
         /** User-Agent for the bridge's upstream CDN requests (live relay). The
@@ -423,6 +427,25 @@ type BridgeMessageDefinitions = {
      * Sent to media sender from bridge when the media server has
      * stopped.
      */
+    "main:bilibiliPageCaptureReady": {
+        requestId: string;
+        port: number;
+        generation: number;
+    };
+    /** Content-script: capture HTTP port is listening for this generation. */
+    "bilibili:pageCaptureReady": {
+        requestId: string;
+    };
+    /** Bridge capture-buffer terminal condition — hard cap reached, or a
+     *  stalled consumption watermark with fresh data still arriving (see
+     *  `reason` on the bridge side). Forwarded to the tab so the sender
+     *  rebuilds the relay instead of piling up un-consumable bytes. */
+    "main:bilibiliCaptureOverflow": {
+        requestId: string;
+        kind: "video" | "audio";
+        /** "hard-cap" | "watermark-stalled" */
+        reason?: string;
+    };
     "mediaCast:mediaServerStopped": { requestId: string };
     /** Live HLS relay diagnostics from the bridge, logged in the background
      *  console by handleBridgeMessage (so relay activity is visible without

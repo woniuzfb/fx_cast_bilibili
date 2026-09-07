@@ -37,6 +37,11 @@ import {
     isCctvPageCaptureActive,
     pauseCctvPageCaptureIngest
 } from "./cctvPageCapture";
+import {
+    armBilibiliPageCapture,
+    beginBilibiliPageCapture,
+    endBilibiliPageCapture
+} from "./bilibiliPageCapture";
 
 async function logRokuDebug(message: string, data: unknown) {
     try {
@@ -785,9 +790,63 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             break;
         }
 
+        case "main:bilibiliPageCaptureReady": {
+            const tabId = instance.contentContext?.tabId;
+            if (tabId !== undefined) {
+                armBilibiliPageCapture(
+                    tabId,
+                    message.data.requestId,
+                    message.data.port,
+                    message.data.generation
+                );
+                // The new capture port is listening: tell the page sender to
+                // seek/play the real player NOW so target fragments are
+                // ingested by this generation (seeking earlier dumps them
+                // into the generation that stopMediaServer just tore down).
+                void browser.tabs
+                    .sendMessage(tabId, {
+                        subject: "bilibili:pageCaptureReady",
+                        data: { requestId: message.data.requestId }
+                    })
+                    .catch(() => undefined);
+            }
+            break;
+        }
+
+        case "main:bilibiliCaptureOverflow": {
+            // The captured generation reached a terminal buffer condition —
+            // absolute hard cap, or a stalled consumption watermark with
+            // fresh data arriving past an unfillable gap. Dropping un-read
+            // bytes would punch permanent holes into the sequential input
+            // stream, so the only safe reclaim is a relay rebuild: ask the
+            // tab's sender to re-cast at the page's current position (fresh
+            // generation, fresh capture window).
+            const tabId = instance.contentContext?.tabId;
+            if (tabId !== undefined) {
+                logger.warn(
+                    "Bilibili capture buffer overflow; relay rebuild requested",
+                    message.data
+                );
+                void browser.tabs
+                    .sendMessage(tabId, {
+                        subject: "bilibili:captureOverflow",
+                        data: {
+                            kind: message.data.kind,
+                            requestId: message.data.requestId,
+                            reason: message.data.reason
+                        }
+                    })
+                    .catch(() => undefined);
+            }
+            break;
+        }
+
         case "mediaCast:mediaServerStopped":
         case "mediaCast:mediaServerError": {
             const tabId = instance.contentContext?.tabId;
+            if (tabId !== undefined) {
+                endBilibiliPageCapture(tabId, message.data.requestId);
+            }
             if (tabId !== undefined && isCctvPageCaptureActive(tabId)) {
                 pauseCctvPageCaptureIngest(tabId, message.data.requestId);
             }
@@ -949,6 +1008,24 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
 
     switch (message.subject) {
         case "bridge:startRemoteMediaServer": {
+            if (
+                message.data.rokuDashPrebuffer &&
+                message.data.audioUrl &&
+                instance.contentContext?.tabId !== undefined
+            ) {
+                // The capture is self-identifying: it has observed this tab
+                // since page load, so no media URLs are passed — the bridge
+                // consumes whatever the page actually downloads.
+                beginBilibiliPageCapture(
+                    instance.contentContext.tabId,
+                    message.data.requestId,
+                    {
+                        resetWindow: Boolean(
+                            message.data.resetCaptureWindow
+                        )
+                    }
+                );
+            }
             if (message.data.hlsLive && instance.session) {
                 liveRelayDeviceByRequestId.set(
                     message.data.requestId,
@@ -1635,7 +1712,32 @@ function createSelector(tabId: number) {
         // DASH remux sessions (Bilibili) cannot seek on the receiver: the remuxed
         // HLS only exists up to the ffmpeg download frontier, so a native seek
         // buffers forever. Route popup seeks to the page sender instead, which
-        // restarts the remux at the target position.
+        // restarts the remux at the target position. Play/pause is routed the
+        // same way so the page (capture source) and Roku move together instead
+        // of the page lagging the 2.5s ECP poll.
+        if (message.type === "PAUSE" || message.type === "PLAY") {
+            const instance = castManager.getInstanceByDeviceId(deviceId);
+            const tabId = instance?.contentContext?.tabId;
+            if (tabId !== undefined) {
+                const action = message.type === "PAUSE" ? "pause" : "play";
+                try {
+                    const results = await browser.scripting.executeScript({
+                        target: { tabId },
+                        func: ((playback: "play" | "pause") =>
+                            (window as any).__fxCastBilibili?.controlPlayback?.(
+                                playback
+                            ) === true) as any,
+                        args: [action]
+                    });
+                    if (results.some(result => result.result === true)) return;
+                } catch (err) {
+                    logger.error(
+                        "Failed to route popup playback to page sender",
+                        err
+                    );
+                }
+            }
+        }
         if (
             message.type === "SEEK" &&
             typeof message.currentTime === "number"

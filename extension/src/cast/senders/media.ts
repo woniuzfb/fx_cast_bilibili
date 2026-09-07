@@ -38,6 +38,15 @@ export interface MediaSenderOpts {
      * auto-recovery).
      */
     mediaUrlResolver?: () => Promise<{ mediaUrl: string; userAgent?: string }>;
+    /**
+     * Roku passive capture: called lazily by MediaSender when the receiver
+     * is confirmed as Roku, replacing the playurl pair with the page-captured
+     * video/audio. Never called for Chromecast.
+     */
+    rokuMediaResolver?: () => Promise<{
+        mediaUrl: string;
+        audioUrl?: string;
+    }>;
     mediaElement?: HTMLMediaElement;
     mediaTitle?: string;
     mediaContentType?: string;
@@ -75,6 +84,8 @@ export interface MediaSenderOpts {
      * autonomous events (autoplay, buffering, quality switches).
      */
     gestureGatedControls?: boolean;
+    /** Invoked after the user has selected and the sender has bound a receiver. */
+    onReceiverSelected?: (isRoku: boolean) => void;
     /** Invoked after the Cast session is stopped (e.g. the popup Stop button). */
     onStopped?: () => void;
     /**
@@ -112,6 +123,9 @@ export default class MediaSender {
     private syncMediaPosition = true;
     private gestureGatedControls = false;
     private autoRecoverOnIdle = false;
+    private preserveSourcePlayback = false;
+    private rokuMediaResolver?: MediaSenderOpts["rokuMediaResolver"];
+    private onReceiverSelected?: (isRoku: boolean) => void;
     private onStopped?: () => void;
     private debug?: (message: string, data?: unknown) => void;
 
@@ -185,11 +199,25 @@ export default class MediaSender {
     private dashLoadId = 0;
     /**
      * Set by addMediaElementListeners (it closes over the suppress counters).
-     * Invoked when a DASH seek starts so the page video can be paused while
-     * the bridge re-prepares the stream without the pause echoing back to the
-     * receiver.
+     * Invoked when a DASH seek starts: pause the receiver immediately so the
+     * old stream holds, and (Chromecast only) park the page at the target.
+     * Roku capture primes the page later via primePageCaptureAt, after the
+     * new capture port is listening — seeking earlier dumps the target
+     * fragments into the generation that is about to be torn down.
      */
     private onDashSeekStart?: (target: number) => void;
+    /**
+     * Absolute page time the current capture generation should start at.
+     * Primed onto the real <video> only AFTER the new capture port is
+     * listening, so the target fragments are ingested here instead of the
+     * generation that stopMediaServer just tore down.
+     */
+    private capturePrimeTarget?: number;
+    /**
+     * Seeks/plays the page element with the listener suppress counters armed.
+     * Undefined when page controls are detached.
+     */
+    private primePageCaptureAt?: (target: number) => void;
 
     // ---- Auto-recovery state (autoRecoverOnIdle) ----
     /**
@@ -288,6 +316,12 @@ export default class MediaSender {
         seekForwardSeconds: number
     ) => boolean;
 
+    /** True while the current receiver session is a Roku device running the
+     *  passive page-capture path. */
+    isRokuReceiver() {
+        return this.session?.receiver.label.startsWith("roku-") === true;
+    }
+
     private get isDashRemux() {
         // Only the true Bilibili DASH remux (separate audio track): the receiver
         // cannot seek inside the sequentially-remuxed HLS, so seeks restart the
@@ -340,6 +374,8 @@ export default class MediaSender {
         this.syncMediaPosition = opts.syncMediaPosition ?? true;
         this.gestureGatedControls = opts.gestureGatedControls ?? false;
         this.autoRecoverOnIdle = opts.autoRecoverOnIdle ?? false;
+        this.rokuMediaResolver = opts.rokuMediaResolver;
+        this.onReceiverSelected = opts.onReceiverSelected;
         this.onStopped = opts.onStopped;
         this.debug = opts.debug;
         this.debug?.("media sender created");
@@ -354,6 +390,7 @@ export default class MediaSender {
         this.stopped = true;
         this.dashLoadId++;
         this.dashSeekTarget = undefined;
+        this.capturePrimeTarget = undefined;
         this.dashSyncHold = false;
         this.dashTightenSync = false;
         this.suspendMediaElementSync();
@@ -389,6 +426,15 @@ export default class MediaSender {
         this.onStopped?.();
     }
 
+    /**
+     * True when `requestId` is the bridge media-server generation this sender
+     * is currently bound to — used to drop stale asynchronous notifications
+     * (e.g. a capture overflow from a generation that was already replaced).
+     */
+    isCurrentMediaServerRequest(requestId: string) {
+        return this.activeMediaServerRequestId === requestId;
+    }
+
     /** Route a trusted BLE action through page-to-receiver synchronization. */
     controlFromBleRemote(
         action: "seek_backward" | "seek_forward" | "pause" | "play",
@@ -413,7 +459,10 @@ export default class MediaSender {
         if (!this.isDashRemux || !this.session) return;
         if (!Number.isFinite(target) || target < 0) return;
         this.debug?.("dash seek requested", target);
-        // Pause/pre-position the page immediately for responsive feedback…
+        // Pause the receiver immediately so the user sees a hold, not the
+        // previous stream, while the remux generation is rebuilt. The page
+        // source is primed later (see primeCaptureSource) so capture bytes
+        // land in the NEW generation.
         this.onDashSeekStart?.(target);
         this.dashSeekTarget = target;
         this.dashSyncHold = true;
@@ -450,6 +499,73 @@ export default class MediaSender {
      */
     private dashTightenDeadline = 0;
 
+    /** Page-clock-master mode: the page owns position; play/pause is
+     *  synchronized by routing popup/BLE through the page, never by writing
+     *  delayed receiver status back onto the source. */
+    setPreserveSourcePlayback(enabled: boolean) {
+        this.preserveSourcePlayback = enabled;
+    }
+
+    /**
+     * Popup play/pause: apply to the page immediately so capture and the
+     * receiver stay in lockstep. The page event then forwards to the
+     * receiver (same path as a user gesture / BLE remote).
+     */
+    controlPlayback(action: "play" | "pause") {
+        if (!this.session || !this.onBleRemoteAction) {
+            this.debug?.(
+                "popup playback ignored: sender controls are not ready",
+                {
+                    action
+                }
+            );
+            return false;
+        }
+        this.debug?.("popup control routed through page", { action });
+        return this.onBleRemoteAction(action, 0, 0);
+    }
+
+    /**
+     * Called when the new capture HTTP port is listening. Seek the real page
+     * player to this generation's start time so the m4s fetches that follow
+     * are ingested here, then keep it playing so the remux cannot starve.
+     */
+    primeCaptureSource(requestId: string) {
+        if (this.stopped) return;
+        if (this.activeMediaServerRequestId !== requestId) return;
+        if (!this.preserveSourcePlayback) return;
+        const mediaElement = this.mediaElement;
+        if (!(mediaElement instanceof HTMLMediaElement)) return;
+        const target = this.capturePrimeTarget;
+        if (target !== undefined && this.primePageCaptureAt) {
+            this.debug?.("priming page capture at remux start", {
+                requestId,
+                target,
+                pageTime: mediaElement.currentTime,
+                paused: mediaElement.paused
+            });
+            this.primePageCaptureAt(target);
+            return;
+        }
+        if (
+            target !== undefined &&
+            Number.isFinite(target) &&
+            Math.abs(mediaElement.currentTime - target) > 0.1
+        ) {
+            mediaElement.currentTime = target;
+        }
+        if (mediaElement.paused) {
+            void mediaElement.play().catch(err => {
+                logger.error("Failed to prime page capture", err);
+            });
+        }
+        this.debug?.("primed page capture without listener suppress", {
+            requestId,
+            target,
+            pageTime: mediaElement.currentTime
+        });
+    }
+
     /** Temporarily detach page controls before a programmatic page pause. */
     suspendMediaElementSync() {
         this.removeMediaElementListeners?.();
@@ -471,13 +587,31 @@ export default class MediaSender {
         // an update must re-arm the resolver when the caller passes one — CCTV
         // quality changes re-resolve the live stream URL through this path.
         this.mediaUrlResolver = opts.mediaUrlResolver;
+        this.rokuMediaResolver = opts.rokuMediaResolver;
         this.mediaTitle = opts.mediaTitle;
         this.mediaContentType = opts.mediaContentType ?? "";
         this.mediaElement = opts.mediaElement;
         this.remoteProxy = opts.remoteProxy;
         this.isVideo = opts.isVideo ?? this.isVideo;
         this.isLive = opts.isLive ?? this.isLive;
-        await this.loadMedia();
+        // Lifecycle callbacks follow the latest opts: a media reload that
+        // reuses this sender must rebind onStopped/onReceiverSelected,
+        // otherwise the NEW closure's guards and restores never run. Transactional CALLBACK swap: if loadMedia
+        // fails, the previous callbacks are restored so the still-working
+        // old lifecycle keeps a matching stop handler. Media configuration
+        // fields above are NOT rolled back — they reflect the latest attempt
+        // and are overwritten by whichever rebuild runs next.
+        const previousOnStopped = this.onStopped;
+        const previousOnReceiverSelected = this.onReceiverSelected;
+        this.onStopped = opts.onStopped;
+        this.onReceiverSelected = opts.onReceiverSelected;
+        try {
+            await this.loadMedia();
+        } catch (error) {
+            this.onStopped = previousOnStopped;
+            this.onReceiverSelected = previousOnReceiverSelected;
+            throw error;
+        }
     }
 
     private async init() {
@@ -607,6 +741,16 @@ export default class MediaSender {
             this.session.removeUpdateListener(this.sessionUpdateListener);
         }
         this.session = session;
+        // Own the page-clock-master switch internally: a late/foreign
+        // onReceiverSelected callback must never flip another instance's
+        // flag through the outer sender variable.
+        const isRokuReceiver = session.receiver.label.startsWith("roku-");
+        // Page-clock-master mode exists only for Bilibili DASH passive capture.
+        // Applying it to every Roku session makes syncFromReceiver return before
+        // the normal PLAYING/BUFFERING reconciliation, so a CCTV page that was
+        // paused while Cast prepared never receives mediaElement.play().
+        this.setPreserveSourcePlayback(this.isDashRemux && isRokuReceiver);
+        this.onReceiverSelected?.(isRokuReceiver);
         this.sessionUpdateListener = isAlive => {
             if (isAlive || this.stopped) return;
             this.debug?.("cast session ended externally");
@@ -702,7 +846,7 @@ export default class MediaSender {
         // In DASH remux mode the bridge restarts ffmpeg at this position and
         // pads the playlist so the receiver timeline stays in absolute video
         // time (receiver currentTime == page currentTime).
-        const dashStartTime = this.isDashRemux
+        let dashStartTime = this.isDashRemux
             ? this.syncMediaPosition
                 ? startTimeOverride ??
                   (this.mediaElement instanceof HTMLMediaElement &&
@@ -728,8 +872,41 @@ export default class MediaSender {
                     : "proxy",
                 startTime: this.isDashRemux ? dashStartTime : undefined
             });
+            if (
+                this.isDashRemux &&
+                this.preserveSourcePlayback &&
+                this.rokuMediaResolver &&
+                startTimeOverride === undefined
+            ) {
+                const rokuMedia = await this.rokuMediaResolver();
+                this.mediaUrl = rokuMedia.mediaUrl;
+                if (this.remoteProxy) {
+                    this.remoteProxy.audioUrl = rokuMedia.audioUrl;
+                }
+                this.debug?.("roku capture media resolved", {
+                    mediaUrl: rokuMedia.mediaUrl
+                });
+            }
             const requestId = this.nextMediaServerRequestId();
             this.activeMediaServerRequestId = requestId;
+            if (
+                this.isDashRemux &&
+                startTimeOverride === undefined &&
+                this.preserveSourcePlayback &&
+                this.mediaElement instanceof HTMLMediaElement
+            ) {
+                const refreshed = this.mediaElement.currentTime;
+                if (Number.isFinite(refreshed) && refreshed >= 0) {
+                    dashStartTime = refreshed;
+                    this.debug?.("refreshed page-authoritative DASH start", {
+                        dashStartTime
+                    });
+                }
+            }
+            this.capturePrimeTarget =
+                this.isDashRemux && this.preserveSourcePlayback
+                    ? dashStartTime
+                    : undefined;
             const result = await this.startRemoteMediaServer(
                 requestId,
                 this.mediaUrl,
@@ -742,7 +919,8 @@ export default class MediaSender {
                 this.remoteProxy.userAgent,
                 cctvDebugEnabled,
                 Boolean(this.remoteProxy.audioUrl) &&
-                    this.session?.receiver.label.startsWith("roku-") === true
+                    this.session?.receiver.label.startsWith("roku-") === true,
+                Boolean(this.isDashRemux && startTimeOverride !== undefined)
             );
             if (this.stopped || loadId !== this.dashLoadId) {
                 this.stopOwnedMediaServer(requestId);
@@ -1012,16 +1190,23 @@ export default class MediaSender {
         } else if (this.mediaElement instanceof HTMLMediaElement) {
             // DASH remux streams are padded up to dashStartTime, so the initial
             // position is expressed in absolute video time.
-            const initialTime = this.isDashRemux
-                ? dashStartTime
-                : this.mediaElement.currentTime;
+            const initialTime =
+                this.isDashRemux &&
+                this.preserveSourcePlayback &&
+                startTimeOverride === undefined
+                    ? this.mediaElement.currentTime
+                    : this.isDashRemux
+                    ? dashStartTime
+                    : this.mediaElement.currentTime;
             if (Number.isFinite(initialTime)) {
                 loadRequest.currentTime = initialTime;
             }
             this.debug?.("applying initial media position", {
                 currentTime: loadRequest.currentTime,
                 sourcePaused: this.mediaElement.paused,
-                continuousSync: this.syncElementEnabled
+                continuousSync: this.syncElementEnabled,
+                sourceAuthoritative: this.preserveSourcePlayback,
+                remuxStartTime: this.isDashRemux ? dashStartTime : undefined
             });
         } else if (
             bridgeStartTime !== undefined &&
@@ -1048,7 +1233,9 @@ export default class MediaSender {
         // used after explicit seeks, but only after bridge preparation has
         // completed so the 15-second settle deadline covers receiver loading.
         const tightenAfterLoad =
-            this.isDashRemux && startTimeOverride === undefined;
+            this.isDashRemux &&
+            startTimeOverride === undefined &&
+            !this.preserveSourcePlayback;
         if (tightenAfterLoad) {
             this.dashTightenSync = true;
             this.dashTightenDeadline =
@@ -1208,7 +1395,14 @@ export default class MediaSender {
         const SEEK_ARM_WINDOW_MS = 10000;
         let seekArmedUntil = 0;
         const onSeeking = () => {
-            if (fromGesture()) seekArmedUntil = Date.now() + SEEK_ARM_WINDOW_MS;
+            if (!fromGesture()) return;
+            seekArmedUntil = Date.now() + SEEK_ARM_WINDOW_MS;
+            // Reset the rolling handoff before the page's target Range requests
+            // arrive. The seek restart can then replay those bytes into the new
+            // bridge generation even when MSE suppresses a second fetch.
+            void browser.runtime
+                .sendMessage({ subject: "bilibili:pageSeekStarted" })
+                .catch(() => undefined);
         };
 
         const sendError = (operation: string) => (err: unknown) => {
@@ -1254,10 +1448,26 @@ export default class MediaSender {
             currentMedia()?.pause(undefined, undefined, sendError("pause"));
         };
         // While the bridge re-prepares the stream for a DASH seek, pause the
-        // page video (suppressed so the pause isn't forwarded to the receiver)
-        // and pre-position it at the target; the sync loop resumes playback once
-        // the receiver reports PLAYING again.
+        // receiver immediately so playback holds at the old frame instead of
+        // running ahead of the rebuild. Chromecast also parks the page at the
+        // target; Roku capture must NOT seek the page yet — those m4s bytes
+        // would be ingested by the generation that is about to be replaced.
         this.onDashSeekStart = (target: number) => {
+            currentMedia()?.pause(
+                undefined,
+                undefined,
+                sendError("dash seek pause")
+            );
+            if (this.preserveSourcePlayback) {
+                this.debug?.(
+                    "source-authoritative DASH seek paused receiver; page deferred until capture listens",
+                    {
+                        target,
+                        pageTime: mediaElement.currentTime
+                    }
+                );
+                return;
+            }
             if (!mediaElement.paused) {
                 suppressPause++;
                 mediaElement.pause();
@@ -1265,6 +1475,22 @@ export default class MediaSender {
             if (Math.abs(mediaElement.currentTime - target) > 0.1) {
                 suppressSeek++;
                 mediaElement.currentTime = target;
+            }
+        };
+        this.primePageCaptureAt = (target: number) => {
+            if (Math.abs(mediaElement.currentTime - target) > 0.1) {
+                suppressSeek++;
+                mediaElement.currentTime = target;
+            }
+            if (mediaElement.paused) {
+                suppressPlay++;
+                void mediaElement.play().catch(err => {
+                    suppressPlay = Math.max(0, suppressPlay - 1);
+                    logger.error(
+                        "Failed to prime page capture after seek",
+                        err
+                    );
+                });
             }
         };
 
@@ -1440,6 +1666,37 @@ export default class MediaSender {
         let lastSyncDebugAt = 0;
         let lastGetStatusPollAt = 0;
         const syncFromReceiver = () => {
+            if (this.preserveSourcePlayback) {
+                // Page-clock-master: never write receiver status back onto the
+                // page. Popup/BLE play-pause already went through the page
+                // (so both sides move together); a 2.5s Roku poll mirrored
+                // here would pause the page LATE and fight a just-issued
+                // play. Clear the DASH seek/load transaction flags (runDashSeek
+                // / loadMedia arm them; loadMedia's callback also clears the
+                // hold, but a failed/abandoned load still needs this).
+                this.dashSyncHold = false;
+                this.dashTightenSync = false;
+                const boundMedia = currentMedia();
+                if (
+                    boundMedia &&
+                    boundMedia.playerState === cast.media.PlayerState.IDLE &&
+                    boundMedia.idleReason === cast.media.IdleReason.ERROR &&
+                    this.receiverErrorLoggedForSession !==
+                        boundMedia.mediaSessionId
+                ) {
+                    this.receiverErrorLoggedForSession =
+                        boundMedia.mediaSessionId;
+                    this.debug?.("receiver returned media error", {
+                        mediaSessionId: boundMedia.mediaSessionId,
+                        currentTime: boundMedia.currentTime
+                    });
+                    this.logRecovery("info", "Receiver returned media error", {
+                        mediaSessionId: boundMedia.mediaSessionId,
+                        currentTime: boundMedia.currentTime
+                    });
+                }
+                return;
+            }
             const boundMedia = currentMedia();
             // While a DASH seek reload is settling, log the sync inputs once per
             // second so it's visible exactly where reconciliation is stuck.
@@ -1770,7 +2027,10 @@ export default class MediaSender {
                             if (!gated) suppressPlay++;
                             void mediaElement.play().catch(err => {
                                 if (!gated)
-                                    suppressPlay = Math.max(0, suppressPlay - 1);
+                                    suppressPlay = Math.max(
+                                        0,
+                                        suppressPlay - 1
+                                    );
                                 logger.error(
                                     "Failed to keep CCTV page playback alive",
                                     err
@@ -1804,6 +2064,7 @@ export default class MediaSender {
             mediaElement.removeEventListener("seeking", onSeeking);
             mediaElement.removeEventListener("seeked", onSeeked);
             this.onDashSeekStart = undefined;
+            this.primePageCaptureAt = undefined;
             this.onBleRemoteAction = undefined;
             if (this.gestureGatedControls) {
                 window.removeEventListener("pointerdown", markGesture, true);
@@ -1837,9 +2098,16 @@ export default class MediaSender {
                 // Re-assert the hold for every reload: a failed previous iteration
                 // clears it, and a stale load callback may have released it early.
                 this.dashSyncHold = true;
-                this.dashTightenSync = true;
-                this.dashTightenDeadline =
-                    Date.now() + MediaSender.DASH_TIGHTEN_WINDOW_MS;
+                // Page-clock-master (Roku capture): never snap the page to
+                // the receiver after reload — the page was primed to `target`
+                // and is the position authority. Chromecast still tightens.
+                if (!this.preserveSourcePlayback) {
+                    this.dashTightenSync = true;
+                    this.dashTightenDeadline =
+                        Date.now() + MediaSender.DASH_TIGHTEN_WINDOW_MS;
+                } else {
+                    this.dashTightenSync = false;
+                }
                 try {
                     await this.loadMedia(target);
                 } catch (err) {
@@ -1866,7 +2134,8 @@ export default class MediaSender {
         hlsLive = false,
         userAgent?: string,
         cctvDebugEnabled = false,
-        rokuDashPrebuffer = false
+        rokuDashPrebuffer = false,
+        resetCaptureWindow = false
     ): Promise<{
         mediaPath: string;
         localAddress: string;
@@ -1960,7 +2229,8 @@ export default class MediaSender {
                 port,
                 startTime,
                 hlsLive,
-                rokuDashPrebuffer
+                rokuDashPrebuffer,
+                resetCaptureWindow
             });
             this.port.postMessage({
                 subject: "bridge:startRemoteMediaServer",
@@ -1974,6 +2244,7 @@ export default class MediaSender {
                     startTime,
                     hlsLive,
                     rokuDashPrebuffer,
+                    resetCaptureWindow,
                     cctvDebugEnabled,
                     userAgent
                 }
@@ -2098,10 +2369,7 @@ export default class MediaSender {
     private armRecoveryActivityWatchdog(generation: number) {
         if (!this.recoveryAwaitingRelayActivity || this.stopped) return;
         this.clearRecoveryActivityWatchdog();
-        const timeoutMs = Math.max(
-            30_000,
-            this.relayActivityTimeoutMs() * 3
-        );
+        const timeoutMs = Math.max(30_000, this.relayActivityTimeoutMs() * 3);
         this.recoveryActivityTimer = window.setTimeout(() => {
             this.recoveryActivityTimer = undefined;
             if (

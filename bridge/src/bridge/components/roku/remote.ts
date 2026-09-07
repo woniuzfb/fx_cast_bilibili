@@ -231,14 +231,30 @@ export default class RokuRemote {
                 break;
 
             case "VOLUME_UP":
-            case "VOLUME_DOWN":
-                void keypress(
-                    this.host,
-                    message.type === "VOLUME_UP"
-                        ? "VolumeUp"
-                        : "VolumeDown"
+            case "VOLUME_DOWN": {
+                const isUp = message.type === "VOLUME_UP";
+                void keypress(this.host, isUp ? "VolumeUp" : "VolumeDown").then(
+                    () => {
+                        this.volume = {
+                            level: Math.max(
+                                0,
+                                Math.min(
+                                    1,
+                                    (this.volume?.level ?? 1) +
+                                        (isUp ? 0.1 : -0.1)
+                                )
+                            ),
+                            // Roku itself unmutes private listening when
+                            // VolumeUp is pressed. Mirror that deterministic
+                            // key behavior in the optimistic popup state.
+                            muted: isUp ? false : this.volume.muted
+                        };
+                        this.emitReceiverStatus();
+                        this.emitMediaStatus();
+                    }
                 );
                 break;
+            }
 
             case "GET_STATUS":
                 this.emitReceiverStatus();
@@ -389,7 +405,29 @@ export default class RokuRemote {
             typeof volume.muted === "boolean" &&
             volume.muted !== this.volume.muted
         ) {
-            steps.push(keypress(this.host, "VolumeMute"));
+            if (volume.muted) {
+                // ECP only exposes a toggle key for entering mute.
+                steps.push(keypress(this.host, "VolumeMute"));
+            } else {
+                // There is no ECP query for the real mute state and no
+                // explicit MuteOff key. VolumeUp deterministically restores
+                // private-listening audio on Roku; VolumeDown then compensates
+                // for the one-step increase. Keep these ordered.
+                steps.push(
+                    keypress(this.host, "VolumeUp")
+                        // Roku may acknowledge ECP before the audio path applies
+                        // the key. A back-to-back VolumeDown can be coalesced or
+                        // dropped, so wait one short input interval before the
+                        // compensating key.
+                        .then(
+                            () =>
+                                new Promise<void>(resolve =>
+                                    setTimeout(resolve, 250)
+                                )
+                        )
+                        .then(() => keypress(this.host, "VolumeDown"))
+                );
+            }
             this.volume = { ...this.volume, muted: volume.muted };
         }
 

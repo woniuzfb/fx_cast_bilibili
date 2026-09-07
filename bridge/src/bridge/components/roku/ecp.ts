@@ -224,6 +224,23 @@ export async function launch(
     });
 }
 
+/** POST /input?<params>
+ *  Media Assistant (782875, supports_input_launch=1) delivers a second
+ *  /launch as an input event while already running. /input is the same
+ *  in-channel path without relying on that conversion: handleDeepLink
+ *  assigns a new ContentNode and plays — rebuild the source like first
+ *  play, without Home, /install, or a channel restart. */
+export async function input(
+    host: string,
+    params: Record<string, string>
+): Promise<void> {
+    const search = new URLSearchParams(params).toString();
+    await request(host, `/input${search ? `?${search}` : ""}`, {
+        method: "POST",
+        timeoutMs: 8000
+    });
+}
+
 export interface ActiveAppInfo {
     /** Channel ID of the foreground app; undefined on the home screen. */
     id?: string;

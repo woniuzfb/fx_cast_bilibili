@@ -34,6 +34,8 @@
 
     /** Whether there are sessions being established for any receiver. */
     export let isAnyConnecting: boolean;
+    /** Current selector belongs to a Bilibili video page. */
+    export let isBilibiliPage = false;
     /** Whether the selected media type is available for this receiver. */
     export let isMediaTypeAvailable: boolean;
     /** Whether any media types are available for this receiver. */
@@ -47,6 +49,24 @@
     export let result: Nullable<Fuzzysort.KeyResult<ReceiverDevice>> = null;
 
     export let opts: Nullable<Options>;
+
+    type HighlightPart = { text: string; matched: boolean };
+    function getHighlightParts(
+        value: Fuzzysort.KeyResult<ReceiverDevice>
+    ): HighlightPart[] {
+        // fuzzysort v2 keeps match indexes out of KeyResult's public type.
+        // Its callback overload exposes the grouped matches without HTML:
+        // unmatched runs remain strings and matched runs become typed objects.
+        const highlighted = fuzzysort.highlight(value, text => ({
+            text,
+            matched: true as const
+        }));
+        return (highlighted ?? []).map(part =>
+                typeof part === "string"
+                    ? { text: part, matched: false }
+                    : part
+            );
+    }
 
     /** Current receiver application (if available) */
     $: application = device.status?.applications?.[0];
@@ -157,9 +177,19 @@
             connectTimeoutId = undefined;
         }, 20_000);
     }
+    $: isBilibiliRokuLoadPending = Boolean(
+        isBilibiliPage &&
+            device.deviceType === "roku" &&
+            isOwnedSession &&
+            !mediaStatus?.media
+    );
     $: if (isOwnedSession) {
-        isConnecting = false;
-        if (connectTimeoutId !== undefined) {
+        // Match the established Chromecast UX: the row remains in Casting
+        // state and exposes no media controls until the first real MEDIA_STATUS.
+        // This is reconstructed from durable session/device data, so reopening
+        // the popup during Roku prebuffering shows the same state.
+        isConnecting = isBilibiliRokuLoadPending;
+        if (!isBilibiliRokuLoadPending && connectTimeoutId !== undefined) {
             window.clearTimeout(connectTimeoutId);
             connectTimeoutId = undefined;
         }
@@ -534,7 +564,13 @@
     <div class="receiver__details">
         <div class="receiver__name">
             {#if result}
-                {@html fuzzysort.highlight(result)}
+                {#each getHighlightParts(result) as part}
+                    {#if part.matched}
+                        <b>{part.text}</b>
+                    {:else}
+                        {part.text}
+                    {/if}
+                {/each}
             {:else}
                 {device.friendlyName}
             {/if}
@@ -550,7 +586,11 @@
             </div>
         {/if}
     </div>
-    {#if application && !application.isIdleScreen && isOwnedSession}
+    {#if isBilibiliRokuLoadPending}
+        <button class="receiver__cast-button" disabled>
+            {_("popupCastingButtonTitle", "")}<LoadingIndicator />
+        </button>
+    {:else if application && !application.isIdleScreen && isOwnedSession}
         <button
             class="receiver__stop-button"
             disabled={isStopping && !stopTimedOut}
@@ -596,14 +636,21 @@
         class="receiver__expand-button ghost"
         class:receiver__expand-button--expanded={isExpanded && mediaStatus}
         title={_("popupShowDetailsTitle")}
-        disabled={!mediaStatus || !isOwnedSession}
+        disabled={
+            isBilibiliRokuLoadPending || !mediaStatus || !isOwnedSession
+        }
         on:click={() => {
             isExpanded = !isExpanded;
             isExpandedUserModified = true;
         }}
     />
 
-    {#if isExpanded && mediaStatus && isOwnedSession}
+    {#if
+        !isBilibiliRokuLoadPending &&
+        isExpanded &&
+        mediaStatus &&
+        isOwnedSession
+    }
         <div class="receiver__expanded">
             <ReceiverMedia
                 status={mediaStatus}

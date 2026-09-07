@@ -48,10 +48,12 @@ import {
 
 import {
     buildLaunchParams,
+    input,
     keypress,
     launch,
     queryMediaPlayer,
-    resolvePlayerAppId
+    resolvePlayerAppId,
+    MEDIA_ASSISTANT_APP_ID
 } from "./ecp";
 import { observeLiveRelayClientRequests } from "../mediaServer";
 import {
@@ -368,6 +370,40 @@ export default class RokuSession {
     // ECP translations
     // ------------------------------------------------------------------
 
+    /**
+     * Launch (or replace) the media player item. A DASH remux seek MUST
+     * open a new live HLS asset: the Video node keys identity on the URL
+     * path, so a second play of the same path is "Rewind live TV".
+     *
+     * Media Assistant (782875) is already running after the first LOAD.
+     * POST /input rebuilds the ContentNode in-channel — same as first play,
+     * no Home, no /install, no splash. OEM 2213 falls back to /launch of
+     * the unique playlist URL.
+     */
+    private async relaunchPlayer(
+        url: string,
+        title: string,
+        startPosition: number | undefined,
+        replaceItem: boolean
+    ) {
+        const params = buildLaunchParams(url, title, startPosition);
+        if (replaceItem && this.playerAppId === MEDIA_ASSISTANT_APP_ID) {
+            try {
+                await input(this.receiverDevice.host, params);
+                return;
+            } catch (err) {
+                console.error(
+                    "[fx_cast_bilibili] Media Assistant /input failed; using /launch",
+                    {
+                        host: this.receiverDevice.host,
+                        error: err instanceof Error ? err.message : String(err)
+                    }
+                );
+            }
+        }
+        await launch(this.receiverDevice.host, this.playerAppId!, params);
+    }
+
     private async handleLoad(
         message: Extract<SenderMediaMessage, { type: "LOAD" }>
     ) {
@@ -439,14 +475,11 @@ export default class RokuSession {
                     // idle/segment checks below remain authoritative.
                 }
             }
-            await launch(
-                this.receiverDevice.host,
-                this.playerAppId,
-                buildLaunchParams(
-                    launchUrl,
-                    title,
-                    isDashRemux ? undefined : startPosition
-                )
+            await this.relaunchPlayer(
+                launchUrl,
+                title,
+                isDashRemux ? undefined : startPosition,
+                Boolean(this.loadedMedia) && isDashRemux
             );
 
             this.loadedMedia = message.media;
@@ -454,6 +487,7 @@ export default class RokuSession {
             // Media Receiver; see the mediaSessionId field note).
             this.mediaSessionId++;
             this.lastPosition = startPosition;
+            this.dashClockUpdatedAt = undefined;
             this.lastLaunchAt = Date.now();
 
             if (deferUntilFreshPlayer) {
@@ -740,7 +774,10 @@ export default class RokuSession {
     }
 
     /** ECP has no absolute seek; the documented workaround is relaunching
-     * the channel with a `mediaPosition` param. */
+     * the channel with a `mediaPosition` param. Bilibili DASH remux is NOT
+     * seekable this way: the HLS is a live EVENT playlist, so a mediaPosition
+     * relaunch shows "Rewind live TV" and never opens the new remux. The
+     * page sender restarts ffmpeg and sends a fresh LOAD instead. */
     private async handleSeek(
         message: Extract<SenderMediaMessage, { type: "SEEK" }>
     ) {
@@ -748,6 +785,15 @@ export default class RokuSession {
         const position = message.currentTime ?? 0;
 
         if (!this.loadedMedia) {
+            this.sendMediaStatus(requestId);
+            return;
+        }
+
+        if (isDashRemuxMedia(this.loadedMedia)) {
+            console.error(
+                "[fx_cast_bilibili] ignoring native Roku SEEK on DASH remux; page sender owns remux restart",
+                { position }
+            );
             this.sendMediaStatus(requestId);
             return;
         }

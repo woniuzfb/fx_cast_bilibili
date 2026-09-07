@@ -17,6 +17,8 @@ export let mediaServer: http.Server | undefined;
 export let mediaServerRequestId: string | undefined;
 let mediaServerStopPromise: Promise<void> | undefined;
 let dashRemuxProcess: ChildProcess | undefined;
+let dashCaptureInputServer: http.Server | undefined;
+let dashCaptureAbort: (() => void) | undefined;
 let dashTempDir: string | undefined;
 let dashServerGeneration = 0;
 const dashAuxProcesses = new Set<ChildProcess>();
@@ -380,15 +382,1008 @@ async function startDashRemuxServer(
         path.join(os.tmpdir(), "fx-cast-dash-")
     );
     dashTempDir = tempDir;
-    const mediaPath = "index.m3u8";
-    const playlistPath = path.join(tempDir, mediaPath);
+    const diskMediaPath = "index.m3u8";
+    const playlistPath = path.join(tempDir, diskMediaPath);
     const padPath = path.join(tempDir, "pad.ts");
+    // Public playlist path is unique per remux generation. Roku Media Player
+    // (and the Video node Media Assistant wraps) keys live HLS identity on
+    // the URL path: a query-only change is the same live asset, so a LOAD
+    // becomes "Rewind live TV" of the old stream. ffmpeg still writes
+    // index.m3u8 on disk; the HTTP handler aliases every *.m3u8 request onto
+    // that file.
+
+    const noisyCaptureEvents = new Set([
+        "ingest-received",
+        "page-init-served",
+        "page-segment-served"
+    ]);
+    const captureDebug = (event: string, details: Record<string, unknown>) => {
+        // Keep lifecycle evidence, but suppress per-chunk and per-segment spam.
+        if (noisyCaptureEvents.has(event)) return;
+        messaging.sendMessage({
+            subject: "main:dashRemuxDebug",
+            data: {
+                event: "response",
+                requestId,
+                details: JSON.stringify({
+                    pageCaptureEvent: event,
+                    ...details
+                })
+            }
+        });
+    };
+
+    type CaptureKind = "video" | "audio";
+    type CapturedRange = { start: number; end: number; body: Buffer };
+    type RangeWaiter = {
+        resolve: () => void;
+        reject: (error: Error) => void;
+    };
+    type CapturedInput = {
+        total?: number;
+        ranges: CapturedRange[];
+        bytes: number;
+        waiters: Set<RangeWaiter>;
+    };
+    const capturedInputs: Record<CaptureKind, CapturedInput> = {
+        video: { ranges: [], bytes: 0, waiters: new Set() },
+        audio: { ranges: [], bytes: 0, waiters: new Set() }
+    };
+    /**
+     * Consumption watermark per kind: the byte offset up to which the single
+     * sequential input stream for this kind has been fully served. The input
+     * is a one-pass non-seekable pipe, so ranges wholly below the watermark
+     * can never be re-read within this generation and are reclaimed on every
+     * ingest — this is what keeps a multi-hour cast bounded (retained data
+     * tracks the page's buffer-ahead, not the whole file). The watermark is
+     * sticky across stream closes so tail ranges stay reclaimed. The init
+     * range (start 0) is pinned: every input GET re-reads it first.
+     */
+    const consumedThrough: Record<CaptureKind, number> = {
+        video: 0,
+        audio: 0
+    };
+    /** One termination notification per generation (abort kills both kinds,
+     *  so the model is server-level, not per-kind). */
+    let captureTerminationNotified = false;
+    // Stall detection state. The streaming loop records a wait whenever the
+    // next sidx fragment is NOT contiguously captured; the ingest handler
+    // terminates the generation only while such a wait exists, is older than
+    // the threshold, and enough NEW unique bytes arrived since detection —
+    // proving the page is actively downloading past an unfillable gap. A
+    // paused page produces no ingests and never triggers this; a slow startup
+    // or a slow drain (no missing fragment) never records a wait at all.
+    type MissingSegmentWait = {
+        start: number;
+        end: number;
+        since: number;
+        /** Identifies the GET coroutine that recorded this wait. */
+        owner: symbol;
+    };
+    const missingSegmentWait: Partial<Record<CaptureKind, MissingSegmentWait>> =
+        {};
+    // Per-kind counter of unique NEW bytes captured BEYOND the currently
+    // awaited gap (missingSegmentWait[kind].end): reset whenever a new wait
+    // is recorded, advanced by the beyond-gap portion of each merge's net
+    // growth, and unaffected by eviction. The stall condition uses it to
+    // prove the page is actively playing forward past an unfillable gap —
+    // re-fetches before or around the gap do not count.
+    const uniqueBeyondGap: Record<CaptureKind, number> = {
+        video: 0,
+        audio: 0
+    };
+    /** Clear the kind's missing-wait state (owner-guarded when given) and
+     *  zero its activity counter, so no stale value can ever be read later. */
+    const clearMissingWait = (kind: CaptureKind, owner?: symbol) => {
+        if (owner !== undefined && missingSegmentWait[kind]?.owner !== owner) {
+            return;
+        }
+        delete missingSegmentWait[kind];
+        uniqueBeyondGap[kind] = 0;
+    };
+    /** Resident bytes at offsets >= endExclusive across the given ranges. */
+    const bytesBeyond = (
+        ranges: CapturedRange[],
+        endExclusive: number
+    ): number => {
+        let total = 0;
+        for (const range of ranges) {
+            const start = Math.max(range.start, endExclusive);
+            if (start <= range.end) {
+                total += range.end - start + 1;
+            }
+        }
+        return total;
+    };
+    const CAPTURE_KEEP_BEHIND_BYTES = 64 * 1024 * 1024;
+    // Stall rebuild thresholds: rebuild after the watermark sat still this
+    // long WHILE this much fresh data arrived beyond the freeze point. Not a
+    // read timeout — purely local state, and a paused page (no new ingests)
+    // can never satisfy the second condition.
+    const CAPTURE_STALL_REBUILD_MS = 30_000;
+    const CAPTURE_STALL_NEW_BYTES = 8 * 1024 * 1024;
+    // Contiguous captured bytes concatenate up to this size per range; beyond
+    // it adjacent ranges stay separate so eviction stays fine-grained. Must
+    // comfortably exceed the largest m4s fragment.
+    const CAPTURE_RANGE_MAX_BYTES = 8 * 1024 * 1024;
+    const CAPTURE_HARD_CAP_BYTES: Record<CaptureKind, number> = {
+        video: 768 * 1024 * 1024,
+        audio: 192 * 1024 * 1024
+    };
+    let captureStopped = false;
+    const wakeInput = (input: CapturedInput) => {
+        for (const waiter of [...input.waiters]) {
+            input.waiters.delete(waiter);
+            waiter.resolve();
+        }
+    };
+    const abortCapturedInputs = () => {
+        if (captureStopped) return;
+        captureStopped = true;
+        const error = new Error("Captured DASH input generation stopped");
+        for (const input of Object.values(capturedInputs)) {
+            for (const waiter of [...input.waiters]) {
+                input.waiters.delete(waiter);
+                waiter.reject(error);
+            }
+            // Drop the long-term references immediately: at overflow time
+            // this is up to the hard cap per kind, and future ingests are
+            // refused with 507. In-flight streaming coroutines may still hold
+            // a body slice across a pending drain — those copies are released
+            // when each coroutine unwinds on the rejected waiter — so the
+            // high-water mark decays as they exit rather than vanishing in
+            // this call.
+            input.ranges = [];
+            input.bytes = 0;
+            input.total = undefined;
+        }
+        clearMissingWait("video");
+        clearMissingWait("audio");
+    };
+    /**
+     * Terminal verdict for the current capture generation: notify the sender
+     * once (it rebuilds the relay at the page's current position) and abort —
+     * input streams end, ffmpeg fails fast, further ingests get 507. The
+     * termination is server-level: abort tears down BOTH kinds, so one flag
+     * guards the notification.
+     */
+    const terminateCapturedGeneration = (
+        kind: CaptureKind,
+        reason: string,
+        bytes: number
+    ) => {
+        if (!captureTerminationNotified) {
+            captureTerminationNotified = true;
+            captureDebug("capture-generation-terminated", {
+                kind,
+                reason,
+                bytes,
+                watermark: consumedThrough[kind]
+            });
+            messaging.sendMessage({
+                subject: "main:bilibiliCaptureOverflow",
+                data: { requestId, kind, reason }
+            });
+        }
+        abortCapturedInputs();
+    };
+    dashCaptureAbort = abortCapturedInputs;
+    const waitForInputEvent = (input: CapturedInput) =>
+        new Promise<void>((resolve, reject) => {
+            if (captureStopped || serverGeneration !== dashServerGeneration) {
+                reject(new Error("Captured DASH input generation stopped"));
+                return;
+            }
+            const waiter: RangeWaiter = { resolve, reject };
+            input.waiters.add(waiter);
+        });
+    const readBody = (req: http.IncomingMessage): Promise<Buffer> =>
+        new Promise((resolve, reject) => {
+            const chunks: Buffer[] = [];
+            req.on("data", chunk => chunks.push(Buffer.from(chunk)));
+            req.on("end", () => resolve(Buffer.concat(chunks)));
+            req.on("error", reject);
+        });
+    const mergeCapturedRange = (input: CapturedInput, added: CapturedRange) => {
+        const ranges = [...input.ranges, added].sort(
+            (left, right) => left.start - right.start
+        );
+        const merged: CapturedRange[] = [];
+        for (const range of ranges) {
+            const last = merged[merged.length - 1];
+            if (!last || range.start > last.end + 1) {
+                merged.push(range);
+                continue;
+            }
+            const overlapStart = Math.max(last.start, range.start);
+            const overlapEnd = Math.min(last.end, range.end);
+            if (overlapStart <= overlapEnd) {
+                const left = last.body.subarray(
+                    overlapStart - last.start,
+                    overlapEnd - last.start + 1
+                );
+                const right = range.body.subarray(
+                    overlapStart - range.start,
+                    overlapEnd - range.start + 1
+                );
+                if (!left.equals(right)) {
+                    throw new Error("Captured DASH overlap mismatch");
+                }
+            }
+            if (range.end <= last.end) continue;
+            const extension = range.body.subarray(last.end - range.start + 1);
+            // Contiguous appends stop concatenating at the granularity cap:
+            // the page downloads in order, so unbounded concatenation grows
+            // one giant range per kind and watermark eviction could then only
+            // reclaim whole-file blocks. Overlap extensions still concatenate
+            // (their byte-equality validation depends on it).
+            if (
+                range.start === last.end + 1 &&
+                last.body.length + extension.length > CAPTURE_RANGE_MAX_BYTES
+            ) {
+                merged.push({
+                    start: last.end + 1,
+                    end: range.end,
+                    body: extension
+                });
+                continue;
+            }
+            last.body = Buffer.concat([last.body, extension]);
+            last.end = range.end;
+        }
+        input.ranges = merged;
+        wakeInput(input);
+    };
+    // Non-copying completeness probe: true when [start..end] is contiguously
+    // captured. Used for startup clamping decisions and pre-write checks.
+    const hasCapturedRange = (
+        input: CapturedInput,
+        start: number,
+        end: number
+    ): boolean => {
+        let cursor = start;
+        for (const range of input.ranges) {
+            if (range.end < cursor) continue;
+            if (range.start > cursor) return false;
+            cursor = Math.min(range.end, end) + 1;
+            if (cursor > end) return true;
+        }
+        return false;
+    };
+    const copyCapturedRange = (
+        input: CapturedInput,
+        start: number,
+        end: number
+    ): Buffer => {
+        const parts: Buffer[] = [];
+        let cursor = start;
+        for (const range of input.ranges) {
+            if (range.end < cursor) continue;
+            if (range.start > cursor) break;
+            const to = Math.min(range.end, end);
+            parts.push(
+                range.body.subarray(cursor - range.start, to - range.start + 1)
+            );
+            cursor = to + 1;
+            if (cursor > end) return Buffer.concat(parts);
+        }
+        throw new Error("Captured DASH probe range incomplete");
+    };
+    let capturedVideoProbeStarted = false;
+    const probeCapturedVideoInput = (
+        initBody: Buffer,
+        selected: { start: number; end: number; time: number },
+        input: CapturedInput
+    ) => {
+        const publish = (details: Record<string, unknown>) =>
+            messaging.sendMessage({
+                subject: "main:dashRemuxDebug",
+                data: {
+                    event: "ffmpeg",
+                    requestId,
+                    details: JSON.stringify({
+                        inputSegmentProbe: {
+                            sourceStart: selected.start,
+                            sourceEnd: selected.end,
+                            mediaTime: selected.time,
+                            ...details
+                        }
+                    })
+                }
+            });
+        let probeBody: Buffer;
+        try {
+            probeBody = Buffer.concat([
+                initBody,
+                copyCapturedRange(input, selected.start, selected.end)
+            ]);
+        } catch (err) {
+            publish({
+                error: err instanceof Error ? err.message : String(err)
+            });
+            return;
+        }
+        const probePath = path.join(tempDir, "captured-input-probe.m4s");
+        const resolvedFfmpeg =
+            [
+                process.env.FX_CAST_BILIBILI_FFMPEG,
+                "/opt/homebrew/bin/ffmpeg",
+                "/usr/local/bin/ffmpeg",
+                "/usr/bin/ffmpeg"
+            ].find(candidate => candidate && fs.existsSync(candidate)) ??
+            "ffmpeg";
+        const ffprobePath = resolvedFfmpeg.replace(/ffmpeg$/, "ffprobe");
+        void fs.promises
+            .writeFile(probePath, probeBody)
+            .then(() => {
+                const probeProcess = spawn(
+                    ffprobePath,
+                    [
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-show_entries",
+                        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height",
+                        "-of",
+                        "json",
+                        probePath
+                    ],
+                    { stdio: ["ignore", "pipe", "pipe"] }
+                );
+                dashAuxProcesses.add(probeProcess);
+                let stdout = "";
+                let probeStderr = "";
+                probeProcess.stdout?.on("data", chunk => {
+                    stdout = (stdout + String(chunk)).slice(-32_000);
+                });
+                probeProcess.stderr?.on("data", chunk => {
+                    probeStderr = (probeStderr + String(chunk)).slice(-4_000);
+                });
+                const finish = () => {
+                    dashAuxProcesses.delete(probeProcess);
+                    void fs.promises.unlink(probePath).catch(() => undefined);
+                };
+                probeProcess.on("exit", code => {
+                    finish();
+                    try {
+                        const result = JSON.parse(stdout) as {
+                            streams?: unknown[];
+                        };
+                        publish({ code, streams: result.streams ?? [] });
+                    } catch {
+                        publish({
+                            code,
+                            error: probeStderr || "invalid ffprobe JSON"
+                        });
+                    }
+                });
+                probeProcess.on("error", err => {
+                    finish();
+                    publish({ error: err.message });
+                });
+            })
+            .catch(err => publish({ error: err.message }));
+    };
+    /**
+     * Stream a fully-captured byte range to the response WITHOUT assembling a
+     * concatenated copy first — a multi-MiB fragment spanning several
+     * granularity-capped ranges would otherwise be duplicated on every serve
+     * (one copy held by the cache, one by the concat result). Backpressure is
+     * honored per part. The caller must have verified coverage with
+     * hasCapturedRange; a gap encountered here is a contract violation and
+     * throws instead of hanging.
+     */
+    const writeCapturedRange = async (
+        input: CapturedInput,
+        start: number,
+        end: number,
+        res: http.ServerResponse
+    ): Promise<void> => {
+        let cursor = start;
+        for (const range of input.ranges) {
+            if (range.end < cursor) continue;
+            if (range.start > cursor) {
+                throw new Error("Captured DASH range gap during stream");
+            }
+            const to = Math.min(range.end, end);
+            const part = range.body.subarray(
+                cursor - range.start,
+                to - range.start + 1
+            );
+            if (!res.write(part)) {
+                // Wait for drain, but also escape on close/error: a consumer
+                // that dies while backpressured never drains, and waiting on
+                // drain alone would hang this coroutine forever.
+                await new Promise<void>((resolve, reject) => {
+                    const cleanup = () => {
+                        res.off("drain", onDrain);
+                        res.off("close", onClose);
+                        res.off("error", onError);
+                    };
+                    const onDrain = () => {
+                        cleanup();
+                        resolve();
+                    };
+                    const onClose = () => {
+                        cleanup();
+                        reject(new Error("Captured DASH consumer closed"));
+                    };
+                    const onError = (err: Error) => {
+                        cleanup();
+                        reject(err);
+                    };
+                    res.once("drain", onDrain);
+                    res.once("close", onClose);
+                    res.once("error", onError);
+                });
+            }
+            cursor = to + 1;
+            if (cursor > end) return;
+        }
+        throw new Error("Captured DASH range incomplete during stream");
+    };
+    let ffmpegVideoUrl = videoUrl;
+    let ffmpegAudioUrl = audioUrl;
+    if (rokuDashPrebuffer) {
+        const captureServer = http.createServer(async (req, res) => {
+            const requestUrl = new URL(req.url ?? "/", "http://localhost");
+            if (requestUrl.pathname === "/ingest" && req.method === "POST") {
+                if (requestUrl.searchParams.get("rid") !== requestId) {
+                    res.writeHead(403).end();
+                    return;
+                }
+                if (
+                    Number(requestUrl.searchParams.get("gen")) !==
+                    serverGeneration
+                ) {
+                    res.writeHead(409).end();
+                    return;
+                }
+                if (captureStopped) {
+                    // The generation was terminated (hard-cap overflow): a
+                    // definitive verdict the extension disarms on, not a
+                    // transient error to retry.
+                    res.writeHead(507).end();
+                    return;
+                }
+                const kind = requestUrl.searchParams.get(
+                    "kind"
+                ) as CaptureKind | null;
+                const start = Number(requestUrl.searchParams.get("start"));
+                const end = Number(requestUrl.searchParams.get("end"));
+                const total = Number(requestUrl.searchParams.get("total"));
+                if (
+                    (kind !== "video" && kind !== "audio") ||
+                    !Number.isSafeInteger(start) ||
+                    !Number.isSafeInteger(end) ||
+                    !Number.isSafeInteger(total) ||
+                    start < 0 ||
+                    end < start ||
+                    total <= end
+                ) {
+                    res.writeHead(400).end();
+                    return;
+                }
+                try {
+                    const body = await readBody(req);
+                    captureDebug("ingest-received", {
+                        generation: serverGeneration,
+                        kind,
+                        start,
+                        end,
+                        total,
+                        bodyBytes: body.length
+                    });
+                    if (body.length !== end - start + 1) {
+                        res.writeHead(422).end();
+                        return;
+                    }
+                    const input = capturedInputs[kind];
+                    if (input.total !== undefined && input.total !== total) {
+                        res.writeHead(409).end();
+                        return;
+                    }
+                    input.total = total;
+                    // Beyond-gap activity: the precise delta of resident
+                    // bytes at offsets beyond the awaited gap, measured
+                    // before and after this merge (pre-eviction, so eviction
+                    // cannot distort it). Only growth BEYOND the gap proves
+                    // the page is playing forward past it; re-fetches of
+                    // earlier ranges must not advance the stall clock.
+                    const activeWait = missingSegmentWait[kind];
+                    const beyondBefore = activeWait
+                        ? bytesBeyond(input.ranges, activeWait.end + 1)
+                        : 0;
+                    mergeCapturedRange(input, { start, end, body });
+                    input.bytes = input.ranges.reduce(
+                        (sum, range) => sum + (range.end - range.start + 1),
+                        0
+                    );
+                    if (activeWait) {
+                        const beyondAfter = bytesBeyond(
+                            input.ranges,
+                            activeWait.end + 1
+                        );
+                        uniqueBeyondGap[kind] += Math.max(
+                            0,
+                            beyondAfter - beyondBefore
+                        );
+                    }
+                    // Reclaim fully consumed ranges. Deleting data the input
+                    // stream has not read yet would punch a permanent hole
+                    // into the sequential stream, so eviction strictly follows
+                    // the consumption watermark (plus a runway). Ranges are
+                    // granularity-capped, so over-retention past the floor is
+                    // bounded by one range.
+                    const floor =
+                        consumedThrough[kind] - CAPTURE_KEEP_BEHIND_BYTES;
+                    if (floor > 0) {
+                        const kept: CapturedRange[] = [];
+                        let bytes = 0;
+                        let evicted = 0;
+                        for (const range of input.ranges) {
+                            const size = range.end - range.start + 1;
+                            // The init segment (range starting at 0) is pinned:
+                            // a reconnecting input re-reads it before anything
+                            // else, and the page almost never refetches it.
+                            if (range.start === 0) {
+                                kept.push(range);
+                                bytes += size;
+                                continue;
+                            }
+                            if (range.end < floor) {
+                                evicted += size;
+                                continue;
+                            }
+                            kept.push(range);
+                            bytes += size;
+                        }
+                        if (evicted > 0) {
+                            captureDebug("capture-evicted", {
+                                kind,
+                                watermark: consumedThrough[kind],
+                                evictedBytes: evicted
+                            });
+                        }
+                        input.ranges = kept;
+                        input.bytes = bytes;
+                    }
+                    // Absolute resident-memory cap, independent of stall
+                    // detection. Reaching it means un-consumable bytes have
+                    // piled up; the only safe reclaim is to rebuild the relay
+                    // at the page's current position — dropping un-read bytes
+                    // here would corrupt the stream instead.
+                    if (input.bytes > CAPTURE_HARD_CAP_BYTES[kind]) {
+                        // Absolute per-kind resident-memory fuse. It fires
+                        // unconditionally — no missing-wait or watermark
+                        // check — because an over-cap buffer is a resource
+                        // hazard regardless of why it grew. Terminal state:
+                        // notify the sender to rebuild, abort the generation
+                        // (input streams end, ffmpeg fails fast with a media
+                        // error instead of hanging), and refuse everything
+                        // else with 507. Continuing to ack would keep piling
+                        // un-consumable bytes into memory.
+                        terminateCapturedGeneration(
+                            kind,
+                            "hard-cap",
+                            input.bytes
+                        );
+                        res.writeHead(507).end();
+                        return;
+                    }
+                    const missing = missingSegmentWait[kind];
+                    if (
+                        missing &&
+                        hasCapturedRange(input, missing.start, missing.end)
+                    ) {
+                        // This very ingest just filled the gap the serving
+                        // loop is parked on — its wakeup is still a pending
+                        // microtask, so clear the stale wait and let the
+                        // stream continue. Terminating here would kill a
+                        // healed generation.
+                        clearMissingWait(kind);
+                    } else if (
+                        missing &&
+                        Date.now() - missing.since > CAPTURE_STALL_REBUILD_MS &&
+                        uniqueBeyondGap[kind] > CAPTURE_STALL_NEW_BYTES
+                    ) {
+                        // Stall detection: the stream is verifiably parked on
+                        // a missing fragment (recorded by the serving loop)
+                        // while the page keeps downloading past the gap — it
+                        // will never supply the missing bytes. Rebuild now
+                        // instead of growing toward the hard cap.
+                        terminateCapturedGeneration(
+                            kind,
+                            "watermark-stalled",
+                            input.bytes
+                        );
+                        res.writeHead(507).end();
+                        return;
+                    }
+                    res.writeHead(204).end();
+                } catch {
+                    res.writeHead(409).end();
+                }
+                return;
+            }
+            const kind: CaptureKind | undefined =
+                requestUrl.pathname === "/video"
+                    ? "video"
+                    : requestUrl.pathname === "/audio"
+                    ? "audio"
+                    : undefined;
+            if (!kind) {
+                res.writeHead(404).end();
+                return;
+            }
+            // Identifies THIS GET coroutine's stall-wait records: an abnormal
+            // exit clears its own state without touching a successor's.
+            const waitToken = Symbol();
+            const input = capturedInputs[kind];
+            captureDebug("input-request", {
+                kind,
+                method: req.method,
+                mode: "page-response-stream"
+            });
+            try {
+                if (req.method !== "GET") {
+                    res.writeHead(405).end();
+                    return;
+                }
+                while (input.total === undefined || input.ranges.length === 0)
+                    await waitForInputEvent(input);
+                res.writeHead(200, {
+                    "Content-Type":
+                        kind === "video" ? "video/mp4" : "audio/mp4",
+                    "Cache-Control": "no-store",
+                    "Transfer-Encoding": "chunked"
+                });
+                let init: CapturedRange | undefined;
+                type CapturedSegment = {
+                    start: number;
+                    end: number;
+                    time: number;
+                    duration: number;
+                    startsWithSap: boolean;
+                };
+                const segments: CapturedSegment[] = [];
+                let initEndExclusive: number | undefined;
+                let selectedSegmentIndex = -1;
+                let selectedStart: number | undefined;
+                let selectedTime = normalizedStartTime;
+                while (!segments.length) {
+                    init = input.ranges.find(range => range.start === 0);
+                    if (!init) {
+                        await waitForInputEvent(input);
+                        continue;
+                    }
+                    const bytes = init.body;
+                    const u32 = (offset: number) => bytes.readUInt32BE(offset);
+                    const u64 = (offset: number) =>
+                        Number(bytes.readBigUInt64BE(offset));
+                    for (let offset = 0; offset + 8 <= bytes.length; ) {
+                        const size = u32(offset);
+                        if (size < 8 || offset + size > bytes.length) break;
+                        if (
+                            bytes.toString("ascii", offset + 4, offset + 8) ===
+                            "sidx"
+                        ) {
+                            if (size < 32 || offset + size > bytes.length)
+                                break;
+                            const version = bytes[offset + 8];
+                            if (version !== 0 && version !== 1) break;
+                            const timescale = u32(offset + 16);
+                            if (!timescale) break;
+                            let cursor = offset + 20;
+                            const earliest =
+                                version === 0 ? u32(cursor) : u64(cursor);
+                            cursor += version === 0 ? 4 : 8;
+                            const firstOffset =
+                                version === 0 ? u32(cursor) : u64(cursor);
+                            cursor += version === 0 ? 4 : 8;
+                            cursor += 2;
+                            if (cursor + 2 > offset + size) break;
+                            const count = bytes.readUInt16BE(cursor);
+                            cursor += 2;
+                            // A complete sidx box must contain every reference
+                            // declared by reference_count. Do not accept a
+                            // prefix as a complete media map, otherwise a
+                            // target after the parsed prefix can be clamped to
+                            // the wrong fragment.
+                            if (
+                                count === 0 ||
+                                cursor + count * 12 > offset + size
+                            )
+                                break;
+                            let sourceStart = offset + size + firstOffset;
+                            initEndExclusive = sourceStart;
+                            let time = earliest / timescale;
+                            for (let i = 0; i < count; i++) {
+                                const reference = u32(cursor);
+                                const referenceType = reference >>> 31;
+                                const referenceSize = reference & 0x7fffffff;
+                                if (
+                                    referenceType !== 0 ||
+                                    referenceSize === 0
+                                ) {
+                                    segments.length = 0;
+                                    break;
+                                }
+                                const duration = u32(cursor + 4) / timescale;
+                                if (!(duration > 0)) {
+                                    segments.length = 0;
+                                    break;
+                                }
+                                const sap = u32(cursor + 8);
+                                const segment: CapturedSegment = {
+                                    start: sourceStart,
+                                    end: sourceStart + referenceSize - 1,
+                                    time,
+                                    duration,
+                                    startsWithSap: Boolean(sap >>> 31)
+                                };
+                                segments.push(segment);
+                                if (
+                                    selectedSegmentIndex < 0 &&
+                                    time <= normalizedStartTime &&
+                                    normalizedStartTime < time + duration
+                                ) {
+                                    selectedSegmentIndex = segments.length - 1;
+                                    selectedStart = segment.start;
+                                    selectedTime = segment.time;
+                                }
+                                sourceStart += referenceSize;
+                                time += duration;
+                                cursor += 12;
+                            }
+                            break;
+                        }
+                        offset += size;
+                    }
+                    if (!segments.length) {
+                        await waitForInputEvent(input);
+                    }
+                }
+                if (selectedSegmentIndex < 0 && segments.length) {
+                    // The requested page time can fall outside the indexed
+                    // interval because the page advances while the local relay
+                    // is being prepared. Clamp to the nearest indexed fragment;
+                    // never wrap a time after the final reference back to the
+                    // first fragment.
+                    selectedSegmentIndex =
+                        normalizedStartTime < segments[0].time
+                            ? 0
+                            : segments.length - 1;
+                    const selectedSegment = segments[selectedSegmentIndex];
+                    selectedStart = selectedSegment.start;
+                    selectedTime = selectedSegment.time;
+                }
+                if (kind === "video" && selectedSegmentIndex >= 0) {
+                    while (
+                        selectedSegmentIndex > 0 &&
+                        !segments[selectedSegmentIndex].startsWithSap
+                    ) {
+                        selectedSegmentIndex--;
+                    }
+                    if (!segments[selectedSegmentIndex].startsWithSap) {
+                        throw new Error("Missing video SAP start in sidx");
+                    }
+                    selectedStart = segments[selectedSegmentIndex].start;
+                    selectedTime = segments[selectedSegmentIndex].time;
+                }
+                // Never clamp to a captured fragment whose media time is far
+                // from the remux start. After a seek the previous page
+                // position is still in the capture buffer; using it would
+                // restart ffmpeg at the OLD time and the receiver would
+                // reload the same live item ("Rewind live TV").
+                const START_TIME_CAPTURE_TOLERANCE_SECONDS = 6;
+                const requestedTime = normalizedStartTime;
+                while (
+                    selectedSegmentIndex >= 0 &&
+                    !hasCapturedRange(
+                        input,
+                        segments[selectedSegmentIndex].start,
+                        segments[selectedSegmentIndex].end
+                    )
+                ) {
+                    const completeIndexes = segments
+                        .map((segment, index) =>
+                            hasCapturedRange(
+                                input,
+                                segment.start,
+                                segment.end
+                            ) &&
+                            Math.abs(segment.time - requestedTime) <=
+                                START_TIME_CAPTURE_TOLERANCE_SECONDS
+                                ? index
+                                : -1
+                        )
+                        .filter(index => index >= 0);
+                    const preceding = completeIndexes.filter(
+                        index => index <= selectedSegmentIndex
+                    );
+                    const clampedIndex = preceding[preceding.length - 1];
+                    if (clampedIndex === undefined) {
+                        const target = segments[selectedSegmentIndex];
+                        const existing = missingSegmentWait[kind];
+                        if (
+                            !existing ||
+                            existing.start !== target.start ||
+                            existing.end !== target.end ||
+                            existing.owner !== waitToken
+                        ) {
+                            uniqueBeyondGap[kind] = 0;
+                            missingSegmentWait[kind] = {
+                                start: target.start,
+                                end: target.end,
+                                since: Date.now(),
+                                owner: waitToken
+                            };
+                        }
+                        await waitForInputEvent(input);
+                        continue;
+                    }
+                    clearMissingWait(kind, waitToken);
+                    selectedSegmentIndex = clampedIndex;
+                    if (kind === "video") {
+                        while (
+                            selectedSegmentIndex > 0 &&
+                            !segments[selectedSegmentIndex].startsWithSap
+                        )
+                            selectedSegmentIndex--;
+                        if (!segments[selectedSegmentIndex].startsWithSap) {
+                            throw new Error("Missing captured video SAP start");
+                        }
+                    }
+                    selectedStart = segments[selectedSegmentIndex].start;
+                    selectedTime = segments[selectedSegmentIndex].time;
+                }
+                if (!init) throw new Error(`Missing ${kind} init response`);
+                if (
+                    selectedStart === undefined ||
+                    selectedSegmentIndex < 0 ||
+                    initEndExclusive === undefined ||
+                    initEndExclusive <= 0 ||
+                    initEndExclusive > init.body.length
+                ) {
+                    throw new Error(`Missing ${kind} sidx segment map`);
+                }
+                const initBody = init.body.subarray(0, initEndExclusive);
+                if (kind === "video" && !capturedVideoProbeStarted) {
+                    capturedVideoProbeStarted = true;
+                    probeCapturedVideoInput(
+                        initBody,
+                        segments[selectedSegmentIndex],
+                        input
+                    );
+                }
+                consumedThrough[kind] = Math.max(
+                    consumedThrough[kind],
+                    selectedStart
+                );
+                if (kind === "video") {
+                    padBaseSeconds = selectedTime;
+                    keyframeResolved = true;
+                }
+                captureDebug("page-response-start-selected", {
+                    kind,
+                    sourceStart: selectedStart,
+                    mediaTime: selectedTime,
+                    requestedTime: normalizedStartTime
+                });
+                res.write(initBody);
+                captureDebug("page-init-served", {
+                    kind,
+                    sourceStart: 0,
+                    sourceEnd: initEndExclusive - 1,
+                    bytes: initBody.length
+                });
+                let segmentIndex = selectedSegmentIndex;
+                while (
+                    !captureStopped &&
+                    serverGeneration === dashServerGeneration &&
+                    !res.destroyed
+                ) {
+                    if (segmentIndex >= segments.length) {
+                        // sidx is a complete, fixed reference table. Once the
+                        // final declared fragment has been served there cannot
+                        // be another valid fragment for this representation.
+                        // End the non-seekable input so FFmpeg can flush and
+                        // finalize the HLS playlist instead of waiting forever.
+                        break;
+                    }
+                    const segment = segments[segmentIndex];
+                    if (!hasCapturedRange(input, segment.start, segment.end)) {
+                        // Never skip a missing fragment (a tfdt hole would
+                        // desync the remux timeline from the page clock) and
+                        // never drop un-read bytes: if the page can never
+                        // supply the gap, the consumption watermark freezes.
+                        // Record the wait so the ingest handler can detect a
+                        // genuinely blocked stream (new data keeps arriving
+                        // past this gap) and trigger the relay rebuild.
+                        const existing = missingSegmentWait[kind];
+                        if (
+                            !existing ||
+                            existing.start !== segment.start ||
+                            existing.owner !== waitToken
+                        ) {
+                            // New wait: restart the beyond-gap activity
+                            // clock for this gap.
+                            uniqueBeyondGap[kind] = 0;
+                            missingSegmentWait[kind] = {
+                                start: segment.start,
+                                end: segment.end,
+                                since: Date.now(),
+                                owner: waitToken
+                            };
+                        }
+                        await waitForInputEvent(input);
+                        continue;
+                    }
+                    clearMissingWait(kind, waitToken);
+                    await writeCapturedRange(
+                        input,
+                        segment.start,
+                        segment.end,
+                        res
+                    );
+                    captureDebug("page-segment-served", {
+                        kind,
+                        sourceStart: segment.start,
+                        sourceEnd: segment.end,
+                        mediaTime: segment.time,
+                        duration: segment.duration,
+                        bytes: segment.end - segment.start + 1
+                    });
+                    consumedThrough[kind] = Math.max(
+                        consumedThrough[kind],
+                        segment.end + 1
+                    );
+                    segmentIndex++;
+                }
+                res.end();
+            } catch {
+                if (!res.headersSent) res.writeHead(503);
+                res.end();
+            } finally {
+                // Normal end, generation switch, destroyed response, parse
+                // error or backpressure failure: this GET's stall-wait state
+                // is always cleaned up, and never a successor's.
+                clearMissingWait(kind, waitToken);
+            }
+        });
+        dashCaptureInputServer = captureServer;
+        const capturePort = await new Promise<number>((resolve, reject) => {
+            captureServer.once("error", reject);
+            captureServer.listen(0, "127.0.0.1", () => {
+                captureServer.removeListener("error", reject);
+                const address = captureServer.address();
+                if (!address || typeof address === "string") {
+                    reject(new Error("No capture input port"));
+                    return;
+                }
+                resolve(address.port);
+            });
+        });
+        captureDebug("input-listening", {
+            port: capturePort,
+            generation: serverGeneration
+        });
+        messaging.sendMessage({
+            subject: "main:bilibiliPageCaptureReady",
+            data: { requestId, port: capturePort, generation: serverGeneration }
+        });
+        ffmpegVideoUrl = `http://127.0.0.1:${capturePort}/video`;
+        ffmpegAudioUrl = `http://127.0.0.1:${capturePort}/audio`;
+    }
     // Segment URLs get a per-restart generation query so the receiver can never
     // serve a stale cached segment from before a seek restart (same filenames,
     // different content).
     const generation = `${Date.now().toString(36)}-${Math.random()
         .toString(36)
         .slice(2, 8)}`;
+    const publicMediaPath = `s/${generation}/index.m3u8`;
     // Pad entries cover [0, padBaseSeconds) so the receiver's playlist-derived
     // timeline matches the real video timeline: currentTime/duration displays
     // and seek math stay in absolute video time even though ffmpeg only
@@ -579,35 +1574,43 @@ async function startDashRemuxServer(
         "-hide_banner",
         "-loglevel",
         "warning",
-        ...(rokuDashPrebuffer ? ["-fflags", "+genpts"] : []),
-        ...networkTimeoutArgs,
-        "-headers",
-        inputHeaders,
-        ...seekArgs,
+        ...(rokuDashPrebuffer ? ["-fflags", "+genpts", "-copyts"] : []),
+        ...(rokuDashPrebuffer ? [] : networkTimeoutArgs),
+        ...(rokuDashPrebuffer
+            ? ["-seekable", "0"]
+            : ["-headers", inputHeaders]),
+        ...(rokuDashPrebuffer ? [] : seekArgs),
         "-i",
-        videoUrl,
-        ...networkTimeoutArgs,
-        "-headers",
-        inputHeaders,
-        ...seekArgs,
+        ffmpegVideoUrl,
+        ...(rokuDashPrebuffer ? [] : networkTimeoutArgs),
+        ...(rokuDashPrebuffer
+            ? ["-seekable", "0"]
+            : ["-headers", inputHeaders]),
+        ...(rokuDashPrebuffer ? [] : seekArgs),
         "-i",
-        audioUrl,
+        ffmpegAudioUrl,
         "-map",
         "0:v:0",
         "-map",
         "1:a:0",
-        "-c",
-        "copy",
+        // libx264 is a Roku compatibility requirement for older devices that
+        // cannot decode the page-selected AV1/HEVC representation. Keep the
+        // established Chromecast path in stream-copy mode: making every DASH
+        // cast transcode delayed segment production enough for Chromecast to
+        // remain buffering while the source page was already paused.
         ...(rokuDashPrebuffer
             ? [
-                  "-avoid_negative_ts",
-                  "make_zero",
-                  "-muxdelay",
-                  "0",
-                  "-muxpreload",
-                  "0"
+                  "-c:v",
+                  "libx264",
+                  "-preset",
+                  "veryfast",
+                  "-pix_fmt",
+                  "yuv420p",
+                  "-c:a",
+                  "copy"
               ]
-            : []),
+            : ["-c", "copy"]),
+        ...(rokuDashPrebuffer ? ["-muxdelay", "0", "-muxpreload", "0"] : []),
         // Default Media Receiver accepts traditional MPEG-TS HLS more reliably
         // than fragmented MP4 HLS on older Chromecast generations.
         "-f",
@@ -644,7 +1647,7 @@ async function startDashRemuxServer(
     // read a packet window around startTime and take the last keyframe at or
     // before it. Runs in parallel with the remux; falls back to startTime on
     // any failure.
-    if (!keyframeResolved) {
+    if (!keyframeResolved && !rokuDashPrebuffer) {
         const ffprobePath = ffmpegPath.replace(/ffmpeg$/, "ffprobe");
         let probeStdout = "";
         const probeProcess = spawn(
@@ -860,18 +1863,24 @@ async function startDashRemuxServer(
             });
         });
         const pathname = decodeURIComponent(requestUrl.split("?", 1)[0]);
+        if (pathname.includes("..")) {
+            res.writeHead(404).end();
+            return;
+        }
         const filename = path.basename(pathname);
-        if (!filename || filename !== pathname.slice(1)) {
+        if (!filename) {
             res.writeHead(404).end();
             return;
         }
         // The playlist is rewritten on every request: pad entries for
         // [0, startTime) are injected and segment URLs get a cache-busting
-        // generation query (see above).
+        // generation query (see above). Any *.m3u8 alias (including the
+        // unique /s/<generation>/index.m3u8 path) maps onto the on-disk
+        // ffmpeg playlist so Roku sees a new live asset after each seek.
         if (filename.endsWith(".m3u8")) {
             try {
                 const raw = await fs.promises.readFile(
-                    path.join(tempDir, filename),
+                    playlistPath,
                     "utf8"
                 );
                 const omitPadding =
@@ -1139,7 +2148,7 @@ async function startDashRemuxServer(
                         subject: "mediaCast:mediaServerStarted",
                         data: {
                             requestId,
-                            mediaPath,
+                            mediaPath: publicMediaPath,
                             subtitlePaths: [],
                             localAddress: address,
                             mode: "dash-remux",
@@ -4307,14 +5316,19 @@ export function stopMediaServer() {
     const auxiliaryProcesses = [...dashAuxProcesses];
     dashAuxProcesses.clear();
     const server = mediaServer;
+    const captureInputServer = dashCaptureInputServer;
+    const captureAbort = dashCaptureAbort;
     const remuxProcess = dashRemuxProcess;
     const tempDir = dashTempDir;
     mediaServer = undefined;
     mediaServerRequestId = undefined;
     dashRemuxProcess = undefined;
+    dashCaptureInputServer = undefined;
+    dashCaptureAbort = undefined;
     dashTempDir = undefined;
 
     mediaServerStopPromise = (async () => {
+        captureAbort?.();
         for (const process of auxiliaryProcesses) {
             if (process.exitCode === null) process.kill("SIGKILL");
         }
@@ -4334,6 +5348,13 @@ export function stopMediaServer() {
                 const finalTimeout = setTimeout(finish, 5000);
                 remuxProcess.once("exit", finish);
                 remuxProcess.kill("SIGTERM");
+            });
+        }
+
+        if (captureInputServer) {
+            await new Promise<void>(resolve => {
+                captureInputServer.close(() => resolve());
+                captureInputServer.closeAllConnections?.();
             });
         }
 

@@ -267,6 +267,9 @@ type MessageDefinitions = {
         hlsLive?: boolean;
         /** Hold Bilibili DASH readiness until Roku startup segments are closed, then drip a complete-only EVENT prefix. */
         rokuDashPrebuffer?: boolean;
+        /** Seek remux restart: drop mid-file captured fragments so ffmpeg
+         *  cannot start at the previous page position. */
+        resetCaptureWindow?: boolean;
         cctvDebugEnabled?: boolean;
         userAgent?: string;
     };
@@ -311,6 +314,25 @@ type MessageDefinitions = {
      * Sent to media sender from bridge when the media server has
      * stopped.
      */
+    "main:bilibiliPageCaptureReady": {
+        requestId: string;
+        port: number;
+        generation: number;
+    };
+    /**
+     * The captured-DASH generation hit a terminal buffer condition —
+     * either the absolute hard cap or a stalled consumption watermark with
+     * fresh data arriving past an unfillable gap (see `reason`). The only
+     * safe reclaim is a relay rebuild at the page's current position; the
+     * background forwards this to the tab's sender, which re-casts (fresh
+     * generation, fresh capture window).
+     */
+    "main:bilibiliCaptureOverflow": {
+        requestId: string;
+        kind: "video" | "audio";
+        /** "hard-cap" | "watermark-stalled" */
+        reason?: string;
+    };
     "mediaCast:mediaServerStopped": { requestId: string };
     /**
      * Sent to media sender from bridge when the media server has
