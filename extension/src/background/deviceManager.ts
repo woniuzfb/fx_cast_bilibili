@@ -226,7 +226,14 @@ export default new (class extends TypedEventTarget<EventMap> {
         // must never fork the generation.
         setRokuMediaIdentityFields(deviceId, {
             contentId: media.contentId,
-            ownerId
+            ownerId,
+            // The synthetic-DVR relay publishes its optimistic media under
+            // `relay:${requestId}`; remember the request id itself so relay
+            // lifecycle messages stay correlatable even after the real session
+            // media overwrites ownerId.
+            relayRequestId: ownerId.startsWith("relay:")
+                ? ownerId.slice("relay:".length)
+                : undefined
         });
         const optimistic =
             (media.customData as { optimisticRelayMedia?: unknown } | null)

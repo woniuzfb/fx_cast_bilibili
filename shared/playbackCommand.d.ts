@@ -55,6 +55,15 @@ export interface RokuMediaIdentity {
     loadGeneration: number;
     contentId?: string;
     ownerId?: string;
+    /**
+     * Request id of the relay (synthetic DVR) that started this LOAD, when the
+     * cast went through one. Separate from `ownerId` on purpose: `ownerId`
+     * names whoever most recently published media for this LOAD and is
+     * overwritten when the real session media replaces the optimistic relay
+     * media, so it cannot be used to correlate relay lifecycle messages
+     * (mediaCast:mediaServerStopped) with a command.
+     */
+    relayRequestId?: string;
 }
 
 /** A command that is executing or has just finished. */

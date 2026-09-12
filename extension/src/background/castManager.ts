@@ -33,7 +33,8 @@ import {
     configurePlaybackCommands,
     dispatchPlaybackCommand,
     setPlaybackDeviceLookup,
-    terminateActivePlaybackCommandForOwner
+    terminateActivePlaybackCommand,
+    terminateActivePlaybackCommandForRelay
 } from "./playbackCommand";
 import { ActionState, updateActionState } from "./action";
 import {
@@ -871,9 +872,9 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
                 // the relay it would drive is gone. Guarded by the owner so a
                 // late stop from a superseded relay cannot terminate the
                 // command of a newer LOAD.
-                terminateActivePlaybackCommandForOwner(
+                terminateActivePlaybackCommandForRelay(
                     relayDeviceId,
-                    `relay:${message.data.requestId}`,
+                    message.data.requestId,
                     "stopped"
                 );
                 deviceManager.clearOptimisticRokuSessionMedia(
@@ -985,6 +986,14 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             if (session?.sessionId === sessionId) {
                 activeSessions.delete(sessionId);
                 delete instance.session;
+                // A stopped session cannot execute a play/pause command, and
+                // this path is NOT covered by mediaCast:mediaServerStopped: a
+                // Roku STOP tears the session down over ECP without stopping
+                // the DASH relay. Without this the optimistic intent would sit
+                // on the button until the command watchdog expired.
+                // The session carries the receiver device id (see the same
+                // lookup in the session-media handling above).
+                terminateActivePlaybackCommand(session.deviceId, "stopped");
                 refreshReceiverSelector();
 
                 if (instance.contentContext?.tabId !== undefined) {

@@ -107,12 +107,22 @@ export function nextRokuLoadGeneration(deviceId: string): number {
  */
 export function setRokuMediaIdentityFields(
     deviceId: string,
-    fields: { contentId?: string; ownerId?: string }
+    fields: {
+        contentId?: string;
+        ownerId?: string;
+        relayRequestId?: string;
+    }
 ) {
     const identity = mediaIdentities.get(deviceId);
     if (!identity) return;
     if (fields.contentId !== undefined) identity.contentId = fields.contentId;
     if (fields.ownerId !== undefined) identity.ownerId = fields.ownerId;
+    // Set only by the optimistic relay media, and never cleared: the real
+    // session media that follows legitimately replaces ownerId, but the relay
+    // association must survive so a relay stop can still find this command.
+    if (fields.relayRequestId !== undefined) {
+        identity.relayRequestId = fields.relayRequestId;
+    }
 }
 
 export function currentRokuMediaIdentity(
@@ -354,18 +364,23 @@ export function terminateActivePlaybackCommand(
 }
 
 /**
- * Terminates the device's active command only when it belongs to the given
- * media owner. Used by relay lifecycle messages, where a late stop from a
- * superseded relay must not touch a newer LOAD's command.
+ * Terminates the device's active command only when this relay started the LOAD
+ * it belongs to. Used by relay lifecycle messages, where a late stop from a
+ * superseded relay must not touch a newer relay's command.
+ *
+ * Matches on `relayRequestId`, not `ownerId`: ownerId names whoever published
+ * media last and is overwritten once the real session media replaces the
+ * optimistic relay media, so a command issued after that point would never
+ * match a relay stop.
  */
-export function terminateActivePlaybackCommandForOwner(
+export function terminateActivePlaybackCommandForRelay(
     deviceId: string,
-    ownerId: string,
+    relayRequestId: string,
     reason: PlaybackCommandTerminalReason
 ) {
     const command = commands.get(deviceId);
     if (!command || command.lifecycle !== "active") return;
-    if (command.mediaIdentity.ownerId !== ownerId) return;
+    if (command.mediaIdentity.relayRequestId !== relayRequestId) return;
     terminateIfCurrent(deviceId, command, reason);
 }
 
