@@ -753,21 +753,16 @@ export default class RokuSession {
         return changed || newSegmentAfterIdle || newTelemetryWithoutSegment;
     }
 
-    /** PLAY/PAUSE keypresses. The Play key toggles on some firmware, so the
-     * key is chosen against the last polled state when known. */
+    /** PLAY/PAUSE keypresses: an absolute intent mapped to its ECP key.
+     * Whether the Play key toggles on some firmware is not verified here, so
+     * the mapping is kept mechanical (see the note below). */
     private async handlePlayPause(requestId: number, intent: "PLAY" | "PAUSE") {
-        const key =
-            this.playerState === "PLAYING"
-                ? intent === "PLAY"
-                    ? "Play" // already playing; harmless no-op
-                    : "Pause"
-                : this.playerState === "PAUSED"
-                ? intent === "PLAY"
-                    ? "Play"
-                    : "Pause" // already paused; harmless no-op
-                : intent === "PLAY"
-                ? "Play"
-                : "Pause";
+        // Absolute intent -> ECP key, one-to-one. The previous "already
+        // playing/paused; harmless no-op" branches were an identity
+        // expression: every branch returned the same literal as `intent`, so
+        // the observed playerState never affected the key and the no-op
+        // assumption in those comments was never actually enforced.
+        const key = intent === "PLAY" ? "Play" : "Pause";
 
         try {
             await keypress(this.receiverDevice.host, key);

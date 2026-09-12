@@ -353,19 +353,13 @@ export default class RokuRemote {
     }
 
     private handlePlayPause(intent: "PLAY" | "PAUSE") {
-        // State-aware key choice avoids the Play-key toggle ambiguity.
-        const isPlaying =
-            this.lastState.state === "play" ||
-            this.lastState.state === "buffer" ||
-            this.lastState.state === "buffering";
-        const key =
-            intent === "PLAY"
-                ? isPlaying
-                    ? "Play"
-                    : "Play"
-                : isPlaying
-                ? "Pause"
-                : "Pause";
+        // Absolute intent -> ECP key, one-to-one. The previous "state-aware"
+        // ternary here was an identity expression (all four branches returned
+        // the same literal as `intent`), so it never consulted the observed
+        // state despite its comment. Whether the Roku Play key toggles is
+        // firmware behaviour this repo has not verified, so the mapping is
+        // deliberately kept mechanical and unchanged.
+        const key = intent === "PLAY" ? "Play" : "Pause";
 
         void keypress(this.host, key)
             .then(() => {

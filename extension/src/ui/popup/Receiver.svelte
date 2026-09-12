@@ -13,7 +13,7 @@
     import { MenuId } from "../../menuIds";
 
     import type { Volume } from "../../cast/sdk/classes";
-    import { PlayerState, TrackType } from "../../cast/sdk/media/enums";
+    import { TrackType } from "../../cast/sdk/media/enums";
     import type {
         SenderMediaMessage,
         SenderMessage
@@ -22,6 +22,7 @@
 
     import LoadingIndicator from "../LoadingIndicator.svelte";
     import ReceiverMedia from "./ReceiverMedia.svelte";
+    import { playbackIntentFromState } from "./playbackIntent";
 
     const _ = browser.i18n.getMessage;
 
@@ -325,14 +326,12 @@
     }
 
     function handleMediaPlayPause() {
-        switch (mediaStatus?.playerState) {
-            case PlayerState.PLAYING:
-                sendMediaMessage({ type: "PAUSE" });
-                break;
-            case PlayerState.PAUSED:
-                sendMediaMessage({ type: "PLAY" });
-                break;
-        }
+        // One derivation for the button, its tooltip, the context menu and
+        // this command (see playbackIntent). IDLE has no intent: fall back to
+        // a best-effort resume, which is the long-standing menu behaviour.
+        const intent =
+            playbackIntentFromState(mediaStatus?.playerState) ?? "PLAY";
+        sendMediaMessage({ type: intent });
     }
     function handleMediaSkipPrevious() {
         sendMediaMessage({
@@ -453,18 +452,20 @@
             visible: true
         });
 
-        // Play/pause menu item
+        // Play/pause menu item. Title and enabled state come from the same
+        // helper as the panel button, so the two affordances cannot disagree
+        // (the menu used to be titled "Pause" while disabled during
+        // BUFFERING, next to a button that showed a pause icon and did
+        // nothing when clicked).
+        const playbackIntent = playbackIntentFromState(mediaStatus.playerState);
         if (mediaStatus.supportedMediaCommands & _MediaCommand.PAUSE) {
             browser.menus.update(MenuId.PopupMediaPlayPause, {
                 visible: true,
                 title:
-                    mediaStatus.playerState === PlayerState.PLAYING ||
-                    mediaStatus.playerState === PlayerState.BUFFERING
+                    playbackIntent === "PAUSE"
                         ? _("popupMediaPause")
                         : _("popupMediaPlay"),
-                enabled:
-                    mediaStatus.playerState === PlayerState.PLAYING ||
-                    mediaStatus.playerState === PlayerState.PAUSED
+                enabled: playbackIntent !== undefined
             });
         } else {
             browser.menus.update(MenuId.PopupMediaPlayPause, {

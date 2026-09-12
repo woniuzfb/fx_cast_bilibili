@@ -19,6 +19,7 @@
         updatePopupMediaTimeline,
         type PopupMediaTimeline
     } from "./mediaTimeline";
+    import { playbackIntentFromState } from "./playbackIntent";
 
     const _ = browser.i18n.getMessage;
 
@@ -45,9 +46,21 @@
      */
     export let debugEnabled = false;
 
-    $: isPlayingOrPaused =
-        status.playerState === PlayerState.PLAYING ||
-        status.playerState === PlayerState.PAUSED;
+    /**
+     * The action the play/pause button offers: the icon, its tooltip and the
+     * message the click sends all come from this one derivation, so they can
+     * no longer disagree. Previously the icon treated BUFFERING as "playing"
+     * while the tooltip treated it as "not playing", and the click handler in
+     * Receiver matched neither, so a click while buffering silently did
+     * nothing.
+     *
+     * `undefined` (IDLE) disables the button. IDLE is deliberately NOT
+     * remapped to the PLAY intent: the handler already falls back to PLAY for
+     * the context-menu item, and the click result for an idle receiver is a
+     * buffering window either way, so a disabled button is the honest
+     * affordance.
+     */
+    $: nextPlaybackIntent = playbackIntentFromState(status.playerState);
 
     // DASH remux sessions (Bilibili) report a live-style event playlist: the
     // receiver may omit media.duration and the SEEK capability even though
@@ -557,14 +570,12 @@
             {#if status.supportedMediaCommands & _MediaCommand.PAUSE}
                 <button
                     class={`ghost ${
-                        status.playerState === PlayerState.PLAYING ||
-                        status.playerState === PlayerState.BUFFERING ||
-                        seekSettling
+                        nextPlaybackIntent === "PAUSE" || seekSettling
                             ? "media__pause-button"
                             : "media__play-button"
                     }`}
-                    title={isPlayingOrPaused &&
-                    status.playerState === PlayerState.PLAYING
+                    disabled={nextPlaybackIntent === undefined}
+                    title={nextPlaybackIntent === "PAUSE"
                         ? _("popupMediaPause")
                         : _("popupMediaPlay")}
                     on:click={() => dispatch("togglePlayback")}

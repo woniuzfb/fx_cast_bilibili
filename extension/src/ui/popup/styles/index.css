@@ -376,6 +376,14 @@ body {
     min-width: 28px;
 }
 
+/* The play/pause button is disabled while the receiver reports IDLE, i.e.
+   while there is no meaningful play/pause intent to offer. `.ghost` carries no
+   disabled styling of its own, so without this the button would look live. */
+.media__buttons .ghost:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
 .media__play-button {
     background-image: url("../icons/play.svg");
 }
