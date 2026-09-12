@@ -536,13 +536,23 @@ export default class RokuRemote {
 
             if (stateChanged || positionMoved || appChanged) {
                 this.emitReceiverStatus();
-                this.emitMediaStatus({
-                    source: "ecp-poll",
-                    pollStartedAt,
-                    pollCompletedAt: Date.now(),
-                    sequence: ++this.pollSequence
-                });
             }
+            // Every completed poll is a sample, and must be published as one
+            // regardless of whether it differs from the cached state: an
+            // observation is "a fresh /query/media-player result", not "a
+            // change". Throttling this to deltas silently starves command
+            // confirmation of the exact case it needs — after a PLAY/PAUSE
+            // keypress the cached state already holds the requested one, so a
+            // poll that agrees with the device can look like "no change" and
+            // never be published, leaving the command unconfirmed.
+            //
+            // (Receiver status, which drives the popup, stays throttled.)
+            this.emitMediaStatus({
+                source: "ecp-poll",
+                pollStartedAt,
+                pollCompletedAt: Date.now(),
+                sequence: ++this.pollSequence
+            });
         } catch {
             // Leave lastState as-is; deviceBrowser health-checks decide when
             // the device is gone.

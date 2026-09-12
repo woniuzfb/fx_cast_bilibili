@@ -97,12 +97,15 @@ export type PagePlaybackPhase = "not-started" | "requesting" | "failed";
 /**
  * Receiver-side progress.
  *
- * `confirmed` requires an `ecp-poll` observation that STARTED after the
- * receiver was commanded and matched the intent. `not-confirmed` means an
- * observation existed but never matched (including still being transitional at
- * the deadline). A command that was dispatched but produced no usable
- * observation lands here too, distinguished by
- * `terminalReason === "observation-unavailable"`.
+ * `confirmed` requires an `ecp-poll` observation whose poll STARTED after the
+ * receiver was commanded (see provenance.pollStartedAt) and matched the
+ * intent. `not-confirmed` means such an observation existed but never matched,
+ * including one still transitional at the deadline.
+ *
+ * A dispatched command that produced no usable observation keeps
+ * receiverPhase `requested` and is distinguished by
+ * `terminalReason === "observation-unavailable"`: it never claims the receiver
+ * ended up in the wrong state.
  */
 export type ReceiverPlaybackPhase =
     | "not-started"

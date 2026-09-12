@@ -696,6 +696,38 @@ const castManager = new (class {
     }
 })();
 
+/**
+ * Receiver observations for the playback-command coordinator.
+ *
+ * Registered at module scope, NOT inside createSelector(): a command's
+ * confirmation must not depend on a popup being open. Tying this to the
+ * selector's lifetime meant that closing the popup (or having no selector at
+ * all for a given command) removed the only consumer, so RokuRemote kept
+ * polling while the coordinator saw nothing and every command expired as
+ * "observation-unavailable".
+ *
+ * Only an `ecp-poll` sample can confirm a command; the coordinator applies
+ * that filter itself, so this only forwards what the bridge declared, and
+ * skips statuses the extension synthesized (they carry no provenance).
+ */
+function onPlaybackDeviceMediaUpdated(
+    ev: CustomEvent<{
+        deviceId: string;
+        status: MediaStatus;
+        provenance?: RokuMediaStatusProvenance;
+    }>
+) {
+    const { deviceId, status, provenance } = ev.detail;
+    if (!provenance) return;
+    const device = deviceManager.getDeviceById(deviceId);
+    if (!device) return;
+    acceptReceiverObservation(device, status, provenance, Date.now());
+}
+deviceManager.addEventListener(
+    "deviceMediaUpdated",
+    onPlaybackDeviceMediaUpdated as EventListener
+);
+
 export default castManager;
 
 /** Handles messages to cast instances from bridge. */
@@ -1891,29 +1923,6 @@ function createSelector(tabId: number) {
     // Update selector data whenever devices change/update
     const onDeviceChange = () => refreshReceiverSelector();
 
-    // Receiver observations for the playback-command coordinator. Only an
-    // `ecp-poll` sample can confirm a command; the coordinator applies that
-    // filter itself, so this only forwards what the bridge declared. Statuses
-    // the extension synthesizes carry no provenance and are skipped.
-    const onDeviceMediaUpdated = (
-        ev: CustomEvent<{
-            deviceId: string;
-            status: MediaStatus;
-            provenance?: RokuMediaStatusProvenance;
-        }>
-    ) => {
-        refreshReceiverSelector();
-        const { deviceId, status, provenance } = ev.detail;
-        if (!provenance) return;
-        const device = deviceManager.getDeviceById(deviceId);
-        if (!device) return;
-        acceptReceiverObservation(device, status, provenance, Date.now());
-    };
-    deviceManager.addEventListener(
-        "deviceMediaUpdated",
-        onDeviceMediaUpdated as EventListener
-    );
-
     deviceManager.addEventListener("deviceUp", onDeviceChange);
     deviceManager.addEventListener("deviceDown", onDeviceChange);
     deviceManager.addEventListener("deviceUpdated", onDeviceChange);
@@ -1928,7 +1937,7 @@ function createSelector(tabId: number) {
             deviceManager.removeEventListener("deviceUpdated", onDeviceChange);
             deviceManager.removeEventListener(
                 "deviceMediaUpdated",
-                onDeviceMediaUpdated as EventListener
+                onDeviceChange
             );
 
             selector.removeEventListener("stop", onStop);

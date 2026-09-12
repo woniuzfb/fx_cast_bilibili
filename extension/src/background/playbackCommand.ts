@@ -267,13 +267,15 @@ function acceptObservation(
     // command just dispatched (volume-key-echo and status-probe replay it too,
     // so excluding only command-echo would not be enough).
     if (provenance.source !== "ecp-poll") return;
+    // Strict causal gate, on when the SAMPLE was taken rather than when the
+    // message arrived: a poll that started before the command was dispatched
+    // may still return after it, and its state predates the command - the
+    // response was already read before the keypress could reach the device.
+    // `receivedAt` alone would accept such a sample.
     if (
-        command.receiverRequestedAt !== undefined &&
-        receivedAt < command.receiverRequestedAt
+        command.receiverRequestedAt === undefined ||
+        provenance.pollStartedAt < command.receiverRequestedAt
     ) {
-        // An observation that merely ARRIVED after the dispatch. The poll
-        // itself may have started before it, so this is a weak gate;
-        // provenance.pollStartedAt is what makes it causal.
         return;
     }
 
