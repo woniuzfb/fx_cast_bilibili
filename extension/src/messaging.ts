@@ -452,6 +452,18 @@ type BridgeMessageDefinitions = {
     "bilibili:pageCaptureReady": {
         requestId: string;
     };
+    /**
+     * One completed Roku ECP poll sample (see the bridge-side definition).
+     * Emitted even for an idle poll, which the device media status feed cannot
+     * express, so play/pause confirmation can distinguish "observed idle" from
+     * "no observation at all".
+     */
+    "main:rokuPlaybackObservation": {
+        deviceId: string;
+        status: MediaStatus;
+        provenance: RokuMediaStatusProvenance;
+    };
+
     /** Bridge capture generation terminal condition (see `reason`): buffer
      *  pressure (hard cap, stalled watermark) or a broken media identity
      *  (malformed metadata, bad payload length, conflicting bytes, foreign

@@ -73,6 +73,22 @@ type MessageDefinitions = {
         status: ReceiverStatus;
     };
     /**
+     * One completed ECP poll sample, forwarded for command confirmation.
+     *
+     * Emitted for EVERY successful /query/media-player poll, including one that
+     * reports idle - which main:receiverDeviceMediaStatusUpdated cannot carry,
+     * because its RokuRemote producer suppresses the "nothing to report" idle
+     * state. Consumers use this only to correlate a play/pause command with a
+     * post-command observation; it deliberately does not drive the device media
+     * status (that stays with main:receiverDeviceMediaStatusUpdated).
+     */
+    "main:rokuPlaybackObservation": {
+        deviceId: string;
+        status: MediaStatus;
+        provenance: RokuMediaStatusProvenance;
+    };
+
+    /**
      * Device-level media status emitted by a receiver remote.
      *
      * RokuRemote emits fresh ECP poll observations AND locally synthesized or

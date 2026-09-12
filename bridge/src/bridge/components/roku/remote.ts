@@ -143,6 +143,18 @@ interface RokuRemoteOptions {
     onReceiverStatusUpdate?: (status: ReceiverStatus) => void;
     onMediaStatusUpdate?: (emission: RokuMediaStatusEmission) => void;
     /**
+     * Every completed ECP poll sample, with its provenance.
+     *
+     * Separate from onMediaStatusUpdate because that one suppresses the idle
+     * state ("nothing to report"), while confirmation needs to see an idle
+     * sample as an observation - "the device is idle" and "we could not observe
+     * the device" are different verdicts.
+     */
+    onPlaybackObservation?: (
+        status: MediaStatus,
+        provenance: RokuMediaStatusProvenance
+    ) => void;
+    /**
      * Flattened buildStatusMedia snapshot, forwarded by the owner to the
      * extension background log. Only invoked when the snapshot changes.
      */
@@ -547,12 +559,29 @@ export default class RokuRemote {
             // never be published, leaving the command unconfirmed.
             //
             // (Receiver status, which drives the popup, stays throttled.)
-            this.emitMediaStatus({
+            const pollProvenance: RokuMediaStatusProvenance = {
                 source: "ecp-poll",
                 pollStartedAt,
                 pollCompletedAt: Date.now(),
                 sequence: ++this.pollSequence
-            });
+            };
+            this.emitMediaStatus(pollProvenance);
+            // Also report the raw sample, so an idle poll is still an
+            // observation rather than silence (emitMediaStatus suppresses idle
+            // as "nothing to report").
+            this.options.onPlaybackObservation?.(
+                {
+                    mediaSessionId: 1,
+                    playbackRate: 1,
+                    playerState: this.observedPlayerState(state.state),
+                    currentTime: state.position ?? 0,
+                    supportedMediaCommands: SUPPORTED_MEDIA_COMMANDS,
+                    repeatMode: RepeatMode.OFF,
+                    volume: this.volume,
+                    customData: null
+                },
+                pollProvenance
+            );
         } catch {
             // Leave lastState as-is; deviceBrowser health-checks decide when
             // the device is gone.
@@ -766,6 +795,31 @@ export default class RokuRemote {
         this.options.onMediaStatusUpdate?.({ status: undefined });
     }
 
+    /**
+     * Maps a raw ECP playback state onto the extension's player state.
+     *
+     * Unlike buildMediaStatus, an unknown/idle state stays IDLE instead of
+     * falling back to PLAYING: an observation has to be able to say "the device
+     * is idle", or "observed idle" and "no observation at all" become the same
+     * verdict.
+     */
+    private observedPlayerState(state: string | undefined): PlayerState {
+        switch (state) {
+            case "pausing":
+            case "paused":
+            case "pause":
+                return PlayerState.PAUSED;
+            case "buffering":
+            case "buffer":
+                return PlayerState.BUFFERING;
+            case "play":
+            case "playing":
+                return PlayerState.PLAYING;
+            default:
+                return PlayerState.IDLE;
+        }
+    }
+
     private emitMediaStatus(provenance: RokuMediaStatusProvenance) {
         if (this.destroyed) return;
 
@@ -800,7 +854,23 @@ export default class RokuRemote {
             return;
         }
 
-        const status: MediaStatus = {
+        this.options.onMediaStatusUpdate?.({
+            status: this.buildMediaStatus(),
+            provenance
+        });
+    }
+
+    /**
+     * Synthesizes the media status for the current cached state.
+     *
+     * Note the fallback: any unrecognized state (including idle) maps to
+     * PLAYING. Callers that need the device's real state must therefore not
+     * rely on this mapping alone - the idle case never reaches here through
+     * emitMediaStatus, which is why the poll path reports its raw sample
+     * through onPlaybackObservation as well.
+     */
+    private buildMediaStatus(): MediaStatus {
+        return {
             mediaSessionId: 1,
             media: this.buildStatusMedia(this.lastState.duration),
             playbackRate: 1,
@@ -819,7 +889,5 @@ export default class RokuRemote {
             volume: this.volume,
             customData: null
         };
-
-        this.options.onMediaStatusUpdate?.({ status, provenance });
     }
 }

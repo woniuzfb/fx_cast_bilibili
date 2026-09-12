@@ -51,6 +51,16 @@ interface EventMap {
     };
     /** The device's play/pause command view changed (see playbackCommand). */
     devicePlaybackUpdated: { deviceId: string };
+    /**
+     * One completed ECP poll sample, including idle. Distinct from
+     * deviceMediaUpdated, which the bridge suppresses for idle ("nothing to
+     * report") - an observed idle must not look like a failed observation.
+     */
+    rokuPlaybackObservation: {
+        deviceId: string;
+        status: MediaStatus;
+        provenance: RokuMediaStatusProvenance;
+    };
 
     applicationFound: { deviceId: string; appId: string };
     applicationClosed: { deviceId: string; appId: string; sessionId: string };
@@ -636,6 +646,19 @@ export default new (class extends TypedEventTarget<EventMap> {
                     );
                 }
 
+                break;
+            }
+
+            case "main:rokuPlaybackObservation": {
+                // Observation-only feed: does not touch device.mediaStatus,
+                // so the media clear semantics stay exactly as they were.
+                const { deviceId, status, provenance } = message.data;
+                if (!this.receiverDevices.has(deviceId)) break;
+                this.dispatchEvent(
+                    new CustomEvent("rokuPlaybackObservation", {
+                        detail: { deviceId, status, provenance }
+                    })
+                );
                 break;
             }
 

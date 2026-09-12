@@ -719,13 +719,35 @@ function onPlaybackDeviceMediaUpdated(
 ) {
     const { deviceId, status, provenance } = ev.detail;
     if (!provenance) return;
-    const device = deviceManager.getDeviceById(deviceId);
-    if (!device) return;
-    acceptReceiverObservation(device, status, provenance, Date.now());
+    acceptReceiverObservation(deviceId, status, provenance, Date.now());
 }
 deviceManager.addEventListener(
     "deviceMediaUpdated",
     onPlaybackDeviceMediaUpdated as EventListener
+);
+
+/**
+ * Observation-only feed: one entry per completed ECP poll, including idle.
+ *
+ * Separate from the media-status feed because that one carries no message for
+ * an idle poll (RokuRemote treats idle as "nothing to report"), which would
+ * make an observed-idle device indistinguishable from an unobservable one: the
+ * first must end as `not-confirmed` (classification "irrelevant") and only the
+ * second as `observation-unavailable`.
+ */
+function onRokuPlaybackObservation(
+    ev: CustomEvent<{
+        deviceId: string;
+        status: MediaStatus;
+        provenance: RokuMediaStatusProvenance;
+    }>
+) {
+    const { deviceId, status, provenance } = ev.detail;
+    acceptReceiverObservation(deviceId, status, provenance, Date.now());
+}
+deviceManager.addEventListener(
+    "rokuPlaybackObservation",
+    onRokuPlaybackObservation as EventListener
 );
 
 export default castManager;
@@ -1926,6 +1948,12 @@ function createSelector(tabId: number) {
     deviceManager.addEventListener("deviceUp", onDeviceChange);
     deviceManager.addEventListener("deviceDown", onDeviceChange);
     deviceManager.addEventListener("deviceUpdated", onDeviceChange);
+    // UI refresh, scoped to this selector. Distinct from the module-scope
+    // observation consumer in playbackCommand: that one confirms commands for
+    // the background's lifetime, this one repaints an open popup (progress,
+    // playerState, buffering shimmer, media merges). Dropping it left open
+    // popups frozen on stale media status while commands still confirmed.
+    deviceManager.addEventListener("deviceMediaUpdated", onDeviceChange);
     deviceManager.addEventListener("devicePlaybackUpdated", onDeviceChange);
 
     // Cleanup listeners
@@ -1937,6 +1965,11 @@ function createSelector(tabId: number) {
             deviceManager.removeEventListener("deviceUpdated", onDeviceChange);
             deviceManager.removeEventListener(
                 "deviceMediaUpdated",
+                onDeviceChange
+            );
+            // Symmetry: registered above, so it must be released here too.
+            deviceManager.removeEventListener(
+                "devicePlaybackUpdated",
                 onDeviceChange
             );
 

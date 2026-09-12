@@ -223,6 +223,16 @@ export function run(messaging: Messenger) {
                                         }
                                     });
                                 },
+                                onPlaybackObservation(status, provenance) {
+                                    messaging.sendMessage({
+                                        subject: "main:rokuPlaybackObservation",
+                                        data: {
+                                            deviceId: device.id,
+                                            status,
+                                            provenance
+                                        }
+                                    });
+                                },
                                 onMediaStatusUpdate(emission) {
                                     // The clear arm is a local notification and
                                     // never crosses the bridge (the extension

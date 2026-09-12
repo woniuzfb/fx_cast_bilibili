@@ -312,15 +312,20 @@ function acceptObservation(
     publish(device, command);
 }
 
-/** Wires the receiver-observation source (the device media status feed). */
+/**
+ * Wires the receiver-observation sources: the device media status feed and the
+ * observation-only feed that also carries idle polls.
+ */
 export function acceptReceiverObservation(
-    device: ReceiverDevice,
+    deviceId: string,
     status: MediaStatus,
     provenance: RokuMediaStatusProvenance,
     receivedAt = Date.now()
 ) {
-    const command = commands.get(device.id);
+    const command = commands.get(deviceId);
     if (!command) return;
+    const device = deviceLookup?.(deviceId);
+    if (!device) return;
     acceptObservation(device, command, status, provenance, receivedAt);
 }
 
