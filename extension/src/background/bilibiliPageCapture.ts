@@ -57,6 +57,13 @@ interface PageState {
     upload: Record<Kind, Promise<void>>;
     retryTimers: Partial<Record<Kind, ReturnType<typeof setTimeout>>>;
     /**
+     * Consecutive retryable upload failures per kind since the last response
+     * that advanced the queue (2xx, or the drop-only 409). Drives the capped
+     * exponential backoff and the rebuild threshold; reset by every relay
+     * boundary (invalidateRelayUploads) and by queue progress.
+     */
+    retryAttempts: Partial<Record<Kind, number>>;
+    /**
      * Rolling media tail used to bridge capture-generation boundaries. It is
      * retained across Stop -> Cast and reset to the new target at page-seek
      * start, so a successor relay is not dependent on MSE re-fetching bytes.
@@ -186,6 +193,7 @@ function invalidateRelayUploads(state: PageState) {
         if (timer) clearTimeout(timer);
     }
     state.retryTimers = {};
+    state.retryAttempts = {};
 }
 
 function clearHandoff(state: PageState) {
@@ -263,6 +271,7 @@ function pageState(tabId: number, pageUrl?: string) {
             pendingBytes: 0,
             upload: { video: Promise.resolve(), audio: Promise.resolve() },
             retryTimers: {},
+            retryAttempts: {},
             handoff: { video: [], audio: [] },
             handoffBytes: 0,
             handoffPending: false,
@@ -397,15 +406,74 @@ function teeTextResponse(
     };
 }
 
+/**
+ * Ask the sender to rebuild the relay for this tab (fresh bridge generation,
+ * fresh capture window). Used by the extension's own upload failure paths —
+ * backlog over cap, an unexpected 4xx, retry exhaustion — mirroring the
+ * bridge's terminal verdict on main:bilibiliCaptureOverflow. `requestId` is
+ * forwarded when known so the sender can ignore a request that belongs to a
+ * generation it has already replaced.
+ */
+function notifyCaptureUploadFailure(
+    state: PageState,
+    source: string,
+    requestId?: string,
+    kind?: Kind
+) {
+    logger.warn("[Bilibili page capture] relay rebuild requested", {
+        tabId: state.tabId,
+        source,
+        requestId,
+        kind,
+        pendingBytes: state.pendingBytes
+    });
+    void browser.tabs
+        .sendMessage(state.tabId, {
+            subject: "bilibili:captureOverflow",
+            data: { source, requestId, kind }
+        })
+        .catch(() => undefined);
+}
+
+/**
+ * Retryable-failure backoff (503 / network errors): 250ms doubling to 8s.
+ * A fixed 250ms retry on an unchanged queue head would spin forever on a
+ * permanent failure, while stopping silently would strand the generation with
+ * no timer and no notification — so the threshold escalates to an explicit
+ * rebuild request instead of giving up.
+ */
+const RETRY_BASE_MS = 250;
+const RETRY_MAX_MS = 8_000;
+const RETRY_REBUILD_THRESHOLD = 8;
+
 function scheduleRetry(state: PageState, kind: Kind) {
     if (state.retryTimers[kind] || !state.endpoint || !state.requestId) return;
+    const requestId = state.requestId;
+    const attempt = (state.retryAttempts[kind] ?? 0) + 1;
+    state.retryAttempts[kind] = attempt;
+
+    if (attempt >= RETRY_REBUILD_THRESHOLD) {
+        // Terminal for this upload generation: ask for a rebuild FIRST (the
+        // notification carries the request id), then invalidate so no stale
+        // in-flight chain can post into the replaced endpoint.
+        notifyCaptureUploadFailure(
+            state,
+            "upload-retry-exhausted",
+            requestId,
+            kind
+        );
+        invalidateRelayUploads(state);
+        return;
+    }
+
+    const delay = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
     const uploadEpoch = state.uploadEpoch;
     state.retryTimers[kind] = setTimeout(() => {
         delete state.retryTimers[kind];
         // A relay boundary (begin/commit/end/reset) invalidates this retry.
         if (state.uploadEpoch !== uploadEpoch) return;
         flush(state, kind);
-    }, 250);
+    }, delay);
 }
 function flush(state: PageState, kind: Kind) {
     if (!state.endpoint || !state.requestId) return;
@@ -440,11 +508,26 @@ function flush(state: PageState, kind: Kind) {
                 });
                 if (!epochCurrent()) return;
                 if (!response.ok) {
+                    if (response.status === 409) {
+                        // Contract with the bridge: 409 means EXACTLY "stale
+                        // cross-representation payload" (total mismatch on a
+                        // non-init range). Drop this item, keep the endpoint —
+                        // an invalid payload must never disarm a live
+                        // generation — and count it as queue progress so it
+                        // also clears the consecutive-failure backoff.
+                        pending.shift();
+                        state.pendingBytes -= item.bytes.byteLength;
+                        state.retryAttempts[kind] = 0;
+                        continue;
+                    }
                     if (
                         response.status === 403 ||
-                        response.status === 409 ||
+                        response.status === 410 ||
                         response.status === 507
                     ) {
+                        // Terminal for this endpoint: requestId mismatch, a
+                        // replaced capture generation, or a generation that was
+                        // terminated (which already requested a rebuild).
                         if (
                             state.requestId === requestId &&
                             state.endpoint?.port === ep.port &&
@@ -452,6 +535,20 @@ function flush(state: PageState, kind: Kind) {
                         ) {
                             state.endpoint = undefined;
                         }
+                        return;
+                    }
+                    if (response.status >= 400 && response.status < 500) {
+                        // Unexpected 4xx: the payload cannot be proven safe to
+                        // discard, so rebuild instead of hammering the same
+                        // queue head in a hot retry loop. The status is part of
+                        // the recorded reason so the verdict is diagnosable.
+                        notifyCaptureUploadFailure(
+                            state,
+                            `upload-rejected-${response.status}`,
+                            requestId,
+                            kind
+                        );
+                        invalidateRelayUploads(state);
                         return;
                     }
                     scheduleRetry(state, kind);
@@ -466,6 +563,7 @@ function flush(state: PageState, kind: Kind) {
                 if (pending[0] !== item) continue;
                 pending.shift();
                 state.pendingBytes -= item.bytes.byteLength;
+                state.retryAttempts[kind] = 0;
             } catch {
                 if (!epochCurrent()) return;
                 scheduleRetry(state, kind);
@@ -536,20 +634,12 @@ function enqueue(state: PageState, item: Payload) {
         );
     }
     if (droppedWhileArmed && !state.overflowNotified) {
+        // Once this generation has been invalidated and a rebuild requested,
+        // later backlog trimming only bounds memory: the endpoint is gone, so
+        // `droppedWhileArmed` cannot become true again for the same dead
+        // generation and no second notification is emitted.
         state.overflowNotified = true;
-        logger.warn(
-            "Bilibili page capture backlog over cap while armed; relay rebuild requested",
-            {
-                tabId: state.tabId,
-                pendingBytes: state.pendingBytes
-            }
-        );
-        void browser.tabs
-            .sendMessage(state.tabId, {
-                subject: "bilibili:captureOverflow",
-                data: { source: "extension-backlog" }
-            })
-            .catch(() => undefined);
+        notifyCaptureUploadFailure(state, "extension-backlog", state.requestId);
     }
     flush(state, item.kind);
 }
@@ -845,6 +935,14 @@ function commitReplacement(state: PageState, stream: PathState, path: string) {
         0
     );
     state.pending[stream.kind] = [];
+
+    // Representation boundary: the retained rolling tail carries byte offsets
+    // and a `total` belonging to the PREVIOUS representation and must never
+    // cross into the next upload generation. The bridge's 409 contract also
+    // rejects such stale non-init payloads safely, but clearing them here
+    // avoids pointless POSTs and queue-head conflicts.
+    clearHandoff(state);
+
     invalidateRelayUploads(state);
     logger.info(
         "[Bilibili page capture] replacement representation committed",

@@ -233,8 +233,14 @@ export default class RokuRemote {
             case "VOLUME_UP":
             case "VOLUME_DOWN": {
                 const isUp = message.type === "VOLUME_UP";
-                void keypress(this.host, isUp ? "VolumeUp" : "VolumeDown").then(
-                    () => {
+                const key = isUp ? "VolumeUp" : "VolumeDown";
+                // The rejection MUST be consumed: skipping the optimistic
+                // volume update and the status broadcast is the correct
+                // outcome, while an unhandled rejection would terminate the
+                // whole bridge process (Node 22 throws by default and Firefox
+                // only reports an empty disconnect).
+                void keypress(this.host, key)
+                    .then(() => {
                         this.volume = {
                             level: Math.max(
                                 0,
@@ -251,8 +257,20 @@ export default class RokuRemote {
                         };
                         this.emitReceiverStatus();
                         this.emitMediaStatus();
-                    }
-                );
+                    })
+                    .catch(err =>
+                        console.warn(
+                            "[fx_cast_bilibili] Roku volume keypress failed",
+                            {
+                                host: this.host,
+                                key,
+                                error:
+                                    err instanceof Error
+                                        ? err.message
+                                        : String(err)
+                            }
+                        )
+                    );
                 break;
             }
 

@@ -320,17 +320,23 @@ type MessageDefinitions = {
         generation: number;
     };
     /**
-     * The captured-DASH generation hit a terminal buffer condition —
-     * either the absolute hard cap or a stalled consumption watermark with
-     * fresh data arriving past an unfillable gap (see `reason`). The only
-     * safe reclaim is a relay rebuild at the page's current position; the
-     * background forwards this to the tab's sender, which re-casts (fresh
-     * generation, fresh capture window).
+     * The captured-DASH generation reached a TERMINAL condition, i.e. every
+     * reason under which continuing to ingest would either exhaust memory or
+     * feed ffmpeg bytes that contradict the generation's media identity:
+     * resource limits ("hard-cap"), an unfillable consumption gap
+     * ("watermark-stalled"), inconsistent identity ("init-total-mismatch"),
+     * malformed metadata ("invalid-ingest-metadata"), a body disagreeing with
+     * its declared range ("payload-length-mismatch") or conflicting bytes for
+     * an already-captured range ("overlap-mismatch"). In every case BOTH
+     * kinds' input streams are aborted, so the only safe reclaim is a relay
+     * rebuild at the page's current position: the background forwards this to
+     * the tab's sender, which re-casts (fresh generation, fresh capture
+     * window). `kind` is "unknown" when the offending request could not be
+     * attributed to a kind.
      */
     "main:bilibiliCaptureOverflow": {
         requestId: string;
-        kind: "video" | "audio";
-        /** "hard-cap" | "watermark-stalled" */
+        kind: "video" | "audio" | "unknown";
         reason?: string;
     };
     "mediaCast:mediaServerStopped": { requestId: string };

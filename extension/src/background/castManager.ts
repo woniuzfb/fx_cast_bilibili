@@ -814,17 +814,18 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
         }
 
         case "main:bilibiliCaptureOverflow": {
-            // The captured generation reached a terminal buffer condition —
-            // absolute hard cap, or a stalled consumption watermark with
-            // fresh data arriving past an unfillable gap. Dropping un-read
-            // bytes would punch permanent holes into the sequential input
-            // stream, so the only safe reclaim is a relay rebuild: ask the
-            // tab's sender to re-cast at the page's current position (fresh
-            // generation, fresh capture window).
+            // The captured-DASH generation reached a TERMINAL condition: buffer
+            // pressure (hard cap / stalled watermark) or a broken media
+            // identity (malformed ingest metadata, a payload whose body
+            // disagreed with its range, conflicting bytes, a foreign init).
+            // In every case dropping un-read bytes would punch permanent holes
+            // into the sequential input stream, so the only safe reclaim is a
+            // relay rebuild: ask the tab's sender to re-cast at the page's
+            // current position (fresh generation, fresh capture window).
             const tabId = instance.contentContext?.tabId;
             if (tabId !== undefined) {
                 logger.warn(
-                    "Bilibili capture buffer overflow; relay rebuild requested",
+                    "Bilibili capture generation terminated; relay rebuild requested",
                     message.data
                 );
                 void browser.tabs
@@ -1020,9 +1021,7 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                     instance.contentContext.tabId,
                     message.data.requestId,
                     {
-                        resetWindow: Boolean(
-                            message.data.resetCaptureWindow
-                        )
+                        resetWindow: Boolean(message.data.resetCaptureWindow)
                     }
                 );
             }
@@ -1193,18 +1192,18 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                     deviceId: selection.device.id,
                     appId: sessionRequest.appId,
                     deviceType: selection.device.deviceType,
-                    preCreatePlayerState:
-                        deviceManager.getDeviceById(selection.device.id)
-                            ?.mediaStatus?.playerState,
-                    preCreateCurrentTime:
-                        deviceManager.getDeviceById(selection.device.id)
-                            ?.mediaStatus?.currentTime,
-                    preCreateMediaSessionId:
-                        deviceManager.getDeviceById(selection.device.id)
-                            ?.mediaStatus?.mediaSessionId,
-                    preCreateContentId:
-                        deviceManager.getDeviceById(selection.device.id)
-                            ?.mediaStatus?.media?.contentId
+                    preCreatePlayerState: deviceManager.getDeviceById(
+                        selection.device.id
+                    )?.mediaStatus?.playerState,
+                    preCreateCurrentTime: deviceManager.getDeviceById(
+                        selection.device.id
+                    )?.mediaStatus?.currentTime,
+                    preCreateMediaSessionId: deviceManager.getDeviceById(
+                        selection.device.id
+                    )?.mediaStatus?.mediaSessionId,
+                    preCreateContentId: deviceManager.getDeviceById(
+                        selection.device.id
+                    )?.mediaStatus?.media?.contentId
                 });
                 const session = await createCastSession({
                     instance,
@@ -1225,9 +1224,7 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                 });
             } catch (err) {
                 if (pendingRokuMediaDeviceId) {
-                    deviceManager.cancelRokuMediaLoad(
-                        pendingRokuMediaDeviceId
-                    );
+                    deviceManager.cancelRokuMediaLoad(pendingRokuMediaDeviceId);
                 }
                 logger.error("Session request failed in cast manager", err);
                 instance.contentPort.postMessage({

@@ -436,14 +436,16 @@ type BridgeMessageDefinitions = {
     "bilibili:pageCaptureReady": {
         requestId: string;
     };
-    /** Bridge capture-buffer terminal condition — hard cap reached, or a
-     *  stalled consumption watermark with fresh data still arriving (see
-     *  `reason` on the bridge side). Forwarded to the tab so the sender
-     *  rebuilds the relay instead of piling up un-consumable bytes. */
+    /** Bridge capture generation terminal condition (see `reason`): buffer
+     *  pressure (hard cap, stalled watermark) or a broken media identity
+     *  (malformed metadata, bad payload length, conflicting bytes, foreign
+     *  init). Both input streams are aborted, so this is forwarded to the tab
+     *  so the sender rebuilds the relay at the page's current position.
+     *  `kind` is "unknown" when the offending request has no usable kind. */
+
     "main:bilibiliCaptureOverflow": {
         requestId: string;
-        kind: "video" | "audio";
-        /** "hard-cap" | "watermark-stalled" */
+        kind: "video" | "audio" | "unknown";
         reason?: string;
     };
     "mediaCast:mediaServerStopped": { requestId: string };

@@ -45,6 +45,27 @@ function queueMediaServerCommand(command: () => Promise<void>) {
     return mediaServerCommandQueue;
 }
 
+/**
+ * Last-resort guard for fire-and-forget promises. Node's default
+ * `--unhandled-rejections=throw` terminates the native messaging host, and
+ * Firefox then only reports an empty bridge disconnect — one escaped rejection
+ * would silently kill every active session (Chromecast and Roku alike).
+ *
+ * Registered at module scope, so it covers both native messaging
+ * (one process per connectNative) and daemon/WebSocket mode (daemon.ts runs
+ * every connection in one process). This is a safety net, NOT a substitute for
+ * local handling: every fire-and-forget call is still expected to consume its
+ * own rejection.
+ */
+process.on("unhandledRejection", reason => {
+    console.error(
+        "[fx_cast_bilibili] Unhandled promise rejection",
+        reason instanceof Error
+            ? reason.stack ?? reason.message
+            : String(reason)
+    );
+});
+
 function shutdown(exitCode: number) {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {

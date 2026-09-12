@@ -395,7 +395,12 @@ async function startDashRemuxServer(
     const noisyCaptureEvents = new Set([
         "ingest-received",
         "page-init-served",
-        "page-segment-served"
+        "page-segment-served",
+        // Fires for essentially every ingest once the consumption watermark
+        // passes the keep-behind runway, i.e. at the same cadence as media
+        // chunk arrival. Kept out of the always-on log like the other
+        // per-chunk events.
+        "capture-evicted"
     ]);
     const captureDebug = (event: string, details: Record<string, unknown>) => {
         // Keep lifecycle evidence, but suppress per-chunk and per-segment spam.
@@ -546,9 +551,17 @@ async function startDashRemuxServer(
      * input streams end, ffmpeg fails fast, further ingests get 507. The
      * termination is server-level: abort tears down BOTH kinds, so one flag
      * guards the notification.
+     *
+     * The reasons are the full terminal set, not only resource limits:
+     * "hard-cap" / "watermark-stalled" (buffer pressure),
+     * "invalid-ingest-metadata" (the request could not be trusted),
+     * "payload-length-mismatch", "init-total-mismatch" and
+     * "overlap-mismatch" (captured bytes disagree with the generation's media
+     * identity). `kind` is "unknown" when the offending request could not be
+     * attributed to a kind at all.
      */
     const terminateCapturedGeneration = (
-        kind: CaptureKind,
+        kind: CaptureKind | "unknown",
         reason: string,
         bytes: number
     ) => {
@@ -558,7 +571,9 @@ async function startDashRemuxServer(
                 kind,
                 reason,
                 bytes,
-                watermark: consumedThrough[kind]
+                // "n/a" rather than undefined: JSON.stringify drops undefined
+                // values, which would silently hide the field.
+                watermark: kind === "unknown" ? "n/a" : consumedThrough[kind]
             });
             messaging.sendMessage({
                 subject: "main:bilibiliCaptureOverflow",
@@ -577,12 +592,57 @@ async function startDashRemuxServer(
             const waiter: RangeWaiter = { resolve, reject };
             input.waiters.add(waiter);
         });
+    /**
+     * Reads a whole request body, settling EXACTLY once. An aborted client can
+     * surface as `error`, `aborted` or a `close` on an incomplete request, and
+     * the ordering differs across Node versions, while a normal `end` is still
+     * followed by `close` — so every exit path funnels through one `finish()`
+     * that also detaches all listeners. Without this, an interrupted ingest
+     * could leave the promise pending forever (the handler would never answer)
+     * and keep the buffered chunks alive.
+     */
     const readBody = (req: http.IncomingMessage): Promise<Buffer> =>
         new Promise((resolve, reject) => {
             const chunks: Buffer[] = [];
-            req.on("data", chunk => chunks.push(Buffer.from(chunk)));
-            req.on("end", () => resolve(Buffer.concat(chunks)));
-            req.on("error", reject);
+            let settled = false;
+
+            const cleanup = () => {
+                req.off("data", onData);
+                req.off("end", onEnd);
+                req.off("error", onError);
+                req.off("aborted", onAborted);
+                req.off("close", onClose);
+            };
+            const finish = (error?: Error, body?: Buffer) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (error) reject(error);
+                else resolve(body ?? Buffer.alloc(0));
+            };
+
+            const onData = (chunk: Buffer | string) => {
+                chunks.push(Buffer.from(chunk));
+            };
+            const onEnd = () => finish(undefined, Buffer.concat(chunks));
+            const onError = (error: Error) => finish(error);
+            const onAborted = () =>
+                finish(new Error("Capture ingest request aborted"));
+            const onClose = () => {
+                if (!req.complete) {
+                    finish(
+                        new Error(
+                            "Capture ingest request closed before completion"
+                        )
+                    );
+                }
+            };
+
+            req.on("data", onData);
+            req.once("end", onEnd);
+            req.once("error", onError);
+            req.once("aborted", onAborted);
+            req.once("close", onClose);
         });
     const mergeCapturedRange = (input: CapturedInput, added: CapturedRange) => {
         const ranges = [...input.ranges, added].sort(
@@ -829,44 +889,77 @@ async function startDashRemuxServer(
         const captureServer = http.createServer(async (req, res) => {
             const requestUrl = new URL(req.url ?? "/", "http://localhost");
             if (requestUrl.pathname === "/ingest" && req.method === "POST") {
-                if (requestUrl.searchParams.get("rid") !== requestId) {
-                    res.writeHead(403).end();
-                    return;
-                }
-                if (
-                    Number(requestUrl.searchParams.get("gen")) !==
-                    serverGeneration
-                ) {
-                    res.writeHead(409).end();
-                    return;
-                }
-                if (captureStopped) {
-                    // The generation was terminated (hard-cap overflow): a
-                    // definitive verdict the extension disarms on, not a
-                    // transient error to retry.
-                    res.writeHead(507).end();
-                    return;
-                }
-                const kind = requestUrl.searchParams.get(
-                    "kind"
-                ) as CaptureKind | null;
-                const start = Number(requestUrl.searchParams.get("start"));
-                const end = Number(requestUrl.searchParams.get("end"));
-                const total = Number(requestUrl.searchParams.get("total"));
-                if (
-                    (kind !== "video" && kind !== "audio") ||
-                    !Number.isSafeInteger(start) ||
-                    !Number.isSafeInteger(end) ||
-                    !Number.isSafeInteger(total) ||
-                    start < 0 ||
-                    end < start ||
-                    total <= end
-                ) {
-                    res.writeHead(400).end();
-                    return;
-                }
                 try {
-                    const body = await readBody(req);
+                    if (requestUrl.searchParams.get("rid") !== requestId) {
+                        res.writeHead(403).end();
+                        return;
+                    }
+                    if (
+                        Number(requestUrl.searchParams.get("gen")) !==
+                        serverGeneration
+                    ) {
+                        // This capture server is no longer the generation the
+                        // URL names: the endpoint identity is gone, so the
+                        // extension must disarm and wait for the next arm.
+                        res.writeHead(410).end();
+                        return;
+                    }
+                    if (captureStopped) {
+                        // The generation was already terminated: a definitive
+                        // verdict the extension disarms on, not a transient
+                        // error to retry.
+                        res.writeHead(507).end();
+                        return;
+                    }
+                    const kind = requestUrl.searchParams.get(
+                        "kind"
+                    ) as CaptureKind | null;
+                    const start = Number(requestUrl.searchParams.get("start"));
+                    const end = Number(requestUrl.searchParams.get("end"));
+                    const total = Number(requestUrl.searchParams.get("total"));
+                    if (
+                        (kind !== "video" && kind !== "audio") ||
+                        !Number.isSafeInteger(start) ||
+                        !Number.isSafeInteger(end) ||
+                        !Number.isSafeInteger(total) ||
+                        start < 0 ||
+                        end < start ||
+                        total <= end
+                    ) {
+                        // Malformed metadata has not touched capturedInputs,
+                        // so this request alone does not corrupt the
+                        // generation. It is terminated anyway instead of being
+                        // answered with a droppable 4xx: the sender cannot
+                        // prove the range is safe to discard, and dropping it
+                        // would punch a permanent hole into the sequential
+                        // input. Rebuilding is the conservative recovery.
+                        terminateCapturedGeneration(
+                            kind === "video" || kind === "audio"
+                                ? kind
+                                : "unknown",
+                            "invalid-ingest-metadata",
+                            0
+                        );
+                        res.writeHead(507).end();
+                        return;
+                    }
+                    let body: Buffer;
+                    try {
+                        body = await readBody(req);
+                    } catch (err) {
+                        // Interrupted/aborted request: nothing has been merged,
+                        // so the payload simply stays queued and is retried.
+                        captureDebug("ingest-read-failed", {
+                            error:
+                                err instanceof Error ? err.message : String(err)
+                        });
+                        if (!res.headersSent && !res.destroyed) {
+                            res.writeHead(503).end();
+                        } else if (!res.destroyed) {
+                            res.destroy();
+                        }
+                        return;
+                    }
                     captureDebug("ingest-received", {
                         generation: serverGeneration,
                         kind,
@@ -875,12 +968,37 @@ async function startDashRemuxServer(
                         total,
                         bodyBytes: body.length
                     });
+                    const input = capturedInputs[kind];
                     if (body.length !== end - start + 1) {
-                        res.writeHead(422).end();
+                        // The body disagrees with the range it claims: its byte
+                        // labels cannot be trusted, and dropping it could hole
+                        // the sequential input, so rebuild the generation.
+                        terminateCapturedGeneration(
+                            kind,
+                            "payload-length-mismatch",
+                            input.bytes
+                        );
+                        res.writeHead(507).end();
                         return;
                     }
-                    const input = capturedInputs[kind];
                     if (input.total !== undefined && input.total !== total) {
+                        if (start === 0) {
+                            // An init payload from a different media object,
+                            // i.e. not ignorable tail data: the generation's
+                            // locked `total` would keep rejecting the new
+                            // object's ranges while ffmpeg waits for bytes that
+                            // can never arrive (or pairs the old init with new
+                            // media). Rebuild instead.
+                            terminateCapturedGeneration(
+                                kind,
+                                "init-total-mismatch",
+                                input.bytes
+                            );
+                            res.writeHead(507).end();
+                            return;
+                        }
+                        // A stale cross-representation payload: the extension
+                        // drops exactly this item and keeps the endpoint.
                         res.writeHead(409).end();
                         return;
                     }
@@ -895,7 +1013,24 @@ async function startDashRemuxServer(
                     const beyondBefore = activeWait
                         ? bytesBeyond(input.ranges, activeWait.end + 1)
                         : 0;
-                    mergeCapturedRange(input, { start, end, body });
+                    try {
+                        mergeCapturedRange(input, { start, end, body });
+                    } catch {
+                        // Conflicting bytes for an already-captured range prove
+                        // the source changed mid-generation. Dropping just this
+                        // payload would leave a permanent hole, so tear the
+                        // generation down and let the sender rebuild at the
+                        // page's current position. (mergeCapturedRange assigns
+                        // input.ranges only after the whole merge validates, so
+                        // no rollback is needed here.)
+                        terminateCapturedGeneration(
+                            kind,
+                            "overlap-mismatch",
+                            input.bytes
+                        );
+                        res.writeHead(507).end();
+                        return;
+                    }
                     input.bytes = input.ranges.reduce(
                         (sum, range) => sum + (range.end - range.start + 1),
                         0
@@ -1002,8 +1137,24 @@ async function startDashRemuxServer(
                         return;
                     }
                     res.writeHead(204).end();
-                } catch {
-                    res.writeHead(409).end();
+                } catch (err) {
+                    // Outer boundary for /ingest. Node never consumes the
+                    // promise of this async request listener, so an escaping
+                    // throw would become an unhandled rejection (fatal on
+                    // Node 22) while the caller waits forever for a response.
+                    // Answer with a RETRYABLE status: the payload stays at the
+                    // head of the extension's queue.
+                    captureDebug("ingest-unhandled-error", {
+                        error:
+                            err instanceof Error
+                                ? err.stack ?? err.message
+                                : String(err)
+                    });
+                    if (!res.headersSent && !res.destroyed) {
+                        res.writeHead(503).end();
+                    } else if (!res.destroyed) {
+                        res.destroy();
+                    }
                 }
                 return;
             }

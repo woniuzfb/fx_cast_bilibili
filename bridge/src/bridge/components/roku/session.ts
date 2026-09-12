@@ -341,14 +341,25 @@ export default class RokuSession {
                 break;
 
             case "VOLUME_UP":
-            case "VOLUME_DOWN":
-                void keypress(
-                    this.receiverDevice.host,
-                    message.type === "VOLUME_UP"
-                        ? "VolumeUp"
-                        : "VolumeDown"
+            case "VOLUME_DOWN": {
+                const key =
+                    message.type === "VOLUME_UP" ? "VolumeUp" : "VolumeDown";
+                // Fire-and-forget, but the rejection must still be consumed:
+                // an unhandled rejection terminates the bridge process
+                // (Node 22 throws by default).
+                void keypress(this.receiverDevice.host, key).catch(err =>
+                    console.warn(
+                        "[fx_cast_bilibili] Roku volume keypress failed",
+                        {
+                            host: this.receiverDevice.host,
+                            key,
+                            error:
+                                err instanceof Error ? err.message : String(err)
+                        }
+                    )
                 );
                 break;
+            }
 
             case "GET_STATUS":
                 this.sendReceiverStatus();
@@ -1114,15 +1125,17 @@ export default class RokuSession {
             }
             if (isDashRemuxMedia(this.loadedMedia)) {
                 const now = Date.now();
-                if (this.lastPosition === undefined && state.position !== undefined) {
+                if (
+                    this.lastPosition === undefined &&
+                    state.position !== undefined
+                ) {
                     this.lastPosition = state.position;
                 } else if (
                     this.lastPosition !== undefined &&
                     this.dashClockUpdatedAt !== undefined &&
                     previousState === PlayerState.PLAYING
                 ) {
-                    this.lastPosition +=
-                        (now - this.dashClockUpdatedAt) / 1000;
+                    this.lastPosition += (now - this.dashClockUpdatedAt) / 1000;
                 }
                 this.dashClockUpdatedAt = now;
             } else {
