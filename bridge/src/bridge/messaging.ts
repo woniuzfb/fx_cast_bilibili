@@ -2,6 +2,7 @@ import { TypedEmitter } from "tiny-typed-emitter";
 
 import { DecodeTransform, EncodeTransform } from "../transforms";
 
+import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
 import type {
     MediaInformation,
     MediaStatus,
@@ -72,12 +73,27 @@ type MessageDefinitions = {
         status: ReceiverStatus;
     };
     /**
-     * Sent to the extension from the bridge whenever a
-     * `MEDIA_STATUS` message (`NS_RECEIVER`) is received.
+     * Device-level media status emitted by a receiver remote.
+     *
+     * RokuRemote emits fresh ECP poll observations AND locally synthesized or
+     * cached status updates through this message; the former doc comment
+     * ("whenever a MEDIA_STATUS message is received") described only one of its
+     * seven emit sites. Consumers must inspect `provenance`: only
+     * `source === "ecp-poll"` is eligible to confirm receiver state, while
+     * command-echo, seek-echo, volume-key-echo, status-probe,
+     * session-media-refresh and startup-synthetic may update UI state but are
+     * not observations.
      */
     "main:receiverDeviceMediaStatusUpdated": {
         deviceId: string;
         status: MediaStatus;
+        /**
+         * Present for Roku receivers only; the Chromecast push path has a
+         * single source (a real MEDIA_STATUS) and omits it. A consumer that
+         * needs a confirmable observation must skip messages without
+         * provenance rather than assume one.
+         */
+        provenance?: RokuMediaStatusProvenance;
     };
 
     /**

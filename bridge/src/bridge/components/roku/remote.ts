@@ -38,6 +38,11 @@ import {
     type ActiveAppInfo
 } from "./ecp";
 
+import type {
+    RokuMediaStatusProvenance,
+    RokuMediaStatusSource
+} from "../../../../../shared/rokuMediaStatusProvenance";
+
 const NS_MEDIA = "urn:x-cast:com.google.cast.media";
 
 const POLL_INTERVAL_MS = 3000;
@@ -116,9 +121,27 @@ export type RokuStatusMediaDebug = {
     result: string;
 };
 
+/**
+ * A media status broadcast, or the local "nothing to report" notification.
+ *
+ * A discriminated union rather than an optional second argument: when a status
+ * is present its provenance is REQUIRED, so a new emit site cannot be added
+ * without classifying itself. The `status: undefined` arm never crosses the
+ * bridge (the owner returns early on it); it exists because the idle branch
+ * must still wake the owner's debug path.
+ */
+export type RokuMediaStatusEmission =
+    | {
+          status: MediaStatus;
+          provenance: RokuMediaStatusProvenance;
+      }
+    | {
+          status: undefined;
+      };
+
 interface RokuRemoteOptions {
     onReceiverStatusUpdate?: (status: ReceiverStatus) => void;
-    onMediaStatusUpdate?: (status?: MediaStatus) => void;
+    onMediaStatusUpdate?: (emission: RokuMediaStatusEmission) => void;
     /**
      * Flattened buildStatusMedia snapshot, forwarded by the owner to the
      * extension background log. Only invoked when the snapshot changes.
@@ -139,6 +162,12 @@ export default class RokuRemote {
     private destroyed = false;
 
     private lastState: RokuPlaybackState = { state: "idle" };
+    /**
+     * Monotonic counter for ECP poll samples. Together with pollStartedAt it
+     * is what lets a consumer tell an observation that STARTED after a command
+     * from one that merely arrived after it.
+     */
+    private pollSequence = 0;
     /** Foreground channel from /query/active-app (undefined = home screen). */
     private lastActiveApp?: ActiveAppInfo;
     private lastActiveAppId?: string;
@@ -179,15 +208,22 @@ export default class RokuRemote {
                     !!media.customData &&
                     typeof media.customData === "object" &&
                     (media.customData as { hlsDvr?: unknown }).hlsDvr === true;
+                // Two different facts share this call site: synthesizing
+                // buffering for a starting HLS DVR session, or merely
+                // rebroadcasting the cached state because session media
+                // changed. Neither performs an ECP query, so neither may be
+                // used to confirm receiver state.
+                let source: RokuMediaStatusSource = "session-media-refresh";
                 if (isHlsDvr && this.lastState.state === "idle") {
                     this.lastState = {
                         ...this.lastState,
                         state: "buffering"
                     };
+                    source = "startup-synthetic";
                 }
 
                 this.emitReceiverStatus();
-                this.emitMediaStatus();
+                this.emitMediaStatus({ source });
             }
         );
         // First update right away so the popup has data on open.
@@ -256,7 +292,7 @@ export default class RokuRemote {
                             muted: isUp ? false : this.volume.muted
                         };
                         this.emitReceiverStatus();
-                        this.emitMediaStatus();
+                        this.emitMediaStatus({ source: "volume-key-echo" });
                     })
                     .catch(err =>
                         console.warn(
@@ -305,7 +341,7 @@ export default class RokuRemote {
 
             case "GET_STATUS":
             case "MEDIA_GET_STATUS":
-                this.emitMediaStatus();
+                this.emitMediaStatus({ source: "status-probe" });
                 this.emitReceiverStatus();
                 break;
 
@@ -367,7 +403,7 @@ export default class RokuRemote {
                     ...this.lastState,
                     state: intent === "PLAY" ? "play" : "pausing"
                 };
-                this.emitMediaStatus();
+                this.emitMediaStatus({ source: "command-echo" });
             })
             .catch(err =>
                 console.warn("[fx_cast_bilibili] Roku keypress failed", {
@@ -390,7 +426,7 @@ export default class RokuRemote {
                     buildLaunchParams(url, this.loadedTitle ?? "", position)
                 );
                 this.lastState = { ...this.lastState, state: "play", position };
-                this.emitMediaStatus();
+                this.emitMediaStatus({ source: "seek-echo" });
             }
         } catch (err) {
             console.warn("[fx_cast_bilibili] Roku seek failed", {
@@ -445,7 +481,7 @@ export default class RokuRemote {
 
         void Promise.allSettled(steps).then(() => {
             this.emitReceiverStatus();
-            this.emitMediaStatus();
+            this.emitMediaStatus({ source: "volume-key-echo" });
         });
     }
 
@@ -462,6 +498,7 @@ export default class RokuRemote {
             this.pollBusy = false;
         }, POLL_BUSY_TIMEOUT_MS);
 
+        const pollStartedAt = Date.now();
         try {
             const state = await queryMediaPlayer(this.host);
 
@@ -499,7 +536,12 @@ export default class RokuRemote {
 
             if (stateChanged || positionMoved || appChanged) {
                 this.emitReceiverStatus();
-                this.emitMediaStatus();
+                this.emitMediaStatus({
+                    source: "ecp-poll",
+                    pollStartedAt,
+                    pollCompletedAt: Date.now(),
+                    sequence: ++this.pollSequence
+                });
             }
         } catch {
             // Leave lastState as-is; deviceBrowser health-checks decide when
@@ -704,7 +746,17 @@ export default class RokuRemote {
         this.options.onStatusMediaDebug?.(debug);
     }
 
-    private emitMediaStatus() {
+    /**
+     * Notifies the owner that there is nothing to report, e.g. ECP says idle.
+     * Separate from emitMediaStatus so that every real broadcast is forced to
+     * declare where its state came from.
+     */
+    private emitMediaStatusCleared() {
+        if (this.destroyed) return;
+        this.options.onMediaStatusUpdate?.({ status: undefined });
+    }
+
+    private emitMediaStatus(provenance: RokuMediaStatusProvenance) {
         if (this.destroyed) return;
 
         const isPlaying =
@@ -734,7 +786,7 @@ export default class RokuRemote {
                 customDataOut: "n/a",
                 result: "skipped: emitMediaStatus lastState is idle"
             });
-            this.options.onMediaStatusUpdate?.(undefined);
+            this.emitMediaStatusCleared();
             return;
         }
 
@@ -758,6 +810,6 @@ export default class RokuRemote {
             customData: null
         };
 
-        this.options.onMediaStatusUpdate?.(status);
+        this.options.onMediaStatusUpdate?.({ status, provenance });
     }
 }

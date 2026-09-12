@@ -223,14 +223,18 @@ export function run(messaging: Messenger) {
                                         }
                                     });
                                 },
-                                onMediaStatusUpdate(status) {
-                                    if (!status) return;
+                                onMediaStatusUpdate(emission) {
+                                    // The clear arm is a local notification and
+                                    // never crosses the bridge (the extension
+                                    // would find no status to apply).
+                                    if (!emission.status) return;
                                     messaging.sendMessage({
                                         subject:
                                             "main:receiverDeviceMediaStatusUpdated",
                                         data: {
                                             deviceId: device.id,
-                                            status
+                                            status: emission.status,
+                                            provenance: emission.provenance
                                         }
                                     });
                                 },
