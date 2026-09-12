@@ -15,6 +15,13 @@ import type {
 import type { MediaInfo } from "../cast/sdk/media/classes";
 import { PlayerState, RepeatMode } from "../cast/sdk/media/enums";
 
+import {
+    nextRokuLoadGeneration,
+    setRokuMediaIdentityFields,
+    terminateActivePlaybackCommand,
+    terminateAllPlaybackCommands
+} from "./playbackCommand";
+
 async function logRokuDebug(message: string, data: unknown) {
     try {
         const opts = await options.getAll();
@@ -30,6 +37,8 @@ interface EventMap {
     deviceDown: { deviceId: string };
     deviceUpdated: { deviceId: string; status: ReceiverStatus };
     deviceMediaUpdated: { deviceId: string; status: MediaStatus };
+    /** The device's play/pause command view changed (see playbackCommand). */
+    devicePlaybackUpdated: { deviceId: string };
 
     applicationFound: { deviceId: string; appId: string };
     applicationClosed: { deviceId: string; appId: string; sessionId: string };
@@ -154,6 +163,16 @@ export default new (class extends TypedEventTarget<EventMap> {
     }
 
     beginRokuMediaLoad(deviceId: string) {
+        // New media identity for this device. The generation is monotonic for
+        // this background's lifetime and is NOT reset on device down, so a
+        // reconnect cannot reuse a number while stale commands are in flight.
+        nextRokuLoadGeneration(deviceId);
+        // The previous LOAD's command is now about a different cast; it must
+        // not keep an overlay on the popup's affordance. Terminated before the
+        // device entry is consulted, so the pending intent is dropped even if
+        // the device has already gone away.
+        terminateActivePlaybackCommand(deviceId, "media-changed");
+
         this.pendingRokuMediaLoads.add(deviceId);
         this.rokuRealMediaReady.delete(deviceId);
         this.rokuSessionMedia.delete(deviceId);
@@ -202,6 +221,13 @@ export default new (class extends TypedEventTarget<EventMap> {
             return;
         }
         this.rokuSessionMedia.set(deviceId, { ownerId, media });
+        // Refine the CURRENT load generation's identity. Optimistic relay media
+        // and the real LOAD media both land here for the same load, so this
+        // must never fork the generation.
+        setRokuMediaIdentityFields(deviceId, {
+            contentId: media.contentId,
+            ownerId
+        });
         const optimistic =
             (media.customData as { optimisticRelayMedia?: unknown } | null)
                 ?.optimisticRelayMedia === true;
@@ -397,10 +423,10 @@ export default new (class extends TypedEventTarget<EventMap> {
     }
 
     /** Sends an NS_MEDIA message to a given device. */
-    sendMediaMessage(deviceId: string, message: SenderMediaMessage) {
+    sendMediaMessage(deviceId: string, message: SenderMediaMessage): boolean {
         if (!this.bridgePort) {
             logger.error("Failed to send media message (no bridge connection)");
-            return;
+            return false;
         }
 
         const device = this.receiverDevices.get(deviceId);
@@ -408,13 +434,36 @@ export default new (class extends TypedEventTarget<EventMap> {
             logger.error(
                 "Failed to send media message (could not find device)"
             );
-            return;
+            return false;
         }
 
-        this.bridgePort?.postMessage({
-            subject: "bridge:sendMediaMessage",
-            data: { deviceId, message }
-        });
+        try {
+            this.bridgePort.postMessage({
+                subject: "bridge:sendMediaMessage",
+                data: { deviceId, message }
+            });
+            return true;
+        } catch (err) {
+            // A disconnected or mid-teardown port can throw synchronously.
+            // Reporting it as a failed dispatch keeps a caller that models
+            // routing (playbackCommand) able to fall back instead of
+            // abandoning the command mid-flight.
+            logger.error(
+                "Failed to send media message (postMessage threw)",
+                err
+            );
+            return false;
+        }
+    }
+
+    /** Re-broadcasts a device's playback view to the receiver popups. */
+    notifyPlaybackCommandChanged(deviceId: string) {
+        if (!this.receiverDevices.has(deviceId)) return;
+        this.dispatchEvent(
+            new CustomEvent("devicePlaybackUpdated", {
+                detail: { deviceId }
+            })
+        );
     }
 
     private onBridgeMessage = (message: Message) => {
@@ -498,6 +547,10 @@ export default new (class extends TypedEventTarget<EventMap> {
 
             case "main:deviceDown": {
                 const { deviceId } = message.data;
+
+                // An active play/pause command cannot outlive its device: the
+                // dispatch target is gone, so it must not stay pending.
+                terminateActivePlaybackCommand(deviceId, "device-disconnected");
 
                 if (this.receiverDevices.has(deviceId)) {
                     this.receiverDevices.delete(deviceId);
@@ -698,6 +751,10 @@ export default new (class extends TypedEventTarget<EventMap> {
 
     private onBridgeDisconnect = () => {
         const deviceIds = [...this.receiverDevices.keys()];
+
+        // The bridge is the only path to a receiver, so no command can still
+        // be executing.
+        terminateAllPlaybackCommands("bridge-disconnected");
 
         delete this.bridgeInfo;
         this.receiverDevices.clear();

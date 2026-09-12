@@ -22,7 +22,7 @@
 
     import LoadingIndicator from "../LoadingIndicator.svelte";
     import ReceiverMedia from "./ReceiverMedia.svelte";
-    import { playbackIntentFromState } from "./playbackIntent";
+    import { nextPlaybackIntentFor } from "../../background/playbackCommand";
 
     const _ = browser.i18n.getMessage;
 
@@ -329,10 +329,8 @@
         // One derivation for the button icon, its tooltip, the context menu
         // and this command, so they cannot disagree. No fallback for IDLE:
         // every affordance that reaches this handler is disabled while there
-        // is no play/pause intent, and silently sending PLAY on behalf of a
-        // caller that bypassed them would reintroduce the very inconsistency
-        // this replaced.
-        const intent = playbackIntentFromState(mediaStatus?.playerState);
+        // is no play/pause intent.
+        const intent = nextPlaybackIntentFor(device, mediaStatus);
         if (!intent) return;
         sendMediaMessage({ type: intent });
     }
@@ -456,11 +454,11 @@
         });
 
         // Play/pause menu item. Title and enabled state come from the same
-        // helper as the panel button, so the two affordances cannot disagree
-        // (the menu used to be titled "Pause" while disabled during
-        // BUFFERING, next to a button that showed a pause icon and did
-        // nothing when clicked).
-        const playbackIntent = playbackIntentFromState(mediaStatus.playerState);
+        // derivation as the panel button (including an outstanding command
+        // intent), so the two affordances cannot disagree — the menu used to
+        // be titled "Pause" while disabled during BUFFERING, next to a button
+        // that showed a pause icon and did nothing when clicked.
+        const playbackIntent = nextPlaybackIntentFor(device, mediaStatus);
         if (mediaStatus.supportedMediaCommands & _MediaCommand.PAUSE) {
             browser.menus.update(MenuId.PopupMediaPlayPause, {
                 visible: true,

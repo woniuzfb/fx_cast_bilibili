@@ -19,7 +19,7 @@
         updatePopupMediaTimeline,
         type PopupMediaTimeline
     } from "./mediaTimeline";
-    import { playbackIntentFromState } from "./playbackIntent";
+    import { nextPlaybackIntentFor } from "../../background/playbackCommand";
 
     const _ = browser.i18n.getMessage;
 
@@ -54,13 +54,15 @@
      * Receiver matched neither, so a click while buffering silently did
      * nothing.
      *
-     * `undefined` (IDLE) disables the button. IDLE is deliberately NOT
-     * remapped to the PLAY intent: the handler already falls back to PLAY for
-     * the context-menu item, and the click result for an idle receiver is a
-     * buffering window either way, so a disabled button is the honest
-     * affordance.
+     * While a command is active this reflects the user's outstanding intent
+     * (the background coordinator's view); otherwise it is derived from the
+     * observed state. It does NOT feed the timeline, the buffering shimmer or
+     * seek settling — those keep reading `status.playerState`.
+     *
+     * `undefined` (IDLE, no active command) disables the button: there is no
+     * meaningful play/pause action to offer.
      */
-    $: nextPlaybackIntent = playbackIntentFromState(status.playerState);
+    $: nextPlaybackIntent = nextPlaybackIntentFor(device, status);
 
     // DASH remux sessions (Bilibili) report a live-style event playlist: the
     // receiver may omit media.duration and the SEEK capability even though

@@ -1,5 +1,6 @@
 import type { SessionRequest } from "./cast/sdk/classes";
 import type { MediaStatus, ReceiverStatus } from "./cast/sdk/types";
+import type { ReceiverPlaybackView } from "../../shared/playbackCommand";
 
 export enum ReceiverDeviceCapabilities {
     NONE = 0,
@@ -26,6 +27,15 @@ export interface ReceiverDevice {
      * mirroring.
      */
     deviceType?: "cast" | "roku";
+    /**
+     * Play/pause command view, kept as a SIBLING of mediaStatus rather than
+     * folded into it: `mediaStatus.playerState` is an observation that the
+     * timeline, the buffering shimmer and the seek-settling logic all read, so
+     * the user's outstanding intent must never overwrite it. While
+     * `lifecycle === "active"`, `intent` is what the popup's play/pause
+     * affordance reflects.
+     */
+    playbackCommand?: ReceiverPlaybackView;
 }
 
 export enum ReceiverSelectorMediaType {

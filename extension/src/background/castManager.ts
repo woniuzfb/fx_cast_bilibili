@@ -29,6 +29,11 @@ import ReceiverSelector, {
 } from "./ReceiverSelector";
 
 import deviceManager from "./deviceManager";
+import {
+    configurePlaybackCommands,
+    dispatchPlaybackCommand,
+    setPlaybackDeviceLookup
+} from "./playbackCommand";
 import { ActionState, updateActionState } from "./action";
 import {
     armCctvPageCaptureIngest,
@@ -1701,6 +1706,47 @@ function createSelector(tabId: number) {
         );
     selector.addEventListener("receiverMessage", onReceiverMessage);
 
+    /**
+     * The page-sender leg of a play/pause command. Returns true only when the
+     * injected sender accepted the control flow; false means the coordinator
+     * should fall back to the bridge. The page sender drives both sides, so a
+     * true result must suppress the bridge dispatch entirely.
+     */
+    const pagePlaybackRoute = async (
+        deviceId: string,
+        intent: "PLAY" | "PAUSE"
+    ): Promise<boolean> => {
+        const instance = castManager.getInstanceByDeviceId(deviceId);
+        const tabId = instance?.contentContext?.tabId;
+        if (tabId === undefined) return false;
+        const action = intent === "PAUSE" ? "pause" : "play";
+        try {
+            const results = await browser.scripting.executeScript({
+                target: { tabId },
+                func: ((playback: "play" | "pause") =>
+                    (window as any).__fxCastBilibili?.controlPlayback?.(
+                        playback
+                    ) === true) as any,
+                args: [action]
+            });
+            return results.some(result => result.result === true);
+        } catch (err) {
+            logger.error("Failed to route popup playback to page sender", err);
+            return false;
+        }
+    };
+
+    // The page route is owned by the popup's tab context, so the coordinator
+    // is only told how to ask for it.
+    configurePlaybackCommands({
+        onViewChanged: deviceId =>
+            deviceManager.notifyPlaybackCommandChanged(deviceId),
+        pageRouteAttempt: pagePlaybackRoute,
+        deviceRouteAttempt: (deviceId, message) =>
+            deviceManager.sendMediaMessage(deviceId, message)
+    });
+    setPlaybackDeviceLookup(deviceId => deviceManager.getDeviceById(deviceId));
+
     // Forward media messages
     const onMediaMessage = async (
         ev: CustomEvent<ReceiverSelectorMediaMessage>
@@ -1712,28 +1758,22 @@ function createSelector(tabId: number) {
         // restarts the remux at the target position. Play/pause is routed the
         // same way so the page (capture source) and Roku move together instead
         // of the page lagging the 2.5s ECP poll.
+        //
+        // The play/pause decision is owned by the playback-command coordinator
+        // (see playbackCommand.ts): it asks for the page route first and only
+        // falls back to the bridge when that route declines. The bare boolean
+        // below is the whole page protocol today, and it proves only that the
+        // page accepted the control flow — hence the coordinator keeps
+        // receiverPhase at "not-started" for page-owned commands.
         if (message.type === "PAUSE" || message.type === "PLAY") {
-            const instance = castManager.getInstanceByDeviceId(deviceId);
-            const tabId = instance?.contentContext?.tabId;
-            if (tabId !== undefined) {
-                const action = message.type === "PAUSE" ? "pause" : "play";
-                try {
-                    const results = await browser.scripting.executeScript({
-                        target: { tabId },
-                        func: ((playback: "play" | "pause") =>
-                            (window as any).__fxCastBilibili?.controlPlayback?.(
-                                playback
-                            ) === true) as any,
-                        args: [action]
-                    });
-                    if (results.some(result => result.result === true)) return;
-                } catch (err) {
-                    logger.error(
-                        "Failed to route popup playback to page sender",
-                        err
-                    );
-                }
-            }
+            const device = deviceManager.getDeviceById(deviceId);
+            if (!device) return;
+            await dispatchPlaybackCommand(
+                device,
+                message.type,
+                device.mediaStatus
+            );
+            return;
         }
         if (
             message.type === "SEEK" &&
@@ -1831,6 +1871,7 @@ function createSelector(tabId: number) {
     deviceManager.addEventListener("deviceDown", onDeviceChange);
     deviceManager.addEventListener("deviceUpdated", onDeviceChange);
     deviceManager.addEventListener("deviceMediaUpdated", onDeviceChange);
+    deviceManager.addEventListener("devicePlaybackUpdated", onDeviceChange);
 
     // Cleanup listeners
     selector.addEventListener(
