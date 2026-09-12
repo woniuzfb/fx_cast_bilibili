@@ -95,11 +95,27 @@ export type PlaybackCommandTerminalReason =
 export type PagePlaybackPhase = "not-started" | "requesting" | "failed";
 
 /**
- * Receiver-side progress. `confirmed` / `not-confirmed` are intentionally
- * absent: they require a verified command-after observation, which does not
- * exist yet.
+ * Receiver-side progress.
+ *
+ * `confirmed` requires an `ecp-poll` observation that STARTED after the
+ * receiver was commanded and matched the intent. `not-confirmed` means an
+ * observation existed but never matched (including still being transitional at
+ * the deadline). A command that was dispatched but produced no usable
+ * observation lands here too, distinguished by
+ * `terminalReason === "observation-unavailable"`.
  */
-export type ReceiverPlaybackPhase = "not-started" | "requested";
+export type ReceiverPlaybackPhase =
+    | "not-started"
+    | "requested"
+    | "confirmed"
+    | "not-confirmed";
+
+/** How an observation compared to the command's intent. */
+export type PlaybackObservationClassification =
+    | "matched"
+    | "transitional"
+    | "opposite"
+    | "irrelevant";
 
 /**
  * The play/pause view the popup renders, attached to the receiver device
@@ -126,4 +142,11 @@ export interface ReceiverPlaybackView {
     receiverPending: boolean;
     pagePhase: PagePlaybackPhase;
     receiverPhase: ReceiverPlaybackPhase;
+    /**
+     * How the last usable observation compared to the intent. Diagnostics:
+     * `opposite` (device settled in the other state), `transitional` (still
+     * buffering), `irrelevant` (e.g. IDLE, media ended) point at different
+     * failures.
+     */
+    lastObservation?: PlaybackObservationClassification;
 }

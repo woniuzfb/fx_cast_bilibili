@@ -4,13 +4,16 @@ import type {
     PlaybackCommandTerminalReason,
     PlaybackExecutionOwner,
     PlaybackIntent,
+    PlaybackObservationClassification,
     PlaybackRouteAttempt,
     ReceiverPlaybackPhase,
     ReceiverPlaybackView,
     RokuMediaIdentity
 } from "../../../shared/playbackCommand";
+import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
 import type { ReceiverDevice } from "../types";
 import type { MediaStatus, SenderMediaMessage } from "../cast/sdk/types";
+import { PlayerState } from "../cast/sdk/media/enums";
 
 import { Logger } from "../lib/logger";
 
@@ -42,6 +45,18 @@ interface PlaybackCommand {
     terminalReason?: PlaybackCommandTerminalReason;
     pagePhase: PagePlaybackPhase;
     receiverPhase: ReceiverPlaybackPhase;
+    /** When the receiver was first commanded. */
+    receiverRequestedAt?: number;
+    /**
+     * Last observation usable for confirmation, i.e. an `ecp-poll` sample that
+     * arrived after receiverRequestedAt. Echoes and synthetic states never
+     * land here: counting them would let a command confirm itself.
+     */
+    lastObservation?: {
+        classification: PlaybackObservationClassification;
+        playerState: PlayerState;
+        at: number;
+    };
     watchdogTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -153,7 +168,8 @@ function viewFor(command: PlaybackCommand): ReceiverPlaybackView {
             command.lifecycle === "active" &&
             command.receiverPhase === "requested",
         pagePhase: command.pagePhase,
-        receiverPhase: command.receiverPhase
+        receiverPhase: command.receiverPhase,
+        lastObservation: command.lastObservation?.classification
     };
 }
 
@@ -216,6 +232,89 @@ export function setPlaybackDeviceLookup(
     deviceLookup = lookup;
 }
 
+/**
+ * Compares an observed player state against a command's intent.
+ *
+ * BUFFERING is transitional in both directions: the receiver is mid-stream, so
+ * it neither confirms the intent nor contradicts it. Whether specific firmware
+ * reports "buffer" while pausing is not something this repo has verified, which
+ * is precisely why it must not be treated as evidence either way.
+ */
+export function classifyObservation(
+    intent: PlaybackIntent,
+    state: PlayerState
+): PlaybackObservationClassification {
+    if (state === PlayerState.BUFFERING) return "transitional";
+    if (intent === "PLAY" && state === PlayerState.PLAYING) return "matched";
+    if (intent === "PAUSE" && state === PlayerState.PAUSED) return "matched";
+    if (intent === "PLAY" && state === PlayerState.PAUSED) return "opposite";
+    if (intent === "PAUSE" && state === PlayerState.PLAYING) return "opposite";
+    // IDLE and anything unknown: the media ended, was dismissed, or moved on.
+    return "irrelevant";
+}
+
+function acceptObservation(
+    device: ReceiverDevice,
+    command: PlaybackCommand,
+    status: MediaStatus,
+    provenance: RokuMediaStatusProvenance,
+    receivedAt: number
+) {
+    if (command.lifecycle !== "active") return;
+    if (command.receiverPhase !== "requested") return;
+    // Whitelist, not blacklist: every other source either synthesizes state or
+    // rebroadcasts the cached one - including the echo of the very intent this
+    // command just dispatched (volume-key-echo and status-probe replay it too,
+    // so excluding only command-echo would not be enough).
+    if (provenance.source !== "ecp-poll") return;
+    if (
+        command.receiverRequestedAt !== undefined &&
+        receivedAt < command.receiverRequestedAt
+    ) {
+        // An observation that merely ARRIVED after the dispatch. The poll
+        // itself may have started before it, so this is a weak gate;
+        // provenance.pollStartedAt is what makes it causal.
+        return;
+    }
+
+    const classification = classifyObservation(
+        command.intent,
+        status.playerState
+    );
+    command.lastObservation = {
+        classification,
+        playerState: status.playerState,
+        at: receivedAt
+    };
+    logger.info("Playback command observation", {
+        deviceId: device.id,
+        commandId: command.commandId,
+        intent: command.intent,
+        playerState: status.playerState,
+        classification,
+        pollStartedAt: provenance.pollStartedAt,
+        sequence: provenance.sequence
+    });
+    if (classification === "matched") {
+        command.receiverPhase = "confirmed";
+        terminate(device, command, "completed");
+        return;
+    }
+    publish(device, command);
+}
+
+/** Wires the receiver-observation source (the device media status feed). */
+export function acceptReceiverObservation(
+    device: ReceiverDevice,
+    status: MediaStatus,
+    provenance: RokuMediaStatusProvenance,
+    receivedAt = Date.now()
+) {
+    const command = commands.get(device.id);
+    if (!command) return;
+    acceptObservation(device, command, status, provenance, receivedAt);
+}
+
 function armWatchdog(device: ReceiverDevice, command: PlaybackCommand) {
     clearWatchdog(command);
     command.watchdogTimer = setTimeout(() => {
@@ -229,11 +328,25 @@ function armWatchdog(device: ReceiverDevice, command: PlaybackCommand) {
             terminate(device, command, "dispatch-failed");
             return;
         }
-        // Dispatched, but this build has no receiver-confirmation producer, so
-        // the command must not claim the receiver reached any state. It is
-        // reported as an unavailable observation and, crucially, does not
-        // rewrite receiverPhase: the popup stops showing a pending dispatch
-        // and falls back to the observed state.
+        if (command.receiverPhase === "requested") {
+            // Dispatched, and the deadline is the receiver-confirmation
+            // window. With no usable observation we must NOT claim the
+            // receiver ended up in the wrong state - only that we could not
+            // find out. The popup stops showing a pending dispatch either
+            // way; only the diagnostic reason differs.
+            if (command.lastObservation === undefined) {
+                terminate(device, command, "observation-unavailable");
+                return;
+            }
+            // An observation existed but never matched the intent. A state
+            // still transitional at the deadline (e.g. buffering) counts as
+            // unconfirmed, since the requested state was never reached.
+            command.receiverPhase = "not-confirmed";
+            terminate(device, command, "completed");
+            return;
+        }
+        // Page-owned command: the bare boolean protocol cannot report whether
+        // the receiver API was ever called, so no receiver verdict is possible.
         terminate(device, command, "observation-unavailable");
     }, PLAYBACK_COMMAND_DEADLINE_MS);
     command.watchdogTimer.unref?.();
@@ -344,6 +457,9 @@ export async function dispatchPlaybackCommand(
     command.routeAttempts.device = "accepted";
     command.owner = "device-remote";
     command.receiverPhase = "requested";
+    // The confirmation window starts at the real dispatch, not at command
+    // creation or route selection.
+    command.receiverRequestedAt = Date.now();
     logger.info("Playback command handed to the bridge", {
         deviceId: device.id,
         commandId: command.commandId,

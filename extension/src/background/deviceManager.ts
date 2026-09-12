@@ -15,6 +15,8 @@ import type {
 import type { MediaInfo } from "../cast/sdk/media/classes";
 import { PlayerState, RepeatMode } from "../cast/sdk/media/enums";
 
+import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
+
 import {
     nextRokuLoadGeneration,
     setRokuMediaIdentityFields,
@@ -36,7 +38,17 @@ interface EventMap {
     deviceUp: { deviceInfo: ReceiverDevice };
     deviceDown: { deviceId: string };
     deviceUpdated: { deviceId: string; status: ReceiverStatus };
-    deviceMediaUpdated: { deviceId: string; status: MediaStatus };
+    deviceMediaUpdated: {
+        deviceId: string;
+        status: MediaStatus;
+        /**
+         * How the bridge produced this status (Roku only). Absent for the
+         * Chromecast push path and for statuses the extension synthesizes
+         * itself. Carried through because only `ecp-poll` may be used to
+         * confirm a play/pause command - see shared/rokuMediaStatusProvenance.
+         */
+        provenance?: RokuMediaStatusProvenance;
+    };
     /** The device's play/pause command view changed (see playbackCommand). */
     devicePlaybackUpdated: { deviceId: string };
 
@@ -628,7 +640,7 @@ export default new (class extends TypedEventTarget<EventMap> {
             }
 
             case "main:receiverDeviceMediaStatusUpdated": {
-                const { deviceId, status } = message.data;
+                const { deviceId, status, provenance } = message.data;
                 const device = this.receiverDevices.get(deviceId);
                 if (!device) break;
                 if (this.pendingRokuMediaLoads.has(deviceId)) {
@@ -746,7 +758,11 @@ export default new (class extends TypedEventTarget<EventMap> {
                     new CustomEvent("deviceMediaUpdated", {
                         detail: {
                             deviceId,
-                            status: device.mediaStatus
+                            // The merged status is what the popup renders,
+                            // but provenance describes the bridge's SAMPLE,
+                            // so it must not be dropped by the merge.
+                            status: device.mediaStatus,
+                            provenance
                         }
                     })
                 );

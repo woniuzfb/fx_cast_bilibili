@@ -30,12 +30,15 @@ import ReceiverSelector, {
 
 import deviceManager from "./deviceManager";
 import {
+    acceptReceiverObservation,
     configurePlaybackCommands,
     dispatchPlaybackCommand,
     setPlaybackDeviceLookup,
     terminateActivePlaybackCommand,
     terminateActivePlaybackCommandForRelay
 } from "./playbackCommand";
+import type { MediaStatus } from "../cast/sdk/types";
+import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
 import { ActionState, updateActionState } from "./action";
 import {
     armCctvPageCaptureIngest,
@@ -1888,10 +1891,32 @@ function createSelector(tabId: number) {
     // Update selector data whenever devices change/update
     const onDeviceChange = () => refreshReceiverSelector();
 
+    // Receiver observations for the playback-command coordinator. Only an
+    // `ecp-poll` sample can confirm a command; the coordinator applies that
+    // filter itself, so this only forwards what the bridge declared. Statuses
+    // the extension synthesizes carry no provenance and are skipped.
+    const onDeviceMediaUpdated = (
+        ev: CustomEvent<{
+            deviceId: string;
+            status: MediaStatus;
+            provenance?: RokuMediaStatusProvenance;
+        }>
+    ) => {
+        refreshReceiverSelector();
+        const { deviceId, status, provenance } = ev.detail;
+        if (!provenance) return;
+        const device = deviceManager.getDeviceById(deviceId);
+        if (!device) return;
+        acceptReceiverObservation(device, status, provenance, Date.now());
+    };
+    deviceManager.addEventListener(
+        "deviceMediaUpdated",
+        onDeviceMediaUpdated as EventListener
+    );
+
     deviceManager.addEventListener("deviceUp", onDeviceChange);
     deviceManager.addEventListener("deviceDown", onDeviceChange);
     deviceManager.addEventListener("deviceUpdated", onDeviceChange);
-    deviceManager.addEventListener("deviceMediaUpdated", onDeviceChange);
     deviceManager.addEventListener("devicePlaybackUpdated", onDeviceChange);
 
     // Cleanup listeners
@@ -1903,7 +1928,7 @@ function createSelector(tabId: number) {
             deviceManager.removeEventListener("deviceUpdated", onDeviceChange);
             deviceManager.removeEventListener(
                 "deviceMediaUpdated",
-                onDeviceChange
+                onDeviceMediaUpdated as EventListener
             );
 
             selector.removeEventListener("stop", onStop);
