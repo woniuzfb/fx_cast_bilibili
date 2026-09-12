@@ -326,11 +326,14 @@
     }
 
     function handleMediaPlayPause() {
-        // One derivation for the button, its tooltip, the context menu and
-        // this command (see playbackIntent). IDLE has no intent: fall back to
-        // a best-effort resume, which is the long-standing menu behaviour.
-        const intent =
-            playbackIntentFromState(mediaStatus?.playerState) ?? "PLAY";
+        // One derivation for the button icon, its tooltip, the context menu
+        // and this command, so they cannot disagree. No fallback for IDLE:
+        // every affordance that reaches this handler is disabled while there
+        // is no play/pause intent, and silently sending PLAY on behalf of a
+        // caller that bypassed them would reintroduce the very inconsistency
+        // this replaced.
+        const intent = playbackIntentFromState(mediaStatus?.playerState);
+        if (!intent) return;
         sendMediaMessage({ type: intent });
     }
     function handleMediaSkipPrevious() {

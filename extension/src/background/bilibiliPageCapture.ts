@@ -520,20 +520,41 @@ function flush(state: PageState, kind: Kind) {
                         state.retryAttempts[kind] = 0;
                         continue;
                     }
-                    if (
-                        response.status === 403 ||
-                        response.status === 410 ||
-                        response.status === 507
-                    ) {
-                        // Terminal for this endpoint: requestId mismatch, a
-                        // replaced capture generation, or a generation that was
-                        // terminated (which already requested a rebuild).
-                        if (
-                            state.requestId === requestId &&
-                            state.endpoint?.port === ep.port &&
-                            state.endpoint?.generation === ep.generation
-                        ) {
-                            state.endpoint = undefined;
+                    const destinationIsCurrent =
+                        state.requestId === requestId &&
+                        state.endpoint?.port === ep.port &&
+                        state.endpoint?.generation === ep.generation;
+                    if (response.status === 410) {
+                        // The bridge no longer serves this endpoint: the
+                        // request named a capture generation that is gone.
+                        // Nothing else guarantees a successor generation (the
+                        // sender may not re-cast at all), so ask for a rebuild
+                        // before disarming, otherwise this tab stays unarmed
+                        // until the user restarts the cast. Contrast 507: that
+                        // one DID come from terminateCapturedGeneration, which
+                        // already emitted main:bilibiliCaptureOverflow, so
+                        // requesting a second rebuild there would interrupt the
+                        // successor.
+                        if (destinationIsCurrent) {
+                            notifyCaptureUploadFailure(
+                                state,
+                                "upload-generation-gone",
+                                requestId,
+                                kind
+                            );
+                            invalidateRelayUploads(state);
+                        }
+                        return;
+                    }
+                    if (response.status === 403 || response.status === 507) {
+                        // Terminal for this endpoint without a rebuild request:
+                        // 403 is a requestId mismatch (the sender is bound to a
+                        // generation this endpoint never served), 507 a
+                        // generation the bridge already announced as
+                        // terminated. Both just disarm; a late verdict from a
+                        // superseded relay must not clear the current endpoint.
+                        if (destinationIsCurrent) {
+                            invalidateRelayUploads(state);
                         }
                         return;
                     }
