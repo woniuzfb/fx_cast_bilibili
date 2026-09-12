@@ -63,6 +63,14 @@ interface PlaybackCommand {
         classification: PlaybackObservationClassification;
         playerState: PlayerState;
         at: number;
+        /**
+         * When the accepted sample's poll STARTED. Observations are ordered by
+         * this, not by arrival: pollOnce's busy timeout lets polls overlap
+         * (POLL_BUSY_TIMEOUT_MS exceeds the poll interval), so an older poll can
+         * finish last and would otherwise overwrite - or wrongly confirm - a
+         * command based on a stale device state.
+         */
+        pollStartedAt: number;
     };
     watchdogTimer?: ReturnType<typeof setTimeout>;
 }
@@ -275,14 +283,34 @@ function acceptObservation(
     // so excluding only command-echo would not be enough).
     if (provenance.source !== "ecp-poll") return;
     // Strict causal gate, on when the SAMPLE was taken rather than when the
-    // message arrived: a poll that started before the command was dispatched
-    // may still return after it, and its state predates the command - the
-    // response was already read before the keypress could reach the device.
-    // `receivedAt` alone would accept such a sample.
+    // message arrived: a poll that started before the dispatch overlaps the
+    // command boundary, so its result cannot be attributed exclusively to this
+    // command even if it arrives later. Rejecting it is the conservative
+    // choice - `receivedAt` alone would accept such a sample.
     if (
         command.receiverDispatchStartedAt === undefined ||
         provenance.pollStartedAt < command.receiverDispatchStartedAt
     ) {
+        return;
+    }
+
+    const previous = command.lastObservation;
+    if (
+        previous !== undefined &&
+        provenance.pollStartedAt <= previous.pollStartedAt
+    ) {
+        // An overlapping poll that started no later than the sample already
+        // accepted: its device state is not newer, so it must not re-decide the
+        // command (a late older sample could otherwise confirm a command whose
+        // newest observation said otherwise, or leave the deadline judging a
+        // stale state).
+        logger.info("Stale playback observation ignored", {
+            deviceId: device.id,
+            commandId: command.commandId,
+            pollStartedAt: provenance.pollStartedAt,
+            previousPollStartedAt: previous.pollStartedAt,
+            sequence: provenance.sequence
+        });
         return;
     }
 
@@ -293,7 +321,8 @@ function acceptObservation(
     command.lastObservation = {
         classification,
         playerState: status.playerState,
-        at: receivedAt
+        at: receivedAt,
+        pollStartedAt: provenance.pollStartedAt
     };
     logger.info("Playback command observation", {
         deviceId: device.id,

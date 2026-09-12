@@ -697,7 +697,8 @@ const castManager = new (class {
 })();
 
 /**
- * Receiver observations for the playback-command coordinator.
+ * The coordinator's only observation input: one entry per completed ECP poll,
+ * including idle.
  *
  * Registered at module scope, NOT inside createSelector(): a command's
  * confirmation must not depend on a popup being open. Tying this to the
@@ -706,34 +707,12 @@ const castManager = new (class {
  * polling while the coordinator saw nothing and every command expired as
  * "observation-unavailable".
  *
- * Only an `ecp-poll` sample can confirm a command; the coordinator applies
- * that filter itself, so this only forwards what the bridge declared, and
- * skips statuses the extension synthesized (they carry no provenance).
- */
-function onPlaybackDeviceMediaUpdated(
-    ev: CustomEvent<{
-        deviceId: string;
-        status: MediaStatus;
-        provenance?: RokuMediaStatusProvenance;
-    }>
-) {
-    const { deviceId, status, provenance } = ev.detail;
-    if (!provenance) return;
-    acceptReceiverObservation(deviceId, status, provenance, Date.now());
-}
-deviceManager.addEventListener(
-    "deviceMediaUpdated",
-    onPlaybackDeviceMediaUpdated as EventListener
-);
-
-/**
- * Observation-only feed: one entry per completed ECP poll, including idle.
- *
- * Separate from the media-status feed because that one carries no message for
- * an idle poll (RokuRemote treats idle as "nothing to report"), which would
- * make an observed-idle device indistinguishable from an unobservable one: the
- * first must end as `not-confirmed` (classification "irrelevant") and only the
- * second as `observation-unavailable`.
+ * It is deliberately not also fed from deviceMediaUpdated: that message exists
+ * once per non-idle poll as well, so consuming both would evaluate the same
+ * sample twice, and it cannot express an idle poll at all - an observed idle
+ * must end as `not-confirmed` (classification "irrelevant") while only an
+ * unobservable device ends as `observation-unavailable`. deviceMediaUpdated
+ * therefore stays the UX/media channel, and this feed is the confirmation one.
  */
 function onRokuPlaybackObservation(
     ev: CustomEvent<{
