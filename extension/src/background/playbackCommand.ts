@@ -45,8 +45,15 @@ interface PlaybackCommand {
     terminalReason?: PlaybackCommandTerminalReason;
     pagePhase: PagePlaybackPhase;
     receiverPhase: ReceiverPlaybackPhase;
-    /** When the receiver was first commanded. */
-    receiverRequestedAt?: number;
+    /**
+     * When the extension STARTED submitting the receiver command to the
+     * bridge - sampled before the port call, not after it. postMessage() is an
+     * asynchronous submission boundary, so the bridge can begin its own
+     * post-command poll while this call is still on the stack; stamping the
+     * return time would put receiverDispatchStartedAt AFTER a legitimately
+     * post-command sample's pollStartedAt and make the strict gate reject it.
+     */
+    receiverDispatchStartedAt?: number;
     /**
      * Last observation usable for confirmation, i.e. an `ecp-poll` sample that
      * arrived after receiverRequestedAt. Echoes and synthetic states never
@@ -273,8 +280,8 @@ function acceptObservation(
     // response was already read before the keypress could reach the device.
     // `receivedAt` alone would accept such a sample.
     if (
-        command.receiverRequestedAt === undefined ||
-        provenance.pollStartedAt < command.receiverRequestedAt
+        command.receiverDispatchStartedAt === undefined ||
+        provenance.pollStartedAt < command.receiverDispatchStartedAt
     ) {
         return;
     }
@@ -444,6 +451,7 @@ export async function dispatchPlaybackCommand(
         terminate(device, command, "dispatch-failed");
         return viewFor(command);
     }
+    const dispatchStartedAt = Date.now();
     const dispatched =
         deviceRouteAttempt?.(device.id, {
             type: intent,
@@ -452,6 +460,7 @@ export async function dispatchPlaybackCommand(
         } satisfies SenderMediaMessage) ?? false;
     if (command.lifecycle !== "active") return viewFor(command);
     if (!dispatched) {
+        // Nothing was submitted, so nothing may claim a receiver request.
         command.routeAttempts.device = "rejected";
         terminate(device, command, "dispatch-failed");
         return viewFor(command);
@@ -459,9 +468,11 @@ export async function dispatchPlaybackCommand(
     command.routeAttempts.device = "accepted";
     command.owner = "device-remote";
     command.receiverPhase = "requested";
-    // The confirmation window starts at the real dispatch, not at command
-    // creation or route selection.
-    command.receiverRequestedAt = Date.now();
+    command.receiverDispatchStartedAt = dispatchStartedAt;
+    // The confirmation window starts at the real dispatch boundary, not at
+    // command creation: a slow page-route attempt must not eat into the window
+    // the receiver observation needs.
+    armWatchdog(device, command);
     logger.info("Playback command handed to the bridge", {
         deviceId: device.id,
         commandId: command.commandId,
