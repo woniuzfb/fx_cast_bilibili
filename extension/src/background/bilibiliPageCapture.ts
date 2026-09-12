@@ -524,21 +524,29 @@ function flush(state: PageState, kind: Kind) {
                         state.requestId === requestId &&
                         state.endpoint?.port === ep.port &&
                         state.endpoint?.generation === ep.generation;
-                    if (response.status === 410) {
-                        // The bridge no longer serves this endpoint: the
-                        // request named a capture generation that is gone.
-                        // Nothing else guarantees a successor generation (the
-                        // sender may not re-cast at all), so ask for a rebuild
-                        // before disarming, otherwise this tab stays unarmed
-                        // until the user restarts the cast. Contrast 507: that
-                        // one DID come from terminateCapturedGeneration, which
-                        // already emitted main:bilibiliCaptureOverflow, so
-                        // requesting a second rebuild there would interrupt the
-                        // successor.
+                    if (response.status === 403 || response.status === 410) {
+                        // The capture server rejected this endpoint's identity:
+                        // 403 its requestId, 410 its generation. Both mean the
+                        // extension is posting to a destination that no longer
+                        // stands for what the extension thinks it does, so
+                        // disarm the whole upload generation and ask for a
+                        // rebuild — otherwise the tab can stay permanently
+                        // unarmed with no local recovery path.
+                        //
+                        // This is defensive recovery for a violated
+                        // endpoint-identity invariant, NOT a statement that the
+                        // bridge has no successor generation: a mismatch also
+                        // occurs while a successor is starting but its ready
+                        // message has not been processed yet. Interrupting that
+                        // successor is prevented by the requestId carried in
+                        // the notification — the page sender drops a rebuild
+                        // for a generation it has already replaced.
                         if (destinationIsCurrent) {
                             notifyCaptureUploadFailure(
                                 state,
-                                "upload-generation-gone",
+                                response.status === 403
+                                    ? "upload-request-id-rejected"
+                                    : "upload-generation-gone",
                                 requestId,
                                 kind
                             );
@@ -546,12 +554,12 @@ function flush(state: PageState, kind: Kind) {
                         }
                         return;
                     }
-                    if (response.status === 403 || response.status === 507) {
-                        // Terminal for this endpoint without a rebuild request:
-                        // 403 is a requestId mismatch (the sender is bound to a
-                        // generation this endpoint never served), 507 a
-                        // generation the bridge already announced as
-                        // terminated. Both just disarm; a late verdict from a
+                    if (response.status === 507) {
+                        // The bridge already terminated this generation and
+                        // emitted main:bilibiliCaptureOverflow, which is what
+                        // drives the sender's rebuild. Requesting another one
+                        // here would interrupt the successor needlessly, so
+                        // this only cleans up locally. A late 507 from a
                         // superseded relay must not clear the current endpoint.
                         if (destinationIsCurrent) {
                             invalidateRelayUploads(state);
