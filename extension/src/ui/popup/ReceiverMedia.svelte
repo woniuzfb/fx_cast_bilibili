@@ -19,7 +19,7 @@
         updatePopupMediaTimeline,
         type PopupMediaTimeline
     } from "./mediaTimeline";
-    import { nextPlaybackIntentFor } from "../../background/playbackCommand";
+    import { nextPlaybackIntentFor } from "../../playbackView";
 
     const _ = browser.i18n.getMessage;
 

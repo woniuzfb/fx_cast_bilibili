@@ -22,7 +22,7 @@
 
     import LoadingIndicator from "../LoadingIndicator.svelte";
     import ReceiverMedia from "./ReceiverMedia.svelte";
-    import { nextPlaybackIntentFor } from "../../background/playbackCommand";
+    import { nextPlaybackIntentFor } from "../../playbackView";
 
     const _ = browser.i18n.getMessage;
 

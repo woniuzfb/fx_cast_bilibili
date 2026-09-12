@@ -32,7 +32,8 @@ import deviceManager from "./deviceManager";
 import {
     configurePlaybackCommands,
     dispatchPlaybackCommand,
-    setPlaybackDeviceLookup
+    setPlaybackDeviceLookup,
+    terminateActivePlaybackCommandForOwner
 } from "./playbackCommand";
 import { ActionState, updateActionState } from "./action";
 import {
@@ -866,6 +867,15 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
                 message.data.requestId
             );
             if (relayDeviceId) {
+                // A play/pause command for this relay can no longer execute:
+                // the relay it would drive is gone. Guarded by the owner so a
+                // late stop from a superseded relay cannot terminate the
+                // command of a newer LOAD.
+                terminateActivePlaybackCommandForOwner(
+                    relayDeviceId,
+                    `relay:${message.data.requestId}`,
+                    "stopped"
+                );
                 deviceManager.clearOptimisticRokuSessionMedia(
                     relayDeviceId,
                     message.data.requestId
@@ -1759,19 +1769,21 @@ function createSelector(tabId: number) {
         // same way so the page (capture source) and Roku move together instead
         // of the page lagging the 2.5s ECP poll.
         //
-        // The play/pause decision is owned by the playback-command coordinator
-        // (see playbackCommand.ts): it asks for the page route first and only
-        // falls back to the bridge when that route declines. The bare boolean
-        // below is the whole page protocol today, and it proves only that the
-        // page accepted the control flow — hence the coordinator keeps
-        // receiverPhase at "not-started" for page-owned commands.
-        if (message.type === "PAUSE" || message.type === "PLAY") {
-            const device = deviceManager.getDeviceById(deviceId);
-            if (!device) return;
+        // Play/pause is coordinated only for Roku receivers, because only they
+        // have a page sender to defer to and a bridge route to fall back on.
+        // Every other receiver keeps the generic path at the end of this
+        // handler — routing them here would strand the command, since the
+        // coordinator requires a Roku LOAD identity that a Chromecast never
+        // has.
+        const rokuDevice =
+            message.type === "PAUSE" || message.type === "PLAY"
+                ? deviceManager.getDeviceById(deviceId)
+                : undefined;
+        if (rokuDevice?.deviceType === "roku") {
             await dispatchPlaybackCommand(
-                device,
-                message.type,
-                device.mediaStatus
+                rokuDevice,
+                message.type as "PLAY" | "PAUSE",
+                rokuDevice.mediaStatus
             );
             return;
         }

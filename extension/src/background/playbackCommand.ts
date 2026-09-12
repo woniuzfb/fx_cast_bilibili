@@ -11,7 +11,6 @@ import type {
 } from "../../../shared/playbackCommand";
 import type { ReceiverDevice } from "../types";
 import type { MediaStatus, SenderMediaMessage } from "../cast/sdk/types";
-import { PlayerState } from "../cast/sdk/media/enums";
 
 import { Logger } from "../lib/logger";
 
@@ -34,8 +33,6 @@ interface PlaybackCommand {
     commandId: number;
     mediaIdentity: RokuMediaIdentity;
     intent: PlaybackIntent;
-    /** Observed state when the command was issued, for the popup's icon. */
-    nextIntent?: PlaybackIntent;
     routeAttempts: {
         page: PlaybackRouteAttempt;
         device: PlaybackRouteAttempt;
@@ -135,27 +132,10 @@ function sameMediaIdentity(
     );
 }
 
-export function intentForPlaybackState(
-    state: PlayerState | undefined
-): PlaybackIntent | undefined {
-    switch (state) {
-        case PlayerState.PLAYING:
-        case PlayerState.BUFFERING:
-            return "PAUSE";
-
-        case PlayerState.PAUSED:
-            return "PLAY";
-
-        default:
-            return undefined;
-    }
-}
-
 function viewFor(command: PlaybackCommand): ReceiverPlaybackView {
     return {
         commandId: command.commandId,
         intent: command.intent,
-        nextIntent: command.nextIntent,
         lifecycle: command.lifecycle,
         terminalReason: command.terminalReason,
         owner: command.owner,
@@ -170,31 +150,6 @@ function viewFor(command: PlaybackCommand): ReceiverPlaybackView {
 function publish(device: ReceiverDevice, command: PlaybackCommand) {
     device.playbackCommand = viewFor(command);
     onViewChanged?.(device.id);
-}
-
-/** The active command's intent, if the popup should still show it. */
-export function activePlaybackIntent(
-    device: ReceiverDevice
-): PlaybackIntent | undefined {
-    const view = device.playbackCommand;
-    return view?.lifecycle === "active" ? view.intent : undefined;
-}
-
-/** The intent the play/pause affordance should offer right now. */
-export function nextPlaybackIntentFor(
-    device: ReceiverDevice,
-    status?: MediaStatus
-): PlaybackIntent | undefined {
-    const view = device.playbackCommand;
-    if (view?.lifecycle === "active" && view.nextIntent) {
-        return view.nextIntent;
-    }
-    return intentForPlaybackState(status?.playerState);
-}
-
-export function isPlaybackReceiverPending(device: ReceiverDevice): boolean {
-    const view = device.playbackCommand;
-    return view?.lifecycle === "active" && view.receiverPending === true;
 }
 
 function clearWatchdog(command: PlaybackCommand) {
@@ -304,7 +259,6 @@ export async function dispatchPlaybackCommand(
         commandId: ++nextCommandId,
         mediaIdentity: { ...identity },
         intent,
-        nextIntent: intentForPlaybackState(status?.playerState),
         routeAttempts: { page: "not-tried", device: "not-tried" },
         lifecycle: "active",
         pagePhase: "not-started",
@@ -347,7 +301,7 @@ export async function dispatchPlaybackCommand(
             return viewFor(command);
         }
         command.routeAttempts.page = "rejected";
-        command.pagePhase = "not-started";
+        command.pagePhase = "failed";
         logger.info("Page playback route declined; falling back to bridge", {
             deviceId: device.id,
             commandId: command.commandId,
@@ -396,6 +350,22 @@ export function terminateActivePlaybackCommand(
 ) {
     const command = commands.get(deviceId);
     if (!command || command.lifecycle !== "active") return;
+    terminateIfCurrent(deviceId, command, reason);
+}
+
+/**
+ * Terminates the device's active command only when it belongs to the given
+ * media owner. Used by relay lifecycle messages, where a late stop from a
+ * superseded relay must not touch a newer LOAD's command.
+ */
+export function terminateActivePlaybackCommandForOwner(
+    deviceId: string,
+    ownerId: string,
+    reason: PlaybackCommandTerminalReason
+) {
+    const command = commands.get(deviceId);
+    if (!command || command.lifecycle !== "active") return;
+    if (command.mediaIdentity.ownerId !== ownerId) return;
     terminateIfCurrent(deviceId, command, reason);
 }
 

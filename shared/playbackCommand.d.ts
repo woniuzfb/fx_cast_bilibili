@@ -83,7 +83,7 @@ export type PlaybackCommandTerminalReason =
  * happened, nor that the receiver API was called. See
  * PagePlaybackDispatchResult in a later step.
  */
-export type PagePlaybackPhase = "not-started" | "requesting";
+export type PagePlaybackPhase = "not-started" | "requesting" | "failed";
 
 /**
  * Receiver-side progress. `confirmed` / `not-confirmed` are intentionally
@@ -104,13 +104,13 @@ export type ReceiverPlaybackPhase = "not-started" | "requested";
  */
 export interface ReceiverPlaybackView {
     commandId: number;
-    /** The user's intent, valid while lifecycle is `active`. */
-    intent: PlaybackIntent;
     /**
-     * Present iff the resolved intent differs from the observed state, i.e.
-     * the icon/tooltip the popup must show while this command is active.
+     * The user's intent, valid while lifecycle is `active`. This is the only
+     * source for the affordance: the button shows the OPPOSITE action (see
+     * nextPlaybackIntentFor), which is derived rather than stored so the two
+     * can never drift.
      */
-    nextIntent?: PlaybackIntent;
+    intent: PlaybackIntent;
     lifecycle: PlaybackCommandLifecycle;
     terminalReason?: PlaybackCommandTerminalReason;
     owner?: PlaybackExecutionOwner;
