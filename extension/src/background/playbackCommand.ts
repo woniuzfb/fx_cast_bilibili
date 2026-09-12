@@ -55,9 +55,10 @@ interface PlaybackCommand {
      */
     receiverDispatchStartedAt?: number;
     /**
-     * Last observation usable for confirmation, i.e. an `ecp-poll` sample that
-     * arrived after receiverRequestedAt. Echoes and synthetic states never
-     * land here: counting them would let a command confirm itself.
+     * Last confirmable sample: an `ecp-poll` observation whose poll started no
+     * earlier than receiverDispatchStartedAt, kept in poll-start order.
+     * Echoes and synthetic states never land here - counting them would let a
+     * command confirm itself.
      */
     lastObservation?: {
         classification: PlaybackObservationClassification;
@@ -342,8 +343,10 @@ function acceptObservation(
 }
 
 /**
- * Wires the receiver-observation sources: the device media status feed and the
- * observation-only feed that also carries idle polls.
+ * Consumes the dedicated Roku ECP playback-observation feed (bridge:
+ * main:rokuPlaybackObservation), which reports every completed poll including
+ * idle. Confirmation has exactly one input; the device media status feed is
+ * the UX/media channel and is not consumed here.
  */
 export function acceptReceiverObservation(
     deviceId: string,
