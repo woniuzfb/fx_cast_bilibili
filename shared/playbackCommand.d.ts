@@ -86,11 +86,11 @@ export type PlaybackCommandTerminalReason =
     | "observation-unavailable";
 
 /**
- * Coarse page-route progress. Deliberately small until the page sender returns
- * a structured result: the current protocol is a bare boolean, which proves
- * only that the page accepted the control flow — not that the page transition
- * happened, nor that the receiver API was called. See
- * PagePlaybackDispatchResult in a later step.
+ * Page-route progress. The page sender returns a structured result
+ * (PagePlaybackDispatchResult) for the synchronous facts and reports the
+ * asynchronous ones (arm consumed, receiver called, arm expired) through
+ * main:bilibiliPlaybackProgress - the arm now carries command identity, so a
+ * page event can be attributed to the command that armed it.
  */
 export type PagePlaybackPhase =
     | "not-started"
