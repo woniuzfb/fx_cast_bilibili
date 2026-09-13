@@ -179,6 +179,8 @@ function parseArgs(argv) {
         autoCastFixed: false,
         createFailure: false,
         interleave: false,
+        // Which checkpoint of createCastSession the injection fires at.
+        failStage: "p0",
         expectReleased: false,
         instrument: false
     };
@@ -192,6 +194,16 @@ function parseArgs(argv) {
             args.generationAdvance = true;
         else if (argv[i] === "--auto-cast-gap") args.autoCastGap = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
+        else if (argv[i] === "--fail-stage") {
+            const value = argv[i + 1];
+            if (value === undefined || value.startsWith("--")) {
+                throw new Error(
+                    "sessionHarness: --fail-stage needs a value (p0, p1 or p2)"
+                );
+            }
+            args.failStage = value;
+            i++;
+        }
         else if (argv[i] === "--create-failure-gap") {
             args.createFailure = true;
             args.expectReleased = false;
@@ -209,6 +221,15 @@ function parseArgs(argv) {
             args.instrument = true;
         else throw new Error(`sessionHarness: unknown argument ${argv[i]}`);
     }
+    if (!["p0", "p1", "p2"].includes(args.failStage)) {
+        // Without this an unknown stage simply never matches, every checkpoint
+        // lets the cast through, and the run fails much later with "the session
+        // was created anyway" instead of naming the real mistake.
+        throw new Error(
+            `sessionHarness: --fail-stage must be p0, p1 or p2 (got ${args.failStage})`
+        );
+    }
+
     return args;
 }
 
@@ -1016,51 +1037,91 @@ async function main() {
             }
         }
         if (failureMode) {
-            // Fault injection, run-bound and one-shot per call index: the gate
-            // sits at the TOP of createCastSession, i.e. after every caller has
-            // already announced its load generation - the exact production
-            // ordering whose failure handling is under test here. The injected
+            // Fault injection, run-bound and one-shot per call index.
+            //
+            // The SAME gate is installed at three checkpoints of
+            // createCastSession, and the run-bound control selects which one
+            // fires (`stage`), because "session creation failed" is not one
+            // event: the resources that exist when it fails differ per stage.
+            //
+            //   p0  entry - before bridge.connect(): nothing has been created
+            //   p1  after bridge.connect() resolved: a native host process and
+            //       a port exist, but the instance does not reference them yet
+            //   p2  after instance.session and both listeners are installed,
+            //       before the caller posts bridge:createCastSession
+            //
+            // Every stage still runs AFTER the caller announced its load
+            // generation, which is the production ordering under test. Injected
             // errors are re-thrown untouched; only the gate's own storage reads
-            // are allowed to be swallowed.
+            // may be swallowed.
+            // Each checkpoint counts ITS OWN invocations. One shared counter
+            // would count checkpoint executions, not calls: at p1 the p0 gate has
+            // already incremented it, so the p1 gate would see call 2 and an
+            // armed `calls: {1: ...}` would never match.
+            const sessionGate = stage =>
+                "\n" +
+                "    {\n" +
+                `        const __fxCall = (globalThis['__fxHarnessCreateSessionCalls_${stage}'] = (globalThis['__fxHarnessCreateSessionCalls_${stage}'] || 0) + 1);\n` +
+                "        try {\n" +
+                "            const __fxRead = await browser.storage.local.get(['__fxHarnessCreateSessionControl', '__fxHarnessDiagnosticRunId']);\n" +
+                "            const __fxCtl = __fxRead && __fxRead.__fxHarnessCreateSessionControl;\n" +
+                "            const __fxRunId = __fxRead && __fxRead.__fxHarnessDiagnosticRunId;\n" +
+                `            const __fxStage = (__fxCtl && __fxCtl.stage) || 'p0';\n` +
+                `            const __fxAction = __fxCtl && __fxCtl.runId === __fxRunId && __fxStage === ${JSON.stringify(
+                    stage
+                )} && __fxCtl.calls ? __fxCtl.calls[__fxCall] : undefined;\n` +
+                "            if (__fxAction) {\n" +
+                `                const __fxWhere = { runId: __fxRunId, callIndex: __fxCall, stage: ${JSON.stringify(
+                    stage
+                )}, action: __fxAction, at: Date.now() };\n` +
+                "                void browser.storage.local.set({ ['__fxHarnessCreateSessionEntered_' + __fxCall]: __fxWhere }).catch(() => {});\n" +
+                "                if (__fxAction === 'failNow') {\n" +
+                "                    void browser.storage.local.set({ ['__fxHarnessCreateSessionFailed_' + __fxCall]: __fxWhere }).catch(() => {});\n" +
+                "                    throw new Error('harness: injected createCastSession failure (call ' + __fxCall + ', stage ' + __fxStage + ')');\n" +
+                "                }\n" +
+                "                if (__fxAction === 'hold') {\n" +
+                "                    void browser.storage.local.set({ ['__fxHarnessCreateSessionHeld_' + __fxCall]: __fxWhere }).catch(() => {});\n" +
+                "                    for (;;) {\n" +
+                "                        await new Promise(r => setTimeout(r, 150));\n" +
+                "                        const __fxRel = await browser.storage.local.get(['__fxHarnessReleaseCreateSession', '__fxHarnessDiagnosticRunId']);\n" +
+                "                        const __fxRec = __fxRel && __fxRel.__fxHarnessReleaseCreateSession;\n" +
+                "                        if (__fxRec && __fxRec.runId === (__fxRel && __fxRel.__fxHarnessDiagnosticRunId) && __fxRec.callIndex === __fxCall) {\n" +
+                "                            void browser.storage.local.set({ ['__fxHarnessCreateSessionReleased_' + __fxCall]: { ...__fxWhere, action: __fxRec.action, at: Date.now() } }).catch(() => {});\n" +
+                "                            if (__fxRec.action === 'fail') {\n" +
+                "                                void browser.storage.local.set({ ['__fxHarnessCreateSessionFailed_' + __fxCall]: { ...__fxWhere, at: Date.now() } }).catch(() => {});\n" +
+                "                                throw new Error('harness: released createCastSession failure (call ' + __fxCall + ', stage ' + __fxStage + ')');\n" +
+                "                            }\n" +
+                "                            break;\n" +
+                "                        }\n" +
+                "                    }\n" +
+                "                }\n" +
+                "            }\n" +
+                "        } catch (__fxErr) {\n" +
+                "            if (String((__fxErr && __fxErr.message) || '').startsWith('harness: ')) throw __fxErr;\n" +
+                "        }\n" +
+                "    }";
             patch(
                 "background/background.js",
                 "async function createCastSession(opts) {",
-                () =>
-                    "\n" +
-                    "    {\n" +
-                    "        const __fxCall = (globalThis.__fxHarnessCreateSessionCalls = (globalThis.__fxHarnessCreateSessionCalls || 0) + 1);\n" +
-                    "        try {\n" +
-                    "            const __fxRead = await browser.storage.local.get(['__fxHarnessCreateSessionControl', '__fxHarnessDiagnosticRunId']);\n" +
-                    "            const __fxCtl = __fxRead && __fxRead.__fxHarnessCreateSessionControl;\n" +
-                    "            const __fxRunId = __fxRead && __fxRead.__fxHarnessDiagnosticRunId;\n" +
-                    "            const __fxAction = __fxCtl && __fxCtl.runId === __fxRunId && __fxCtl.calls ? __fxCtl.calls[__fxCall] : undefined;\n" +
-                    "            if (__fxAction) {\n" +
-                    "                void browser.storage.local.set({ ['__fxHarnessCreateSessionEntered_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, action: __fxAction, at: Date.now() } }).catch(() => {});\n" +
-                    "                if (__fxAction === 'failNow') {\n" +
-                    "                    void browser.storage.local.set({ ['__fxHarnessCreateSessionFailed_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, at: Date.now() } }).catch(() => {});\n" +
-                    "                    throw new Error('harness: injected createCastSession failure (call ' + __fxCall + ')');\n" +
-                    "                }\n" +
-                    "                if (__fxAction === 'hold') {\n" +
-                    "                    void browser.storage.local.set({ ['__fxHarnessCreateSessionHeld_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, at: Date.now() } }).catch(() => {});\n" +
-                    "                    for (;;) {\n" +
-                    "                        await new Promise(r => setTimeout(r, 150));\n" +
-                    "                        const __fxRel = await browser.storage.local.get(['__fxHarnessReleaseCreateSession', '__fxHarnessDiagnosticRunId']);\n" +
-                    "                        const __fxRec = __fxRel && __fxRel.__fxHarnessReleaseCreateSession;\n" +
-                    "                        if (__fxRec && __fxRec.runId === (__fxRel && __fxRel.__fxHarnessDiagnosticRunId) && __fxRec.callIndex === __fxCall) {\n" +
-                    "                            void browser.storage.local.set({ ['__fxHarnessCreateSessionReleased_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, action: __fxRec.action, at: Date.now() } }).catch(() => {});\n" +
-                    "                            if (__fxRec.action === 'fail') {\n" +
-                    "                                void browser.storage.local.set({ ['__fxHarnessCreateSessionFailed_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, at: Date.now() } }).catch(() => {});\n" +
-                    "                                throw new Error('harness: released createCastSession failure (call ' + __fxCall + ')');\n" +
-                    "                            }\n" +
-                    "                            break;\n" +
-                    "                        }\n" +
-                    "                    }\n" +
-                    "                }\n" +
-                    "            }\n" +
-                    "        } catch (__fxErr) {\n" +
-                    "            if (String((__fxErr && __fxErr.message) || '').startsWith('harness: ')) throw __fxErr;\n" +
-                    "        }\n" +
-                    "    }"
+                () => sessionGate("p0")
+            );
+            // p1: the native host and port exist; instance.session does NOT.
+            patch(
+                "background/background.js",
+                "if (opts.instance.contentContext) {",
+                () => sessionGate("p1")
+            );
+            // p2: instance.session and both listeners exist, and the caller has
+            // not yet posted bridge:createCastSession.
+            //
+            // The anchor is the LAST statement of the function, not `return
+            // session;`: patch() inserts AFTER its marker, so anchoring on the
+            // return would make the gate unreachable dead code (it did, and the
+            // p2 run looked like "the injection never fired").
+            patch(
+                "background/background.js",
+                "if (opts.instance.contentContext?.tabId !== void 0) {",
+                () => sessionGate("p2")
             );
             console.log(
                 "failure mode: createCastSession is gate-able for this run (run-bound control)"
@@ -1678,6 +1739,13 @@ async function main() {
          * reading the console. Captured once, at arming time.
          */
         let failureActionBaseline;
+        /**
+         * Wrapper PIDs that already existed when the injection was armed. The
+         * residue assertions must be about hosts THIS failure created, not about
+         * any idle wrapper that happened to be around: a leftover from an earlier
+         * phase would otherwise be counted as this checkpoint's leak (or hide one).
+         */
+        let failureHostPidsBefore;
         if (provocation) {
             // Independent identity for the sender tab. `tabs.query({url})` with a
             // match pattern returned nothing here even with the `tabs`
@@ -1732,13 +1800,15 @@ async function main() {
                  browser.storage.local
                     .set({ __fxHarnessCreateSessionControl: { runId: ${JSON.stringify(
                         diagnosticRunId
-                    )}, calls: ${JSON.stringify(calls)}, at: Date.now() } })
+                    )}, calls: ${JSON.stringify(calls)}, stage: ${JSON.stringify(
+                        args.failStage
+                    )}, at: Date.now() } })
                     .then(() => done(true), err => done(String(err)));`
             );
             check(
-                "session-failure mode: the createCastSession injection is armed for this run",
+                `session-failure mode: the createCastSession injection is armed for this run (stage ${args.failStage})`,
                 armedInjection === true,
-                JSON.stringify({ armed: armedInjection, calls })
+                JSON.stringify({ armed: armedInjection, calls, stage: args.failStage })
             );
             // The failure phase's lower bound for the wire assertions, taken
             // after the arm has landed: nothing this phase produces can predate
@@ -1762,6 +1832,11 @@ async function main() {
                 // `traceLines`/`readConsoleText` are defined later, next to the
                 // failure assertions, so this early capture reads the file
                 // directly - the ORDER is the point, not the helper.
+                failureHostPidsBefore = new Set(
+                    readNdjson(path.join(harnessDir, "spawns.ndjson"))
+                        .filter(entry => entry.event === undefined)
+                        .map(entry => entry.pid)
+                );
                 failureActionBaseline = {
                     cancelled: countTrace("load-generation-cancelled"),
                     refused: (
@@ -1775,9 +1850,9 @@ async function main() {
                     JSON.stringify(failureActionBaseline)
                 );
             }
-            if (args.interleave) {
-                // The second start goes through `action:castCurrentTab`, whose
-                // handler resolves its target with
+            {
+                // Every failure mode may start a second cast through
+                // `action:castCurrentTab`, whose handler resolves its target with
                 // `tabs.query({active: true, currentWindow: true})`. Pin that
                 // resolution to the sender tab explicitly instead of hoping the
                 // WebDriver window switches left it active.
@@ -2739,6 +2814,66 @@ async function main() {
                 /inputPlayerState:\s*"?PLAYING"?/.test(line) &&
                 /inputCurrentTime:\s*"?30"?/.test(line);
 
+            /**
+             * The popup's own current-tab cast message, sent from the popup page
+             * (the context production sends it from), with the popup's window put
+             * in front first so the background's `currentWindow` query resolves to
+             * the sender tab. Used by the interleave modes and by the staged
+             * failure matrix, where it answers "does the residue of a partial
+             * session break the NEXT cast?".
+             */
+            const sendPopupCast = async () => {
+                if (!popupHandle) return "(no popup handle)";
+                await driver.switchTo().window(popupHandle);
+                if (senderTabInfo && typeof senderTabInfo.id === "number") {
+                    await driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
+                         (async () => {
+                            try {
+                                await browser.windows.update(${JSON.stringify(
+                                    senderTabInfo.windowId
+                                )}, { focused: true });
+                                await browser.tabs.update(${JSON.stringify(
+                                    senderTabInfo.id
+                                )}, { active: true });
+                                done(true);
+                            } catch (err) {
+                                done(String(err));
+                            }
+                         })();`
+                    );
+                }
+                return driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     (async () => {
+                        try {
+                            // Fire and forget, exactly like the popup's own
+                            // 'void castCurrentTab()': the handler does not settle
+                            // until the session it started settles.
+                            void browser.runtime
+                                .sendMessage({
+                                    subject: "action:castCurrentTab",
+                                    data: {
+                                        selection: {
+                                            device: {
+                                                id: ${JSON.stringify(FAKE_DEVICE_ID)},
+                                                name: ${JSON.stringify(FAKE_DEVICE_NAME)},
+                                                deviceType: "roku"
+                                            },
+                                            mediaType: 1
+                                        },
+                                        quality: 0
+                                    }
+                                })
+                                .catch(() => {});
+                            done(true);
+                        } catch (err) {
+                            done(String(err));
+                        }
+                     })();`
+                );
+            };
+
             // --- start 2 (interleave only): a newer lifecycle ---------------
             //
             // The popup's OWN current-tab cast message, sent from the popup page
@@ -2788,36 +2923,7 @@ async function main() {
                             ),
                         JSON.stringify({ resolvedTarget, senderTabInfo })
                     );
-                    secondStarted = await driver.executeAsyncScript(
-                        `const done = arguments[arguments.length - 1];
-                         (async () => {
-                            try {
-                                // Fire and forget, exactly like the popup's own
-                                // 'void castCurrentTab()': the handler does not
-                                // settle until the session it started settles,
-                                // and in this mode that session is HELD.
-                                void browser.runtime
-                                    .sendMessage({
-                                        subject: "action:castCurrentTab",
-                                        data: {
-                                            selection: {
-                                                device: {
-                                                    id: ${JSON.stringify(FAKE_DEVICE_ID)},
-                                                    name: ${JSON.stringify(FAKE_DEVICE_NAME)},
-                                                    deviceType: "roku"
-                                                },
-                                                mediaType: 1
-                                            },
-                                            quality: 0
-                                        }
-                                    })
-                                    .catch(() => {});
-                                done(true);
-                            } catch (err) {
-                                done(String(err));
-                            }
-                         })();`
-                    );
+                    secondStarted = await sendPopupCast();
                 }
                 check(
                     "interleave mode: the popup's current-tab cast started a second lifecycle",
@@ -3057,6 +3163,115 @@ async function main() {
                     announced: generationMarker && generationMarker.loadGeneration
                 })
             );
+
+            // --- partial-session residue at this checkpoint ------------------
+            //
+            // Create-failure modes only: the interleave modes legitimately post
+            // bridge:createCastSession for their second start, so the "nothing was
+            // posted" and "no host was created" invariants do not apply to them.
+            //
+            // "Session creation failed" is not one event. Which resources exist
+            // when it fails depends on the checkpoint, so this records what each
+            // one leaves behind instead of assuming one cleanup fits all.
+            if (!args.interleave) {
+                const connsNow = readConnectionsNow();
+                const alive = pid => {
+                    try {
+                        process.kill(pid, 0);
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                };
+                // Hosts that appeared DURING this failure phase, not every idle
+                // wrapper in the run.
+                const hostsBefore = failureHostPidsBefore || new Set();
+                const newHosts = connsNow.filter(c => !hostsBefore.has(c.pid));
+                const idleNewHosts = newHosts.filter(
+                    c => c.inbound.length === 0 && c.outbound.length === 0
+                );
+                const idleNewAlive = idleNewHosts.filter(h => alive(h.pid));
+                const postedCreateSession = connsNow.some(c =>
+                    c.inbound.some(
+                        m => m.subject === "bridge:createCastSession"
+                    )
+                );
+                check(
+                    `session-failure mode (${args.failStage}): the failure stayed inside createCastSession (no bridge:createCastSession was posted)`,
+                    !postedCreateSession,
+                    JSON.stringify({ postedCreateSession })
+                );
+                // The discriminator is IDLENESS, not "a new connection appeared":
+                // the background also opens short-lived version-probe hosts
+                // (bridge:/getInfo -> raw:<version>) which answer and exit, and
+                // counting those would make every checkpoint look like it leaked.
+                if (args.failStage === "p0") {
+                    check(
+                        "session-failure mode (p0): no IDLE native host was created, so there is nothing to leak (a probe host that answers and exits is not one)",
+                        idleNewHosts.length === 0 && idleNewAlive.length === 0,
+                        JSON.stringify({
+                            newHosts: newHosts.map(h => h.pid),
+                            idleNewHosts: idleNewHosts.map(h => h.pid),
+                            hostsBefore: [...hostsBefore]
+                        })
+                    );
+                } else {
+                    check(
+                        `session-failure mode (${args.failStage}): exactly one NEW IDLE native host, still alive (the port bridge.connect() created and nobody uses)`,
+                        idleNewHosts.length === 1 &&
+                            idleNewAlive.length === 1,
+                        JSON.stringify({
+                            newHosts: newHosts.map(h => h.pid),
+                            idleNewHosts: idleNewHosts.map(h => h.pid),
+                            idleNewAlive: idleNewAlive.map(h => h.pid),
+                            failStage: args.failStage
+                        })
+                    );
+                }
+
+                // Does a partial session poison the NEXT cast? This is the
+                // behavioral probe for "instance.session was left set": at p1 it
+                // was never assigned (expect a clean new session), at p2 it
+                // references a host the device never heard of.
+                if (args.failStage !== "p0") {
+                    const pidsBefore = new Set(connsNow.map(c => c.pid));
+                    const started = await sendPopupCast();
+                    check(
+                        `session-failure mode (${args.failStage}): a cast started after the failure`,
+                        started === true,
+                        String(started)
+                    );
+                    let newSession;
+                    const sessionDeadline = Date.now() + 30000;
+                    while (Date.now() < sessionDeadline) {
+                        newSession = readConnectionsNow().find(
+                            c =>
+                                !pidsBefore.has(c.pid) &&
+                                c.inbound.some(
+                                    m =>
+                                        m.subject ===
+                                            "bridge:createCastSession" &&
+                                        m.message &&
+                                        m.message.data &&
+                                        m.message.data.receiverDevice &&
+                                        m.message.data.receiverDevice.id ===
+                                            FAKE_DEVICE_ID
+                                )
+                        );
+                        if (newSession) break;
+                        await sleep(500);
+                    }
+                    check(
+                        `session-failure mode (${args.failStage}): the next cast still created its own session host (the residue did not poison it)`,
+                        Boolean(newSession),
+                        JSON.stringify({
+                            newSessionPid: newSession && newSession.pid,
+                            previousPids: [...pidsBefore],
+                            idleNewHosts: idleNewHosts.map(h => h.pid)
+                        })
+                    );
+                }
+            }
 
             // --- the newer start must survive the older one's failure -------
             if (args.interleave) {
