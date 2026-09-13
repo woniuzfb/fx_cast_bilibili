@@ -119,6 +119,7 @@ function parseArgs(argv) {
         phaseAOnly: false,
         startupSynthesis: false,
         mediaBeforeGeneration: false,
+        generationAdvance: false,
         instrument: false
     };
     for (let i = 0; i < argv.length; i++) {
@@ -127,6 +128,8 @@ function parseArgs(argv) {
         else if (argv[i] === "--startup-synthesis") args.startupSynthesis = true;
         else if (argv[i] === "--media-before-generation")
             args.mediaBeforeGeneration = true;
+        else if (argv[i] === "--generation-advance")
+            args.generationAdvance = true;
         else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
         else if (argv[i] === "--instrument-content-initial")
             args.instrument = true;
@@ -590,6 +593,30 @@ async function main() {
                     "deviceId, loadGeneration"
                 )
         );
+        if (args.generationAdvance) {
+            // The generation is advanced by calling the REAL producer
+            // (beginRokuMediaLoad) rather than by faking a bridge message, so the
+            // extension's own generation bookkeeping and its cross-process
+            // forwarding are what the case exercises. onBridgeMessage runs on
+            // every bridge message, which is often enough to act on a request
+            // without adding a timer.
+            patch("background/background.js", "onBridgeMessage = (message) => {", () => {
+                const code =
+                    "\ntry { browser.storage.local.get(['__fxHarnessAdvanceGenerationRequest', '__fxHarnessReplayMediaRequest', '__fxHarnessDiagnosticRunId']).then(r => {" +
+                    " const runId = r && r.__fxHarnessDiagnosticRunId;" +
+                    " const adv = r && r.__fxHarnessAdvanceGenerationRequest;" +
+                    " if (adv && adv.runId === runId && adv.deviceId) { void browser.storage.local.remove('__fxHarnessAdvanceGenerationRequest');" +
+                    " try { this.beginRokuMediaLoad(adv.deviceId); } catch (e) {}" +
+                    " void browser.storage.local.set({ __fxHarnessGenerationAdvanced: { runId: runId, deviceId: adv.deviceId, previousGeneration: adv.expectedCurrentGeneration, at: Date.now() } }); }" +
+                    " const rep = r && r.__fxHarnessReplayMediaRequest;" +
+                    " if (rep && rep.runId === runId && rep.deviceId) { void browser.storage.local.remove('__fxHarnessReplayMediaRequest');" +
+                    " try { this.bridgePort.postMessage({ subject: 'bridge:rokuSetSessionMedia', data: { deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, ownerId: rep.ownerId, media: rep.media } });" +
+                    " void browser.storage.local.set({ __fxHarnessMediaPosted: { runId: runId, deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, marker: rep.media && rep.media.customData && rep.media.customData.harnessMarker, at: Date.now() } }); }" +
+                    " catch (e) { void browser.storage.local.set({ __fxHarnessMediaPostFailed: { runId: runId, loadGeneration: rep.loadGeneration, error: String(e) } }); } }" +
+                    " }).catch(() => {}); } catch (e) {}";
+                return code;
+            });
+        }
         patch(
             "background/background.js",
             "setRokuSessionMedia(deviceId, ownerId, media) {",
@@ -1600,7 +1627,10 @@ async function main() {
         const loadStartedAt = Date.now();
         const HARNESS_MARKER = args.mediaBeforeGeneration
             ? "stage3-media-first"
+            : args.generationAdvance
+            ? "stage3-generation-N"
             : "stage2";
+        const NEXT_MARKER = "stage3-generation-N-plus-1";
         const afterLoad = entry => entry.at >= loadStartedAt;
         const markerOf = media =>
             media && media.customData && media.customData.harnessMarker;
@@ -1613,7 +1643,11 @@ async function main() {
                 `const done = arguments[arguments.length - 1];
                  const timer = setTimeout(() => done("timeout: no load callback"), 20000);
                  window.__HARNESS_LOAD__({ harnessMarker: ${JSON.stringify(
-                 args.mediaBeforeGeneration ? "stage3-media-first" : "stage2"
+                 args.mediaBeforeGeneration
+                     ? "stage3-media-first"
+                     : args.generationAdvance
+                     ? "stage3-generation-N"
+                     : "stage2"
              )} }).then(
                     () => { clearTimeout(timer); done(true); },
                     err => { clearTimeout(timer); done(String(err)); }
@@ -1740,9 +1774,9 @@ async function main() {
             : { inbound: [], outbound: [] };
         const discoveryConn = discoveryConnectionsNow[0] || { inbound: [], outbound: [] };
 
-        if (args.mediaBeforeGeneration) {
+        if (!assertStage2Hops) {
             console.log(
-                "Stage 2 hops and case 1 are not asserted in --media-before-generation mode: " +
+                "Stage 2 hops and case 1 are not asserted in this mode: " +
                     "the generation is deliberately held, and they require it to have been relayed " +
                     "alongside the media"
             );
@@ -1912,7 +1946,8 @@ async function main() {
                 m.message.data.deviceId === FAKE_DEVICE_ID &&
                 markerOf(m.message.data.media) === HARNESS_MARKER
         );
-        const assertStage2Hops = !args.mediaBeforeGeneration;
+        const assertStage2Hops =
+            !args.mediaBeforeGeneration && !args.generationAdvance;
         // The generation is created when the device is SELECTED, which is
         // legitimately before the LOAD, so it is filtered against the session
         // request boundary rather than the LOAD boundary.
@@ -2065,6 +2100,222 @@ async function main() {
             JSON.stringify(diagnosticMarkers && diagnosticMarkers.__fxHarnessBgControl)
         );
         await driver.switchTo().window(senderTab);
+        // ---- Stage 3, case 3: generation advance retires the old load --------
+        if (args.generationAdvance) {
+            const generationN = relayedMedia
+                ? relayedMedia.message.data.loadGeneration
+                : undefined;
+            const statusN = discoveryOutbound.find(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.status &&
+                    markerOf(m.message.data.status.media) === HARNESS_MARKER
+            );
+            check(
+                "stage3-3 A: generation N and its media are current",
+                Boolean(relayedGeneration && relayedMedia && statusN),
+                JSON.stringify({
+                    generation: generationN,
+                    media: Boolean(relayedMedia),
+                    statusVisible: Boolean(statusN)
+                })
+            );
+            const visibleAt = statusN ? statusN.at : undefined;
+
+            // B: advance through the real producer, and do NOT publish N+1 media
+            await driver.switchTo().window(consoleTab);
+            await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local.set({
+                    __fxHarnessAdvanceGenerationRequest: {
+                        runId: ${JSON.stringify(diagnosticRunId)},
+                        deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
+                        expectedCurrentGeneration: ${Number(generationN)}
+                    }
+                 }).then(() => done(true), err => done(String(err)));`
+            );
+            let advanced;
+            const advanceDeadline = Date.now() + 25000;
+            while (Date.now() < advanceDeadline) {
+                advanced = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .get("__fxHarnessGenerationAdvanced")
+                        .then(v => done(v.__fxHarnessGenerationAdvanced || null), err => done(null));`
+                );
+                if (advanced && advanced.runId === diagnosticRunId) break;
+                await sleep(500);
+            }
+            console.log("generation advanced:", JSON.stringify(advanced));
+            await driver.switchTo().window(senderTab);
+            await sleep(2000);
+
+            const afterAdvanceIn = discoveryConnectionsNow.flatMap(conn =>
+                readNdjson(path.join(harnessDir, `conn-${conn.pid}-in.ndjson`))
+            );
+            const generationNPlus1 = afterAdvanceIn.find(
+                m =>
+                    m.subject === "bridge:rokuSetLoadGeneration" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    Number(m.message.data.loadGeneration) > Number(generationN) &&
+                    (!advanced || m.at >= advanced.at)
+            );
+            check(
+                "stage3-3 C1: the new generation reached discovery",
+                Boolean(generationNPlus1),
+                JSON.stringify({
+                    advanced,
+                    generations: afterAdvanceIn
+                        .filter(
+                            m => m.subject === "bridge:rokuSetLoadGeneration"
+                        )
+                        .map(m => ({
+                            at: m.at,
+                            generation: m.message.data.loadGeneration
+                        }))
+                })
+            );
+            const mediaNPlus1Yet = afterAdvanceIn.find(
+                m =>
+                    m.subject === "bridge:rokuSetSessionMedia" &&
+                    Number(m.message.data.loadGeneration) > Number(generationN)
+            );
+            check(
+                "stage3-3 C2: no N+1 media has arrived yet (retirement is not a swap)",
+                !mediaNPlus1Yet,
+                JSON.stringify(mediaNPlus1Yet && mediaNPlus1Yet.at)
+            );
+            const afterAdvanceOut = discoveryConnectionsNow.flatMap(conn =>
+                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
+            );
+            const staleAfterAdvance = afterAdvanceOut.find(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.status &&
+                    markerOf(m.message.data.status.media) === HARNESS_MARKER &&
+                    generationNPlus1 &&
+                    m.at > generationNPlus1.at
+            );
+            check(
+                "stage3-3 C3: the retired load is no longer reported",
+                !staleAfterAdvance,
+                JSON.stringify({
+                    visibleAt,
+                    advanceAt: generationNPlus1 && generationNPlus1.at,
+                    staleAt: staleAfterAdvance && staleAfterAdvance.at
+                })
+            );
+
+            // D: a late copy of N's media must not revive it
+            const mediaN = relayedMedia && relayedMedia.message.data.media;
+            const ownerN = relayedMedia && relayedMedia.message.data.ownerId;
+            await driver.switchTo().window(consoleTab);
+            await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local.set({
+                    __fxHarnessReplayMediaRequest: {
+                        runId: ${JSON.stringify(diagnosticRunId)},
+                        deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
+                        loadGeneration: ${Number(generationN)},
+                        ownerId: ${JSON.stringify(ownerN || "")},
+                        media: ${JSON.stringify(mediaN || null)}
+                    }
+                 }).then(() => done(true), err => done(String(err)));`
+            );
+            let posted;
+            const postDeadline = Date.now() + 25000;
+            while (Date.now() < postDeadline) {
+                posted = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .get(["__fxHarnessMediaPosted", "__fxHarnessMediaPostFailed"])
+                        .then(v => done(v), err => done({ error: String(err) }));`
+                );
+                if (
+                    (posted && posted.__fxHarnessMediaPosted) ||
+                    (posted && posted.__fxHarnessMediaPostFailed)
+                )
+                    break;
+                await sleep(500);
+            }
+            console.log("old media replayed:", JSON.stringify(posted));
+            await driver.switchTo().window(senderTab);
+            await sleep(2500);
+            const afterReplayOut = discoveryConnectionsNow.flatMap(conn =>
+                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
+            );
+            const revived = afterReplayOut.find(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.status &&
+                    markerOf(m.message.data.status.media) === HARNESS_MARKER &&
+                    posted &&
+                    posted.__fxHarnessMediaPosted &&
+                    m.at >= posted.__fxHarnessMediaPosted.at
+            );
+            check(
+                "stage3-3 D: a late copy of the retired media does not revive it",
+                !revived,
+                JSON.stringify(revived && revived.at)
+            );
+
+            // E: only N+1's media may establish the new state
+            const mediaNPlus1 = mediaN
+                ? {
+                      ...mediaN,
+                      customData: {
+                          ...(mediaN.customData || {}),
+                          harnessMarker: NEXT_MARKER
+                      }
+                  }
+                : undefined;
+            await driver.switchTo().window(consoleTab);
+            await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local.set({
+                    __fxHarnessReplayMediaRequest: {
+                        runId: ${JSON.stringify(diagnosticRunId)},
+                        deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
+                        loadGeneration: ${Number(generationN) + 1},
+                        ownerId: ${JSON.stringify(ownerN || "")},
+                        media: ${JSON.stringify(mediaNPlus1 || null)}
+                    }
+                 }).then(() => done(true), err => done(String(err)));`
+            );
+            await sleep(4000);
+            await driver.switchTo().window(senderTab);
+            const afterNewOut = discoveryConnectionsNow.flatMap(conn =>
+                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
+            );
+            const newVisible = afterNewOut.find(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.status &&
+                    markerOf(m.message.data.status.media) === NEXT_MARKER
+            );
+            check(
+                "stage3-3 E: the new generation's media establishes the new state",
+                Boolean(newVisible),
+                JSON.stringify(
+                    afterNewOut
+                        .filter(
+                            m =>
+                                m.subject ===
+                                "main:receiverDeviceMediaStatusUpdated"
+                        )
+                        .map(m => ({
+                            at: m.at,
+                            marker: markerOf(m.message.data.status.media)
+                        }))
+                        .slice(-4)
+                )
+            );
+        }
+
         // ---- Stage 3, case 2: media first, generation later -----------------
         //
         // The generation was HELD at the test copy, so the media that arrives
