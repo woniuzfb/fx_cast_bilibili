@@ -40,9 +40,9 @@ export const PAGE_ROUTE_DISPATCH_TIMEOUT_MS = 12_000;
  * Kept separate from the dispatch timeout above because the two answer
  * different questions: the dispatch timeout bounds "no execution owner could be
  * established", this one bounds "the owner dispatched but no usable observation
- * arrived". They also have different校准 rules - this one's lower bound is the
- * period of the observation source (currently RokuRemote's 3s poll, so it must
- * span several samples plus ECP and messaging latency), and it will be
+ * arrived". They also need separate calibration: this window's lower bound is
+ * the period of the observation source (currently RokuRemote's 3s poll, so it
+ * must span several samples plus ECP and messaging latency), and it will be
  * recalibrated when a command-triggered confirmation poll exists. Sharing the
  * dispatch value would have made a slow page route silently eat the receiver's
  * confirmation window.
