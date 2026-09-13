@@ -632,12 +632,14 @@ async function main() {
                 return code;
             });
         }
-        if (args.generationAdvance || true) {
-            // Recorded immediately BEFORE the production Roku condition, so the
-            // next anomalous run distinguishes "the hook ran and did nothing"
-            // from "the hook was legally skipped because the selection object
-            // does not carry deviceType === 'roku'". Anchor is the condition
-            // itself, and the marker goes before it, never inside.
+        {
+            // Shared by EVERY mode: it is the Gate B diagnostic, not
+            // generation-advance instrumentation. Recorded immediately BEFORE the
+            // production Roku condition, so an anomalous run distinguishes "the
+            // hook ran and did nothing" from "the hook was legally skipped because
+            // the selection object does not carry deviceType === 'roku'". The
+            // anchor is the condition itself and the marker goes before it, never
+            // inside.
             patch(
                 "background/background.js",
                 'if (selection.device.deviceType === "roku") {',
@@ -1587,14 +1589,67 @@ async function main() {
         // point is the extension's relay - the boundary that until now was only
         // supported by reading code.
         // --- Gate B: was a load generation established for this device? -----
+        // Every one of these markers is written through an async
+        // storage.get(runId) -> storage.set(...) chain in a different extension
+        // context, so a single read can land in the window where the production
+        // call has happened but the write has not settled - which would fabricate
+        // a "generation was never created". Poll, and require the runId on each.
         await driver.switchTo().window(consoleTab);
-        const gateMarkers = await driver.executeAsyncScript(
-            `const done = arguments[arguments.length - 1];
-             browser.storage.local
-                .get(["__fxHarnessDiagnosticRunId", "__fxHarnessLoadGenerationBegan", "__fxHarnessSelectionAtRokuBranch", "__fxHarnessClickStorageControl"])
-                .then(v => done(v), err => done({ error: String(err) }));`
+        const readGateMarkers = () =>
+            driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .get(["__fxHarnessDiagnosticRunId", "__fxHarnessLoadGenerationBegan", "__fxHarnessSelectionAtRokuBranch", "__fxHarnessClickStorageControl"])
+                    .then(v => done(v), err => done({ error: String(err) }));`
+            );
+        const markerFor = (markers, key) => {
+            const marker = markers && markers[key];
+            return marker && marker.runId === diagnosticRunId ? marker : undefined;
+        };
+        let gateMarkers;
+        const gateDeadline = Date.now() + 15000;
+        for (;;) {
+            gateMarkers = await readGateMarkers();
+            const control = markerFor(gateMarkers, "__fxHarnessClickStorageControl");
+            const selection = markerFor(
+                gateMarkers,
+                "__fxHarnessSelectionAtRokuBranch"
+            );
+            const beganMarker = markerFor(
+                gateMarkers,
+                "__fxHarnessLoadGenerationBegan"
+            );
+            if (control && selection && beganMarker) break;
+            if (Date.now() > gateDeadline) break;
+            await sleep(250);
+        }
+        const clickControl = markerFor(
+            gateMarkers,
+            "__fxHarnessClickStorageControl"
         );
-        const began = gateMarkers && gateMarkers.__fxHarnessLoadGenerationBegan;
+        const selectionMarker = markerFor(
+            gateMarkers,
+            "__fxHarnessSelectionAtRokuBranch"
+        );
+        // The channel is only self-proven when BOTH run-bound markers are there;
+        // without that, a missing Gate B marker explains nothing.
+        check(
+            "Gate B channel self-proof: the click and selection markers are present for this run",
+            Boolean(clickControl && selectionMarker),
+            JSON.stringify({
+                clickControl: clickControl || null,
+                selectionMarker: selectionMarker || null
+            })
+        );
+        console.log(
+            "deviceType matrix (popup / background):",
+            JSON.stringify({
+                popup: clickControl && clickControl.deviceType,
+                background: selectionMarker && selectionMarker.deviceType,
+                backgroundMediaType: selectionMarker && selectionMarker.mediaType
+            })
+        );
+        const began = markerFor(gateMarkers, "__fxHarnessLoadGenerationBegan");
         // One predicate, used by both the assertion and the skip decision: a
         // marker with the wrong runId or device would otherwise assert red while
         // Stage 2 carried on.
