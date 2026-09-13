@@ -721,9 +721,8 @@ const castManager = new (class {
  */
 function onBilibiliPlaybackProgress(
     ev: CustomEvent<{
-        deviceId?: string;
         commandId: number;
-        mediaIdentity?: RokuMediaIdentity;
+        mediaIdentity: RokuMediaIdentity;
         pagePhase?: "transition-requested" | "target-observed" | "timeout";
         receiverPhase?: "requested" | "failed";
         receiverDispatchStartedAt?: number;

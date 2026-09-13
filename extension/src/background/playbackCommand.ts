@@ -503,6 +503,101 @@ export function isValidPagePlaybackDispatchResult(
     return false;
 }
 
+/** The page-side progress shape (see extension/messaging.ts). */
+export interface PagePlaybackProgress {
+    commandId: number;
+    /**
+     * Required. A progress message crosses a process boundary, so its fields
+     * cannot be trusted to be present just because today's producer fills them:
+     * an older content script, a truncated clone or another sender could omit
+     * the identity, and without it the command match would rest on commandId
+     * alone. deviceId is taken from here rather than duplicated as a sibling
+     * field, so the two can never disagree.
+     */
+    mediaIdentity: RokuMediaIdentity;
+    pagePhase?: "transition-requested" | "target-observed" | "timeout";
+    receiverPhase?: "requested" | "failed";
+    receiverDispatchStartedAt?: number;
+    pagePausedSnapshot?: boolean;
+    error?: string;
+}
+
+function isValidRokuMediaIdentity(value: unknown): value is RokuMediaIdentity {
+    if (!value || typeof value !== "object") return false;
+    const identity = value as Record<string, unknown>;
+    if (typeof identity.deviceId !== "string" || !identity.deviceId) {
+        return false;
+    }
+    if (!Number.isSafeInteger(identity.loadGeneration)) return false;
+    if (
+        identity.contentId !== undefined &&
+        typeof identity.contentId !== "string"
+    ) {
+        return false;
+    }
+    if (
+        identity.ownerId !== undefined &&
+        typeof identity.ownerId !== "string"
+    ) {
+        return false;
+    }
+    if (
+        identity.relayRequestId !== undefined &&
+        typeof identity.relayRequestId !== "string"
+    ) {
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validates a progress payload BEFORE anything is applied.
+ *
+ * The requested arm is the reason this exists: a "requested" delta is only
+ * meaningful with a usable dispatch timestamp, and applying the phase first
+ * would leave the command claiming a receiver request it can never confirm (the
+ * strict gate needs that timestamp). Such a payload is rejected whole.
+ */
+export function isValidPagePlaybackProgress(
+    value: unknown
+): value is PagePlaybackProgress {
+    if (!value || typeof value !== "object") return false;
+    const progress = value as Record<string, unknown>;
+    if (!Number.isSafeInteger(progress.commandId)) return false;
+    if (!isValidRokuMediaIdentity(progress.mediaIdentity)) return false;
+    if (progress.error !== undefined && typeof progress.error !== "string") {
+        return false;
+    }
+    if (
+        progress.pagePausedSnapshot !== undefined &&
+        typeof progress.pagePausedSnapshot !== "boolean"
+    ) {
+        return false;
+    }
+    if (
+        progress.pagePhase !== undefined &&
+        progress.pagePhase !== "transition-requested" &&
+        progress.pagePhase !== "target-observed" &&
+        progress.pagePhase !== "timeout"
+    ) {
+        return false;
+    }
+    if (
+        progress.receiverPhase !== undefined &&
+        progress.receiverPhase !== "requested" &&
+        progress.receiverPhase !== "failed"
+    ) {
+        return false;
+    }
+    if (progress.receiverPhase === "requested") {
+        return (
+            typeof progress.receiverDispatchStartedAt === "number" &&
+            Number.isFinite(progress.receiverDispatchStartedAt)
+        );
+    }
+    return progress.receiverDispatchStartedAt === undefined;
+}
+
 /**
  * Whether a progress delta proves the page actually started executing the
  * command. This is what forbids a device fallback later: falling back after the
@@ -522,183 +617,132 @@ function provesPageExecution(progress: PagePlaybackProgress): boolean {
     );
 }
 
-/** The page-side progress shape (see extension/messaging.ts). */
-export interface PagePlaybackProgress {
-    deviceId?: string;
-    commandId: number;
-    mediaIdentity?: RokuMediaIdentity;
-    pagePhase?: "transition-requested" | "target-observed" | "timeout";
-    receiverPhase?: "requested" | "failed";
-    receiverDispatchStartedAt?: number;
-    pagePausedSnapshot?: boolean;
-    error?: string;
-}
-
 /**
- * Pure field application. Kept apart from the lifecycle advance below so a
- * generic setter cannot silently carry terminal semantics.
+ * Atomically moves the receiver leg to "requested": the phase, the dispatch
+ * clock the strict gate uses, and the watchdog all change together or not at
+ * all.
  */
-function applyPlaybackProgressFields(
-    command: PlaybackCommand,
-    progress: PagePlaybackProgress
-) {
-    if (progress.pagePhase !== undefined)
-        command.pagePhase = progress.pagePhase;
-    if (progress.receiverPhase !== undefined) {
-        command.receiverPhase = progress.receiverPhase;
-    }
-    if (progress.error !== undefined) command.error = progress.error;
-    if (progress.pagePausedSnapshot !== undefined) {
-        command.pagePausedSnapshot = progress.pagePausedSnapshot;
-    }
-}
-
-/**
- * State-machine consequences of a progress delta. Returns true when the
- * command reached a terminal state.
- */
-function advancePlaybackLifecycleFromProgress(
+function requestReceiverFromPage(
     device: ReceiverDevice,
     command: PlaybackCommand,
-    progress: PagePlaybackProgress
-): boolean {
-    if (progress.receiverPhase === "requested") {
-        markReceiverRequestedFromPage(
-            device,
-            command,
-            progress.receiverDispatchStartedAt,
-            Date.now()
-        );
-        return false;
-    }
-    if (progress.receiverPhase === "failed") {
-        // The fixed execution owner reported an explicit receiver failure. That
-        // is a terminal outcome of the receiver leg, NOT a command-level
-        // dispatch failure: no fallback (the page already owns this command)
-        // and no waiting out the confirmation deadline.
-        command.receiverPhase = "failed";
-        terminate(device, command, "completed");
-        return true;
-    }
-    if (progress.pagePhase === "target-observed") {
-        // The page transition happened; the receiver leg reports separately.
-        publish(device, command);
-    }
-    return false;
-}
-
-/**
- * Accepts an asynchronous page fact for the current command, doing everything
- * possible to reject anything that does not belong to it.
- */
-export function acceptPagePlaybackProgress(progress: PagePlaybackProgress) {
-    if (!progress || typeof progress.commandId !== "number") return;
-
-    // Route by explicit deviceId when present; otherwise the only command that
-    // can own a page fact is a single active page-owned one.
-    const candidates: Array<[string, PlaybackCommand]> = progress.deviceId
-        ? ([[progress.deviceId, commands.get(progress.deviceId)]] as Array<
-              [string, PlaybackCommand]
-          >)
-        : [...commands.entries()];
-
-    for (const [deviceId, command] of candidates) {
-        if (!command || command.lifecycle !== "active") continue;
-        // A page fact is only meaningful for the page leg. It may legitimately
-        // arrive BEFORE the executeScript result (separate channels, no shared
-        // ordering), so an unresolved owner with the page route still in flight
-        // is accepted; anything else must not be able to rewrite the state of
-        // an execution owner that never asked for it - the device route has a
-        // different receiver dispatch clock entirely.
-        const ownsPageLeg =
-            command.owner === "page-sender" ||
-            (command.owner === undefined &&
-                command.routeAttempts.page === "trying" &&
-                command.routeAttempts.device === "not-tried");
-        if (!ownsPageLeg) {
-            logger.info("Page progress for a non-page-owned command ignored", {
-                deviceId,
-                commandId: progress.commandId,
-                owner: command.owner ?? "unresolved"
-            });
-            continue;
-        }
-        if (provesPageExecution(progress)) {
-            command.pageProgressObserved = true;
-        }
-        if (command.commandId !== progress.commandId) {
-            logger.info("Stale page progress ignored", {
-                deviceId,
-                commandId: progress.commandId,
-                currentCommandId: command.commandId
-            });
-            continue;
-        }
-        if (
-            progress.mediaIdentity !== undefined &&
-            !sameMediaIdentity(command.mediaIdentity, progress.mediaIdentity)
-        ) {
-            logger.info(
-                "Page progress for a different media identity ignored",
-                {
-                    deviceId,
-                    commandId: command.commandId
-                }
-            );
-            continue;
-        }
-        const device = deviceLookup?.(deviceId);
-        if (!device) continue;
-        logger.info("Page playback progress", {
-            deviceId,
-            commandId: command.commandId,
-            pagePhase: progress.pagePhase,
-            receiverPhase: progress.receiverPhase
-        });
-        applyPlaybackProgressFields(command, progress);
-        if (advancePlaybackLifecycleFromProgress(device, command, progress)) {
-            return;
-        }
-        publish(device, command);
-        return;
-    }
-}
-
-/** Arms the receiver watchdog from a page-reported dispatch timestamp. */
-function markReceiverRequestedFromPage(
-    device: ReceiverDevice,
-    command: PlaybackCommand,
-    dispatchStartedAt: number | undefined,
+    dispatchStartedAt: number,
     hostClockNow: number
-) {
-    if (dispatchStartedAt === undefined) {
-        logger.error("Page reported a receiver request without a timestamp", {
-            deviceId: device.id,
-            commandId: command.commandId
-        });
-        return;
-    }
+): boolean {
     // The page and the background share one browser process clock, so a page
-    // timestamp is directly comparable with pollStartedAt. A wildly future or
+    // timestamp is directly comparable with pollStartedAt; a wildly future or
     // past value is a protocol bug, not a reason to fake a window.
-    if (
-        !Number.isFinite(dispatchStartedAt) ||
-        Math.abs(hostClockNow - dispatchStartedAt) > 60_000
-    ) {
+    if (Math.abs(hostClockNow - dispatchStartedAt) > 60_000) {
         logger.error("Rejecting implausible page dispatch timestamp", {
             deviceId: device.id,
             commandId: command.commandId,
             dispatchStartedAt,
             hostClockNow
         });
-        return;
+        return false;
     }
     command.receiverPhase = "requested";
     command.receiverDispatchStartedAt = dispatchStartedAt;
     // Synchronous switch: the dispatch watchdog is replaced by the receiver
-    // one with no async gap in between, so an active command is never without
-    // a watchdog.
+    // one with no async gap, so an active command is never without a watchdog.
     armWatchdog(device, command);
+    return true;
+}
+
+/**
+ * Accepts an asynchronous page fact for the current command.
+ *
+ * Order matters and is deliberate: nothing on the command is touched until the
+ * payload is valid AND it has been proven to belong to this command (active
+ * lifecycle, matching commandId, matching media identity, page-owned leg).
+ * A stale command's report must not leave any trace on the current command -
+ * including `pageProgressObserved`, which suppresses the device fallback.
+ */
+export function acceptPagePlaybackProgress(value: unknown) {
+    if (!isValidPagePlaybackProgress(value)) {
+        logger.info("Rejected malformed page playback progress", {
+            raw: value === null ? "null" : typeof value
+        });
+        return;
+    }
+    const progress = value;
+    const deviceId = progress.mediaIdentity.deviceId;
+    const command = commands.get(deviceId);
+    if (!command || command.lifecycle !== "active") return;
+
+    if (command.commandId !== progress.commandId) {
+        logger.info("Stale page progress ignored", {
+            deviceId,
+            commandId: progress.commandId,
+            currentCommandId: command.commandId
+        });
+        return;
+    }
+    if (!sameMediaIdentity(command.mediaIdentity, progress.mediaIdentity)) {
+        logger.info("Page progress for a different media identity ignored", {
+            deviceId,
+            commandId: command.commandId
+        });
+        return;
+    }
+    // A page fact is only meaningful for the page leg. It may legitimately
+    // arrive BEFORE the executeScript result (separate channels, no shared
+    // ordering), so an unresolved owner with the page route still in flight is
+    // accepted; anything else must not be able to rewrite the state of an
+    // execution owner that never asked for it - the device route has a
+    // different receiver dispatch clock entirely.
+    const ownsPageLeg =
+        command.owner === "page-sender" ||
+        (command.owner === undefined &&
+            command.routeAttempts.page === "trying" &&
+            command.routeAttempts.device === "not-tried");
+    if (!ownsPageLeg) {
+        logger.info("Page progress for a non-page-owned command ignored", {
+            deviceId,
+            commandId: progress.commandId,
+            owner: command.owner ?? "unresolved"
+        });
+        return;
+    }
+
+    const device = deviceLookup?.(deviceId);
+    if (!device) return;
+
+    logger.info("Page playback progress", {
+        deviceId,
+        commandId: command.commandId,
+        pagePhase: progress.pagePhase,
+        receiverPhase: progress.receiverPhase
+    });
+
+    // Every validation has passed: only now may the command be touched.
+    if (provesPageExecution(progress)) {
+        command.pageProgressObserved = true;
+    }
+    if (progress.pagePhase !== undefined)
+        command.pagePhase = progress.pagePhase;
+    if (progress.error !== undefined) command.error = progress.error;
+    if (progress.pagePausedSnapshot !== undefined) {
+        command.pagePausedSnapshot = progress.pagePausedSnapshot;
+    }
+
+    if (progress.receiverPhase === "requested") {
+        // phase + clock + watchdog move together, or not at all.
+        requestReceiverFromPage(
+            device,
+            command,
+            progress.receiverDispatchStartedAt as number,
+            Date.now()
+        );
+    } else if (progress.receiverPhase === "failed") {
+        // The fixed execution owner reported an explicit receiver failure. That
+        // is a terminal outcome of the receiver leg, NOT a command-level
+        // dispatch failure: no fallback (the page already owns this command)
+        // and no waiting out the confirmation deadline.
+        command.receiverPhase = "failed";
+        terminate(device, command, "completed");
+        return;
+    }
+    publish(device, command);
 }
 
 /**
@@ -723,10 +767,11 @@ function applyPageRouteResult(
             ? "already-target"
             : "transition-requested";
     if (result.receiverRequested) {
-        markReceiverRequestedFromPage(
+        // The validator guarantees a finite timestamp on this arm.
+        requestReceiverFromPage(
             device,
             command,
-            result.receiverDispatchStartedAt,
+            result.receiverDispatchStartedAt as number,
             Date.now()
         );
     }

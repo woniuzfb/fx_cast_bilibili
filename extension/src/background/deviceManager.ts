@@ -59,9 +59,8 @@ interface EventMap {
      */
     /** Asynchronous play/pause facts reported by the page sender. */
     bilibiliPlaybackProgress: {
-        deviceId?: string;
         commandId: number;
-        mediaIdentity?: RokuMediaIdentity;
+        mediaIdentity: RokuMediaIdentity;
         pagePhase?: "transition-requested" | "target-observed" | "timeout";
         receiverPhase?: "requested" | "failed";
         receiverDispatchStartedAt?: number;

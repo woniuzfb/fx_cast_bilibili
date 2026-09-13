@@ -461,9 +461,14 @@ type BridgeMessageDefinitions = {
      * has already returned.
      */
     "main:bilibiliPlaybackProgress": {
-        deviceId?: string;
         commandId: number;
-        mediaIdentity?: RokuMediaIdentity;
+        /**
+         * Required: a message crossing a process boundary cannot be trusted to
+         * carry it just because today's producer does, and without it the
+         * command match would rest on commandId alone. The device is taken from
+         * identity.deviceId rather than duplicated here.
+         */
+        mediaIdentity: RokuMediaIdentity;
         pagePhase?: "transition-requested" | "target-observed" | "timeout";
         receiverPhase?: "requested" | "failed";
         receiverDispatchStartedAt?: number;
