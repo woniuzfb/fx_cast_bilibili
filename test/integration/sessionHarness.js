@@ -481,67 +481,53 @@ async function main() {
         // its marker appears the channel works and the silence of the other
         // background markers becomes meaningful. Absent, no negative conclusion
         // about production flow may be drawn at all.
-        // Background markers must go through the extension's own logger: a
-        // direct console.info from the background never reached the captured
-        // output even for a call site proven to have run. Routing a runtime
-        // message to the background's own handler is the channel that works.
-        const bgMarker = (label, fields) =>
-            `\ntry { browser.runtime.sendMessage({ subject: 'popup:debugLog', data: {` +
-            ` level: 'info', message: '[harness] ${label}', data: { ${fields} } } }); } catch (e) {}`;
+        // Background markers CANNOT use browser.runtime.sendMessage: Firefox
+        // does not deliver a message back to the context that sent it, which is
+        // why the control marker on a call site proven to run never appeared.
+        // storage.local is an independent channel: the background writes, the
+        // options page reads it back, and nothing depends on the console, on a
+        // logger switch, or on the popup being alive.
+        //
+        // Every marker carries this run's id and only matching ids are read, so
+        // a stale value from an earlier run cannot pass as evidence; the keys are
+        // written one each rather than as a shared array, so concurrent markers
+        // cannot overwrite one another.
+        // The background picks the run id up from a value the harness sets in
+        // the shared profile storage before the run; the keys are cleared then
+        // too, so a marker from an earlier run cannot be read as this one's.
+        const storageMarker = (key, fields) =>
+            "\ntry { browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ " +
+            `${key}: { runId: r && r.__fxHarnessDiagnosticRunId, ${fields}, at: Date.now() } })).catch(() => {}); } catch (e) {}`;
         patch(
             "background/background.js",
             "setRokuSessionMedia(deviceId, ownerId, media) {",
-            () => bgMarker("control setRokuSessionMedia", "deviceId: String(deviceId)")
-        );
-        patch(
-            "background/background.js",
-            "beginRokuMediaLoad(deviceId) {",
             () =>
-                bgMarker(
-                    "beginRokuMediaLoad",
-                    "deviceId, hasBridgePort: Boolean(this.bridgePort)"
-                )
-        );
-        patch("background/background.js", "nextRokuLoadGeneration(deviceId);", () =>
-            bgMarker("beginRokuMediaLoad generation", "deviceId, loadGeneration")
-        );
-        patch(
-            "background/background.js",
-            "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
-            () =>
-                bgMarker(
-                    "setRokuLoadGenerationOnBridge enter",
-                    "deviceId, loadGeneration, hasBridgePort: Boolean(this.bridgePort)"
+                storageMarker(
+                    "__fxHarnessBgControl",
+                    "deviceId: String(deviceId), isClear: media === null"
                 )
         );
         patch(
             "background/background.js",
             "syncRokuSessionMediaToBridge(deviceId, ownerId, media) {",
             () =>
-                bgMarker(
-                    "syncRokuSessionMediaToBridge enter",
-                    "deviceId, ownerId, isClear: media === null, hasBridgePort: Boolean(this.bridgePort), mediaPresent: media !== null, hasIdentity: (typeof currentRokuMediaIdentity === 'function') ? Boolean(currentRokuMediaIdentity(deviceId)) : 'unknown'"
+                storageMarker(
+                    "__fxHarnessSyncMediaEnter",
+                    "deviceId, ownerId, isClear: media === null, hasBridgePort: Boolean(this.bridgePort), mediaPresent: media !== null"
                 )
         );
-        // The popup's console is NOT mirrored, but its runtime-message channel
-        // is (popupLog -> popup:debugLog -> background logger). So the click's
-        // state snapshot goes through that channel, in the shape popupLog uses.
-        // The closure names are referenced inside a try/catch: if the bundle
-        // renamed them the marker is simply lost rather than breaking the click.
-        patch("ui/popup/index.js", "onReceiverCast(device) {", () => {
-            const payload = [
-                "hasSelectorContext",
-                "selectionRequiresRefresh",
-                "mediaType",
-                "availableMediaTypes",
-                "isAppMediaTypeAvailable"
-            ].join(", ");
-            return (
-                "\ntry { browser.runtime.sendMessage({ subject: 'popup:debugLog'," +
-                " data: { level: 'info', message: '[harness] onReceiverCast-state'," +
-                ` data: { ${payload}, deviceId: device && device.id } } }); } catch (e) {}`
-            );
-        });
+        // After the identity is read, report whether one was found. Anchored on
+        // the assignment statement, which is bundle text that survives minifying
+        // (the call itself appears twice, the assignment once).
+        patch(
+            "background/background.js",
+            "const identity = currentRokuMediaIdentity(deviceId);",
+            () =>
+                storageMarker(
+                    "__fxHarnessSyncMediaIdentity",
+                    "deviceId, hasIdentity: Boolean(identity), loadGeneration: identity ? identity.loadGeneration : null"
+                )
+        );
         for (const relPath of [
             "background/background.js",
             "ui/popup/index.js"
@@ -1012,6 +998,39 @@ async function main() {
         // Baseline is taken BEFORE the call. Taken after, a fast binding would
         // already be inside `marksBefore` and the wait below would hang on a
         // mark that never arrives - a false timeout on the fast path.
+        // --- diagnostic run id + clean slate, via the options page ----------
+        const diagnosticRunId = `${Date.now()}-${process.pid}`;
+        const diagnosticKeys = [
+            "__fxHarnessBgControl",
+            "__fxHarnessSyncMediaEnter",
+            "__fxHarnessSyncMediaIdentity"
+        ];
+        await driver.switchTo().window(consoleTab);
+        const prepared = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             (async () => {
+                try {
+                    await browser.storage.local.remove(${JSON.stringify(
+                        diagnosticKeys
+                    )});
+                    await browser.storage.local.set({
+                        __fxHarnessDiagnosticRunId: ${JSON.stringify(
+                            diagnosticRunId
+                        )}
+                    });
+                    done(true);
+                } catch (err) {
+                    done(String(err));
+                }
+             })();`
+        );
+        check(
+            "the diagnostic run id is set and old markers cleared",
+            prepared === true,
+            String(prepared)
+        );
+        await driver.switchTo().window(senderTab);
+
         const marksBeforeSession = markCount();
         const requestAtSession = Date.now();
         await driver.executeScript(
@@ -1713,6 +1732,33 @@ async function main() {
                 loadError: latePageState && latePageState.loadError
             })
         );
+        await driver.switchTo().window(consoleTab);
+        const diagnosticMarkers = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             browser.storage.local
+                .get(${JSON.stringify([
+                    "__fxHarnessDiagnosticRunId",
+                    "__fxHarnessBgControl",
+                    "__fxHarnessSyncMediaEnter",
+                    "__fxHarnessSyncMediaIdentity"
+                ])})
+                .then(v => done(v), err => done({ error: String(err) }));
+             `
+        );
+        console.log(
+            "background diagnostics:",
+            JSON.stringify(diagnosticMarkers)
+        );
+        const markerOk = key =>
+            diagnosticMarkers &&
+            diagnosticMarkers[key] &&
+            diagnosticMarkers[key].runId === diagnosticRunId;
+        check(
+            "the background control marker is alive for this run",
+            Boolean(markerOk("__fxHarnessBgControl")),
+            JSON.stringify(diagnosticMarkers && diagnosticMarkers.__fxHarnessBgControl)
+        );
+        await driver.switchTo().window(senderTab);
         console.log(
             "stage 2 round 1 observed:",
             JSON.stringify({
