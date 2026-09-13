@@ -223,12 +223,17 @@ export function run(messaging: Messenger) {
                                         }
                                     });
                                 },
-                                onPlaybackObservation(status, provenance) {
+                                onPlaybackObservation(
+                                    loadGeneration,
+                                    status,
+                                    provenance
+                                ) {
                                     messaging.sendMessage({
                                         subject: "main:rokuPlaybackObservation",
                                         data: {
                                             deviceId: device.id,
                                             status,
+                                            loadGeneration,
                                             provenance
                                         }
                                     });
@@ -278,6 +283,12 @@ export function run(messaging: Messenger) {
                 });
 
                 rokuDeviceBrowser.start();
+                break;
+            }
+
+            case "bridge:rokuSetLoadGeneration": {
+                const { deviceId, loadGeneration } = message.data;
+                rokuRemotes.get(deviceId)?.setLoadGeneration(loadGeneration);
                 break;
             }
 

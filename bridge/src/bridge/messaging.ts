@@ -85,6 +85,11 @@ type MessageDefinitions = {
     "main:rokuPlaybackObservation": {
         deviceId: string;
         status: MediaStatus;
+        /**
+         * The LOAD generation this sample was taken under, snapshotted when the
+         * poll STARTED (undefined when the bridge has not been told one yet).
+         */
+        loadGeneration?: number;
         provenance: RokuMediaStatusProvenance;
     };
 
@@ -126,6 +131,23 @@ type MessageDefinitions = {
      */
     "main:rokuSessionPlaybackTransport": {
         deviceId: string;
+    };
+
+    /**
+     * Tells the discovery bridge which LOAD generation the extension considers
+     * current for this device.
+     *
+     * The load generation is created by the extension (beginRokuMediaLoad), and
+     * only the discovery process runs the polling loop, so the extension must
+     * push it across; the bridge can neither derive it from mediaSessionId
+     * (which is a constant 1 for Roku) nor from contentId (the same URL can be
+     * loaded twice). Each poll sample snapshots the generation it STARTED
+     * under, so a sample that spans a LOAD boundary is not attributed to the
+     * new load.
+     */
+    "bridge:rokuSetLoadGeneration": {
+        deviceId: string;
+        loadGeneration: number;
     };
 
     /**

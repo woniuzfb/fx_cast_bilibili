@@ -150,6 +150,7 @@ interface RokuRemoteOptions {
      * the device" are different verdicts.
      */
     onPlaybackObservation?: (
+        loadGeneration: number | undefined,
         status: MediaStatus,
         provenance: RokuMediaStatusProvenance
     ) => void;
@@ -199,6 +200,13 @@ export default class RokuRemote {
      * stop a stale sequence from consuming ECP samples.
      */
     private playbackPollToken = 0;
+    /**
+     * The extension's current LOAD generation for this device, pushed over
+     * bridge:rokuSetLoadGeneration. The bridge cannot derive it (Roku's
+     * mediaSessionId is a constant 1, and a contentId can be loaded twice), so
+     * a sample without one is reported without it rather than guessed at.
+     */
+    private loadGeneration?: number;
     private destroyed = false;
 
     /**
@@ -305,6 +313,12 @@ export default class RokuRemote {
     /** Nudges an immediate refresh (used before casting starts). */
     ensureConnected() {
         void this.poll();
+    }
+
+    /** Records the extension's current LOAD generation for this device. */
+    setLoadGeneration(loadGeneration: number) {
+        if (!Number.isSafeInteger(loadGeneration)) return;
+        this.loadGeneration = loadGeneration;
     }
 
     /**
@@ -636,6 +650,10 @@ export default class RokuRemote {
         if (this.destroyed) return;
 
         const pollStartedAt = Date.now();
+        // Snapshotted BEFORE the ECP reads: a sample that starts under one LOAD
+        // and completes after the next one begins must stay attributed to the
+        // load it observed, not to whatever is current when it finishes.
+        const loadGeneration = this.loadGeneration;
         const state = await queryMediaPlayer(this.host);
 
         // The foreground channel decides whether an application is
@@ -693,6 +711,7 @@ export default class RokuRemote {
         // observation rather than silence (emitMediaStatus suppresses idle
         // as "nothing to report").
         this.options.onPlaybackObservation?.(
+            loadGeneration,
             {
                 mediaSessionId: 1,
                 playbackRate: 1,

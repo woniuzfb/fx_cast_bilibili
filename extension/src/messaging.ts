@@ -221,6 +221,13 @@ type BridgeMessageDefinitions = {
         deviceId: string;
     };
 
+    /** Tell the discovery bridge the extension's current LOAD generation for a
+     *  device, so its poll samples can be attributed to that load. */
+    "bridge:rokuSetLoadGeneration": {
+        deviceId: string;
+        loadGeneration: number;
+    };
+
     /** Ask the discovery bridge to sample a Roku densely for a short window
      *  after a play/pause transport was submitted on either route. */
     "bridge:rokuRequestConfirmationPoll": {
@@ -487,6 +494,8 @@ type BridgeMessageDefinitions = {
     "main:rokuPlaybackObservation": {
         deviceId: string;
         status: MediaStatus;
+        /** LOAD generation snapshotted when the poll started. */
+        loadGeneration?: number;
         provenance: RokuMediaStatusProvenance;
     };
 

@@ -406,10 +406,27 @@ export function acceptReceiverObservation(
     deviceId: string,
     status: MediaStatus,
     provenance: RokuMediaStatusProvenance,
-    receivedAt = Date.now()
+    receivedAt = Date.now(),
+    loadGeneration?: number
 ) {
     const command = commands.get(deviceId);
     if (!command) return;
+    // The sample must belong to the load this command was issued under. A
+    // sample the bridge could not attribute (no generation pushed yet) is not
+    // evidence either way, and a sample from an older load must never confirm a
+    // newer command. Checked here, before acceptObservation writes anything.
+    if (
+        loadGeneration !== undefined &&
+        command.mediaIdentity.loadGeneration !== loadGeneration
+    ) {
+        logger.info("Observation from a different LOAD generation ignored", {
+            deviceId,
+            commandId: command.commandId,
+            commandLoadGeneration: command.mediaIdentity.loadGeneration,
+            observationLoadGeneration: loadGeneration
+        });
+        return;
+    }
     const device = deviceLookup?.(deviceId);
     if (!device) return;
     acceptObservation(device, command, status, provenance, receivedAt);

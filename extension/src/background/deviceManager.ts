@@ -62,6 +62,8 @@ interface EventMap {
     rokuPlaybackObservation: {
         deviceId: string;
         status: MediaStatus;
+        /** LOAD generation snapshotted when the poll started. */
+        loadGeneration?: number;
         provenance: RokuMediaStatusProvenance;
     };
 
@@ -191,7 +193,13 @@ export default new (class extends TypedEventTarget<EventMap> {
         // New media identity for this device. The generation is monotonic for
         // this background's lifetime and is NOT reset on device down, so a
         // reconnect cannot reuse a number while stale commands are in flight.
-        nextRokuLoadGeneration(deviceId);
+        const loadGeneration = nextRokuLoadGeneration(deviceId);
+        // The discovery process runs the polling loop and has no way to derive
+        // the generation (Roku's mediaSessionId is a constant), so it is pushed
+        // there explicitly. Its poll samples then carry the generation they
+        // STARTED under, and the coordinator can tell a stale load's sample
+        // from the current one.
+        this.setRokuLoadGenerationOnBridge(deviceId, loadGeneration);
         // The previous LOAD's command is now about a different cast; it must
         // not keep an overlay on the popup's affordance. Terminated before the
         // device entry is consulted, so the pending intent is dropped even if
@@ -490,6 +498,22 @@ export default new (class extends TypedEventTarget<EventMap> {
         }
     }
 
+    /** Pushes the current LOAD generation to the discovery bridge. */
+    private setRokuLoadGenerationOnBridge(
+        deviceId: string,
+        loadGeneration: number
+    ) {
+        if (!this.bridgePort) return;
+        try {
+            this.bridgePort.postMessage({
+                subject: "bridge:rokuSetLoadGeneration",
+                data: { deviceId, loadGeneration }
+            });
+        } catch (err) {
+            logger.error("Failed to publish the LOAD generation", err);
+        }
+    }
+
     /**
      * Asks the device-discovery bridge to sample this Roku densely for a short
      * window, because a play/pause transport was just submitted to it. The
@@ -690,11 +714,12 @@ export default new (class extends TypedEventTarget<EventMap> {
             case "main:rokuPlaybackObservation": {
                 // Observation-only feed: does not touch device.mediaStatus,
                 // so the media clear semantics stay exactly as they were.
-                const { deviceId, status, provenance } = message.data;
+                const { deviceId, status, loadGeneration, provenance } =
+                    message.data;
                 if (!this.receiverDevices.has(deviceId)) break;
                 this.dispatchEvent(
                     new CustomEvent("rokuPlaybackObservation", {
-                        detail: { deviceId, status, provenance }
+                        detail: { deviceId, status, loadGeneration, provenance }
                     })
                 );
                 break;

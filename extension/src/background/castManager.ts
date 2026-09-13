@@ -731,11 +731,18 @@ function onRokuPlaybackObservation(
     ev: CustomEvent<{
         deviceId: string;
         status: MediaStatus;
+        loadGeneration?: number;
         provenance: RokuMediaStatusProvenance;
     }>
 ) {
-    const { deviceId, status, provenance } = ev.detail;
-    acceptReceiverObservation(deviceId, status, provenance, Date.now());
+    const { deviceId, status, loadGeneration, provenance } = ev.detail;
+    acceptReceiverObservation(
+        deviceId,
+        status,
+        provenance,
+        Date.now(),
+        loadGeneration
+    );
 }
 deviceManager.addEventListener(
     "rokuPlaybackObservation",
