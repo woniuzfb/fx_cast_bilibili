@@ -739,9 +739,8 @@ export default class RokuRemote {
     private emitReceiverStatus() {
         if (this.destroyed) return;
 
-        const isPlaying =
-            this.effectiveState().state &&
-            this.effectiveState().state !== "idle";
+        const composed = this.effectiveState();
+        const isPlaying = composed.state && composed.state !== "idle";
         // A channel is "running" whenever it is foreground — even before
         // playback starts. Without this the popup can never pair the cast
         // session's transportId with a receiver application, leaving the
@@ -990,25 +989,29 @@ export default class RokuRemote {
     }
 
     /**
-     * Folds in a completed poll and expires the overlays it supersedes.
+     * Folds in a completed poll. EVERY overlay expires here, because the old
+     * code did exactly that: `this.lastState = state` replaced the whole cache,
+     * so a local echo - including the startup synthesis - survived only until
+     * the next successful poll, idle or not.
      *
-     * A poll used to overwrite `lastState` wholesale, so the equivalent here is
-     * to drop the command and seek echoes: they describe a state the device has
-     * now been asked about directly. The startup overlay is the deliberate
-     * exception - it is cleared only once the device reports something other
-     * than idle, which is exactly the old `isHlsDvr && state === "idle"`
-     * condition.
+     * Deliberately not conditional on the observation matching an overlay's
+     * target: that would be a stricter rule than the old code had, and it would
+     * keep an echo alive indefinitely whenever the device never reached the
+     * requested state.
      *
-     * The echoes are dropped unconditionally rather than only when the
-     * observation matches their target: that would be a different (and
-     * stricter) rule than the old code had, and it would keep an echo alive
-     * indefinitely whenever the device never reached the requested state.
+     * Keeping the startup overlay across an idle poll would not be a refactor
+     * but a behaviour change (it changes when the idle clear is emitted, and
+     * because pollSample compares the previous EFFECTIVE state against the raw
+     * sample it would also report a state change on every idle poll, re-emitting
+     * the receiver status). If that protection is wanted - bypassing an ECP
+     * idle report during an HLS DVR startup - it belongs in its own commit with
+     * its own invalidation rules, not here.
      */
     private acceptObservedState(state: RokuPlaybackState) {
         this.observedState = state;
+        this.startupOverlay = undefined;
         this.commandOverlay = undefined;
         this.seekOverlay = undefined;
-        if (state.state !== "idle") this.startupOverlay = undefined;
     }
 
     private emitMediaStatus(provenance: RokuMediaStatusProvenance) {
