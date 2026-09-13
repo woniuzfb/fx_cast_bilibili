@@ -140,6 +140,63 @@ reports `queued Roku App session was created without establishing a load generat
 to publish), that generation on a discovery connection, and the session media
 carrying that same generation.
 
+### The pending gate on a failed session start
+
+```sh
+node test/integration/sessionHarness.js --create-failure-gap    # pre-fix control
+node test/integration/sessionHarness.js --create-failure-fixed  # post-fix check
+node test/integration/sessionHarness.js --interleave-gap        # pre-fix control
+node test/integration/sessionHarness.js --interleave-fixed      # post-fix check
+```
+
+`createCastSession()` is injected to fail (or to be held and then fail) for a
+run-bound call index, at a point where the caller has ALREADY announced its load
+generation. What is under test is not the generation - it is monotonic by design and
+the previous load's media was retired at discovery when the new generation was
+relayed, so nothing here rolls back, and the wire is asserted to carry no lower
+generation. What is under test is the LOCAL pending-media gate the announcement
+opened: while it is set, `deviceManager` drops that device's ECP media status
+(`Roku media trace [...] remote-status-blocked`), and only a release - or a real
+session media - clears it. A gate left set means the device's media status is
+filtered until some later successful load, a device-down or a bridge reconnect.
+
+- `--create-failure-*`: the queued-selection start (the auto-cast provocation above)
+  announces and then fails. Pre-fix nothing releases the gate; post-fix the failing
+  start releases its own.
+- `--interleave-*`: the `requestSession` start announces and is held, then a second
+  start (the popup's own `action:castCurrentTab`, sent from the popup page with the
+  popup's window focused - what a real click there does) announces a newer
+  generation, and only then does the OLDER start fail. Its release must be refused,
+  because the gate now belongs to the newer start.
+
+Both modes then drive the fake Roku to a KNOWN sample (PLAYING at 30s,
+`harness-stale-sample`) and assert, as deltas against a baseline taken after the
+failure and before the drive:
+
+- the driven sample reached the extension on the wire (`PLAYING`, `currentTime` 30,
+  after the drive) - i.e. the drive is real;
+- the branch `deviceManager` took FOR THAT SAMPLE: `remote-status-input` when the
+  gate is open, `remote-status-blocked` when it is closed (both traces carry the
+  driven input state, so a pre-existing line cannot satisfy them);
+Measured and NOT usable as evidence: the popup's receiver row shows the driven
+title even while the gate blocks that device's media status (the row's
+now-playing line does not come from `main:receiverDeviceMediaStatusUpdated`, so
+it is not gated). The popup text is therefore printed as a diagnostic only; an
+earlier version of this mode asserted on it and was wrong in both directions.
+
+What these modes do NOT cover, and must not be read as closed:
+
+- the trusted-sender bypass: no dynamic case constructs
+  `main:requestSession` with a `receiverDevice` yet, so its catch is only
+  source-reviewed;
+- how a failed `requestSession` is settled towards the page (error callback, error
+  type, exactly-once): the harness only reads the page result, it does not assert
+  the page's settlement;
+- failures AFTER `createCastSession` has partly run (bridge connected,
+  `instance.session` set, the `bridge:createCastSession` post throwing): the
+  injection point is the top of `createCastSession`, so nothing past that is
+  covered.
+
 ## Status
 
 Validated end to end (real processes, real sockets):

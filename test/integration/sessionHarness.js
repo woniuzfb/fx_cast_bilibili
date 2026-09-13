@@ -122,6 +122,9 @@ function parseArgs(argv) {
         generationAdvance: false,
         autoCastGap: false,
         autoCastFixed: false,
+        createFailure: false,
+        interleave: false,
+        expectReleased: false,
         instrument: false
     };
     for (let i = 0; i < argv.length; i++) {
@@ -134,7 +137,19 @@ function parseArgs(argv) {
             args.generationAdvance = true;
         else if (argv[i] === "--auto-cast-gap") args.autoCastGap = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
-        else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
+        else if (argv[i] === "--create-failure-gap") {
+            args.createFailure = true;
+            args.expectReleased = false;
+        } else if (argv[i] === "--create-failure-fixed") {
+            args.createFailure = true;
+            args.expectReleased = true;
+        } else if (argv[i] === "--interleave-gap") {
+            args.interleave = true;
+            args.expectReleased = false;
+        } else if (argv[i] === "--interleave-fixed") {
+            args.interleave = true;
+            args.expectReleased = true;
+        } else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
         else if (argv[i] === "--instrument-content-initial")
             args.instrument = true;
         else throw new Error(`sessionHarness: unknown argument ${argv[i]}`);
@@ -389,6 +404,38 @@ async function main() {
      */
     const gapMode = args.autoCastGap || args.autoCastFixed;
     const expectGap = args.autoCastGap;
+    /**
+     * The session-creation-failure modes.
+     *
+     * `--create-failure-*`: the queued-selection session start announces its
+     * load generation and then `createCastSession()` fails. What is under test
+     * is NOT the generation (it stays monotonic and is never rolled back) but
+     * the local pending-media gate the announcement opened: the ECP evidence
+     * blocking in `deviceManager` must be released by the lifecycle that opened
+     * it, or that device's media status is filtered forever.
+     *
+     * `--interleave-*`: two starts for the same device overlap - the queued one
+     * announces G and is held, a later requestSession announces G+1 and is also
+     * held, and then the OLDER one fails. Its failure must not release the gate
+     * the NEWER start still needs.
+     *
+     * Both use the gap modes' provocation to route the first click into
+     * `loadSender()`, so the injection point (`createCastSession`) sits after
+     * the announcement exactly as it does in production.
+     */
+    const failureMode = args.createFailure || args.interleave;
+    /**
+     * Modes that need the popup mounted LATE, i.e. after `requestSession` has
+     * opened its selector. Late mounting alone is enough to make the first click
+     * the `requestSession` path (the popup's port matches that selector
+     * immediately, so its auto-cast timer is cleared); suppressing the first
+     * `popup:init` on top of it is what turns the same click into a REPLACEMENT
+     * selector. `--interleave-*` wants the former, `--auto-cast-*` and
+     * `--create-failure-*` the latter.
+     */
+    const provocation = gapMode || failureMode;
+    const suppressPopupInit = gapMode || args.createFailure;
+    const expectReleased = args.expectReleased;
     const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-s1-"));
     console.log("harness dir:", harnessDir);
     install({ name: defaultName });
@@ -731,7 +778,7 @@ async function main() {
                     "deviceId, hasIdentity: Boolean(identity), loadGeneration: identity ? identity.loadGeneration : null"
                 )
         );
-        if (gapMode) {
+        if (provocation) {
             // Run-bound proof that a receiver selector OPENED, which is the
             // order this mode has to establish: the popup must mount while the
             // `requestSession` selector is already waiting. Without that, the
@@ -751,7 +798,7 @@ async function main() {
             // whose init data does not reach the popup. Everything else - the
             // popup's timers, its state machine, the init data itself - stays
             // production code.
-            {
+            if (suppressPopupInit) {
                 const initFile = path.join(
                     extensionDir,
                     "background/background.js"
@@ -832,6 +879,57 @@ async function main() {
                     "gap mode: the first popup:init post is suppressible for this run"
                 );
             }
+        }
+        if (failureMode) {
+            // Fault injection, run-bound and one-shot per call index: the gate
+            // sits at the TOP of createCastSession, i.e. after every caller has
+            // already announced its load generation - the exact production
+            // ordering whose failure handling is under test here. The injected
+            // errors are re-thrown untouched; only the gate's own storage reads
+            // are allowed to be swallowed.
+            patch(
+                "background/background.js",
+                "async function createCastSession(opts) {",
+                () =>
+                    "\n" +
+                    "    {\n" +
+                    "        const __fxCall = (globalThis.__fxHarnessCreateSessionCalls = (globalThis.__fxHarnessCreateSessionCalls || 0) + 1);\n" +
+                    "        try {\n" +
+                    "            const __fxRead = await browser.storage.local.get(['__fxHarnessCreateSessionControl', '__fxHarnessDiagnosticRunId']);\n" +
+                    "            const __fxCtl = __fxRead && __fxRead.__fxHarnessCreateSessionControl;\n" +
+                    "            const __fxRunId = __fxRead && __fxRead.__fxHarnessDiagnosticRunId;\n" +
+                    "            const __fxAction = __fxCtl && __fxCtl.runId === __fxRunId && __fxCtl.calls ? __fxCtl.calls[__fxCall] : undefined;\n" +
+                    "            if (__fxAction) {\n" +
+                    "                void browser.storage.local.set({ ['__fxHarnessCreateSessionEntered_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, action: __fxAction, at: Date.now() } }).catch(() => {});\n" +
+                    "                if (__fxAction === 'failNow') {\n" +
+                    "                    void browser.storage.local.set({ ['__fxHarnessCreateSessionFailed_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, at: Date.now() } }).catch(() => {});\n" +
+                    "                    throw new Error('harness: injected createCastSession failure (call ' + __fxCall + ')');\n" +
+                    "                }\n" +
+                    "                if (__fxAction === 'hold') {\n" +
+                    "                    void browser.storage.local.set({ ['__fxHarnessCreateSessionHeld_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, at: Date.now() } }).catch(() => {});\n" +
+                    "                    for (;;) {\n" +
+                    "                        await new Promise(r => setTimeout(r, 150));\n" +
+                    "                        const __fxRel = await browser.storage.local.get(['__fxHarnessReleaseCreateSession', '__fxHarnessDiagnosticRunId']);\n" +
+                    "                        const __fxRec = __fxRel && __fxRel.__fxHarnessReleaseCreateSession;\n" +
+                    "                        if (__fxRec && __fxRec.runId === (__fxRel && __fxRel.__fxHarnessDiagnosticRunId) && __fxRec.callIndex === __fxCall) {\n" +
+                    "                            void browser.storage.local.set({ ['__fxHarnessCreateSessionReleased_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, action: __fxRec.action, at: Date.now() } }).catch(() => {});\n" +
+                    "                            if (__fxRec.action === 'fail') {\n" +
+                    "                                void browser.storage.local.set({ ['__fxHarnessCreateSessionFailed_' + __fxCall]: { runId: __fxRunId, callIndex: __fxCall, at: Date.now() } }).catch(() => {});\n" +
+                    "                                throw new Error('harness: released createCastSession failure (call ' + __fxCall + ')');\n" +
+                    "                            }\n" +
+                    "                            break;\n" +
+                    "                        }\n" +
+                    "                    }\n" +
+                    "                }\n" +
+                    "            }\n" +
+                    "        } catch (__fxErr) {\n" +
+                    "            if (String((__fxErr && __fxErr.message) || '').startsWith('harness: ')) throw __fxErr;\n" +
+                    "        }\n" +
+                    "    }"
+            );
+            console.log(
+                "failure mode: createCastSession is gate-able for this run (run-bound control)"
+            );
         }
         for (const relPath of [
             "background/background.js",
@@ -1169,7 +1267,7 @@ async function main() {
                         active: false
                     });
                     ${
-                        gapMode
+                        provocation
                             ? ""
                             : `setTimeout(() => {
                         browser.tabs.update(tab.id, {
@@ -1338,7 +1436,22 @@ async function main() {
             // earlier run's leftovers.
             "__fxHarnessSelectorOpened",
             "__fxHarnessPopupInitSuppressed",
-            "__fxHarnessSuppressPopupInit"
+            "__fxHarnessSuppressPopupInit",
+            // Session-failure keys, likewise cleared so an earlier run's
+            // injection state or its markers cannot be read as this run's. One
+            // key PER CALL INDEX: a shared held/failed key lets a later call
+            // overwrite an earlier one, which would make "was call 1 still
+            // held?" unanswerable.
+            "__fxHarnessCreateSessionControl",
+            "__fxHarnessReleaseCreateSession",
+            "__fxHarnessCreateSessionEntered_1",
+            "__fxHarnessCreateSessionEntered_2",
+            "__fxHarnessCreateSessionHeld_1",
+            "__fxHarnessCreateSessionHeld_2",
+            "__fxHarnessCreateSessionReleased_1",
+            "__fxHarnessCreateSessionReleased_2",
+            "__fxHarnessCreateSessionFailed_1",
+            "__fxHarnessCreateSessionFailed_2"
         ];
         await driver.switchTo().window(consoleTab);
         const prepared = await driver.executeAsyncScript(
@@ -1418,7 +1531,19 @@ async function main() {
         let selectorOpenedBeforeRequest;
         let senderTabId;
         let requestSelectorTabId;
-        if (gapMode) {
+        let senderTabInfo;
+        /** Lower bound for "this failure phase": set when the injection is armed. */
+        let injectionArmedAt;
+        /**
+         * Lower bounds that must precede the failure ACTION (the click that
+         * triggers the first createCastSession, or the release request that
+         * fails a held one): a failed session start writes
+         * `load-generation-cancelled` and a refused release writes a refusal,
+         * and the background can write BOTH before this process gets around to
+         * reading the console. Captured once, at arming time.
+         */
+        let failureActionBaseline;
+        if (provocation) {
             // Independent identity for the sender tab. `tabs.query({url})` with a
             // match pattern returned nothing here even with the `tabs`
             // permission, so the list is filtered by URL instead, and the raw
@@ -1447,17 +1572,97 @@ async function main() {
                     )}, at: Date.now() } })
                     .then(() => done(true), err => done(String(err)));`
             );
-            check(
-                "gap mode: the one-shot popup:init suppression is armed for this run",
-                armed === true,
-                String(armed)
-            );
+            if (suppressPopupInit) {
+                check(
+                    "gap mode: the one-shot popup:init suppression is armed for this run",
+                    armed === true,
+                    String(armed)
+                );
+            }
             selectorOpenedBeforeRequest = await driver.executeAsyncScript(
                 `const done = arguments[arguments.length - 1];
                  browser.storage.local
                     .get("__fxHarnessSelectorOpened")
                     .then(v => done(v.__fxHarnessSelectorOpened || null), err => done(String(err)));`
             );
+        }
+        if (failureMode) {
+            // The injection is armed here, before the click, so the FIRST
+            // createCastSession of this run is the one that fails (or is held).
+            const calls = args.interleave
+                ? { 1: "hold", 2: "hold" }
+                : { 1: "failNow" };
+            const armedInjection = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .set({ __fxHarnessCreateSessionControl: { runId: ${JSON.stringify(
+                        diagnosticRunId
+                    )}, calls: ${JSON.stringify(calls)}, at: Date.now() } })
+                    .then(() => done(true), err => done(String(err)));`
+            );
+            check(
+                "session-failure mode: the createCastSession injection is armed for this run",
+                armedInjection === true,
+                JSON.stringify({ armed: armedInjection, calls })
+            );
+            // The failure phase's lower bound for the wire assertions, taken
+            // after the arm has landed: nothing this phase produces can predate
+            // it, so an earlier generation (or a replay) cannot be counted as
+            // this phase's.
+            injectionArmedAt = Date.now();
+            {
+                const consoleText =
+                    phaseBConsole && fs.existsSync(phaseBConsole)
+                        ? fs.readFileSync(phaseBConsole, "utf8")
+                        : "";
+                const countTrace = event =>
+                    (
+                        consoleText.match(
+                            new RegExp(
+                                `Roku media trace \\[${FAKE_DEVICE_ID}\\] ${event}`,
+                                "g"
+                            )
+                        ) || []
+                    ).length;
+                // `traceLines`/`readConsoleText` are defined later, next to the
+                // failure assertions, so this early capture reads the file
+                // directly - the ORDER is the point, not the helper.
+                failureActionBaseline = {
+                    cancelled: countTrace("load-generation-cancelled"),
+                    refused: (
+                        consoleText.match(
+                            /Roku media load release ignored/g
+                        ) || []
+                    ).length
+                };
+                console.log(
+                    "session-failure mode: failure-action baseline:",
+                    JSON.stringify(failureActionBaseline)
+                );
+            }
+            if (args.interleave) {
+                // The second start goes through `action:castCurrentTab`, whose
+                // handler resolves its target with
+                // `tabs.query({active: true, currentWindow: true})`. Pin that
+                // resolution to the sender tab explicitly instead of hoping the
+                // WebDriver window switches left it active.
+                senderTabInfo = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.tabs.query({}).then(tabs => {
+                        const matches = tabs.filter(t => String(t.url || "").startsWith(${JSON.stringify(
+                            origin
+                        )}));
+                        done(matches.length === 1
+                            ? { id: matches[0].id, windowId: matches[0].windowId }
+                            : { count: matches.length, urls: tabs.map(t => String(t.url || "").slice(0, 60)) });
+                     }, err => done({ error: String(err) }));`
+                );
+                check(
+                    "interleave mode: the sender tab is addressable with its window",
+                    Boolean(senderTabInfo && typeof senderTabInfo.id === "number"),
+                    JSON.stringify(senderTabInfo)
+                );
+            }
         }
 
         await driver.switchTo().window(senderTab);
@@ -1468,7 +1673,7 @@ async function main() {
             "window.__HARNESS_REQUEST_SESSION__().catch(() => {});"
         );
 
-        if (gapMode) {
+        if (provocation) {
             // The popup mounts only now, i.e. AFTER requestSession opened its
             // selector: mounting it earlier is what makes the popup's auto-cast
             // fire harmlessly before any selector exists, which is why the
@@ -1697,8 +1902,14 @@ async function main() {
         );
 
         await driver.switchTo().window(senderTab);
-        const pageResult = await driver.executeAsyncScript(
-            `const done = arguments[arguments.length - 1];
+        // The failure modes deliberately never reach a session, so waiting for
+        // the success callback would just burn the whole deadline.
+        const pageResult = failureMode
+            ? await driver.executeScript(
+                  "return window.__HARNESS_RESULT__ || null;"
+              )
+            : await driver.executeAsyncScript(
+                  `const done = arguments[arguments.length - 1];
              const deadline = Date.now() + 30000;
              const tick = () => {
                 const r = window.__HARNESS_RESULT__;
@@ -1707,15 +1918,24 @@ async function main() {
                 setTimeout(tick, 250);
              };
              tick();`
-        );
+              );
         check(
-            "the page's requestSession success callback ran",
-            pageResult && pageResult.requestSessionSucceeded === true,
+            failureMode
+                ? "session-failure mode: the page's requestSession did NOT succeed (the injected failure is real)"
+                : "the page's requestSession success callback ran",
+            failureMode
+                ? Boolean(pageResult) &&
+                      pageResult.requestSessionSucceeded !== true
+                : pageResult && pageResult.requestSessionSucceeded === true,
             JSON.stringify(pageResult)
         );
         check(
-            "the page has a non-empty session id",
-            Boolean(pageResult && pageResult.sessionId),
+            failureMode
+                ? "session-failure mode: the page has no session id"
+                : "the page has a non-empty session id",
+            failureMode
+                ? Boolean(pageResult) && !pageResult.sessionId
+                : Boolean(pageResult && pageResult.sessionId),
             JSON.stringify(pageResult && pageResult.sessionId)
         );
         console.log(
@@ -1810,32 +2030,43 @@ async function main() {
                 )
         );
         check("a discovery connection exists", Boolean(discovery));
-        check(
-            "a session connection exists",
-            Boolean(session),
-            JSON.stringify(connections.map(c => c.pid))
-        );
-        check(
-            "the session PID is none of the discovery PIDs",
-            Boolean(
-                session && !discoveryPids.has(session.pid)
-            ),
-            JSON.stringify({
-                session: session && session.pid,
-                discovery: [...discoveryPids]
-            })
-        );
-        check(
-            "the session connection is used in both directions",
-            Boolean(
-                session &&
-                    session.inbound.length > 0 &&
-                    session.outbound.length > 0
-            ),
-            JSON.stringify(
-                session && [session.inbound.length, session.outbound.length]
-            )
-        );
+        if (failureMode) {
+            // The injected failure happens after the generation was announced
+            // and before any session host exists, so "no session" is the
+            // positive expectation here, not a broken harness.
+            check(
+                "session-failure mode: no session host was created (the injected failure is real)",
+                !session,
+                JSON.stringify(connections.map(c => c.pid))
+            );
+        } else {
+            check(
+                "a session connection exists",
+                Boolean(session),
+                JSON.stringify(connections.map(c => c.pid))
+            );
+            check(
+                "the session PID is none of the discovery PIDs",
+                Boolean(
+                    session && !discoveryPids.has(session.pid)
+                ),
+                JSON.stringify({
+                    session: session && session.pid,
+                    discovery: [...discoveryPids]
+                })
+            );
+            check(
+                "the session connection is used in both directions",
+                Boolean(
+                    session &&
+                        session.inbound.length > 0 &&
+                        session.outbound.length > 0
+                ),
+                JSON.stringify(
+                    session && [session.inbound.length, session.outbound.length]
+                )
+            );
+        }
 
         const discovered = [];
         const actedOn = [];
@@ -2007,7 +2238,10 @@ async function main() {
                 began.deviceId === FAKE_DEVICE_ID &&
                 Number.isFinite(began.loadGeneration)
         );
-        const pathBWasTaken = !pathA || !gateBOk;
+        // The failure modes have no session at all, so there is nothing to LOAD
+        // through: Stage 2 would assert against a session that the injected
+        // failure prevented on purpose.
+        const pathBWasTaken = !pathA || !gateBOk || failureMode;
         // In `--auto-cast-gap` the missing generation IS the expected result, so
         // that mode asserts its absence here (and this check is one of the ones
         // allowed to flip once the defect is fixed). Every other mode - including
@@ -2252,6 +2486,532 @@ async function main() {
             );
             return response.json();
         };
+
+        if (failureMode) {
+            // ===== the pending gate when a session start fails ================
+            //
+            // What is under test is NOT the generation: it is monotonic by
+            // design, the previous load's media was already retired at discovery
+            // when the new generation was relayed, and the wire is asserted to
+            // carry no lower generation. What is under test is the LOCAL
+            // pending-media gate the announcement opened: while it is set,
+            // `deviceManager` drops that device's ECP media status (trace
+            // `remote-status-blocked`), and only a release, or a real session
+            // media, clears it.
+            //
+            // Which gate state each mode expects:
+            //
+            //   --create-failure-fixed  this start's own failure releases it  -> open
+            //   --create-failure-gap    (pre-fix) nothing releases it          -> closed
+            //   --interleave-fixed      the OLDER failure is refused           -> closed
+            //   --interleave-gap        (pre-fix) the OLDER failure clears the
+            //                           NEWER start's gate                    -> open
+            //
+            // Evidence discipline, because a false green here would certify a
+            // broken ownership model:
+            //
+            //  * injection markers are PER CALL INDEX. With one shared key,
+            //    "is call 1 still held" read back call 2's marker, so an overlap
+            //    assertion proved nothing about overlap.
+            //  * every trace and wire assertion is a DELTA against a baseline
+            //    taken after the failure and before the device is driven, and
+            //    the sample is identified by the state it was driven TO
+            //    (PLAYING at 30s), never by a count of pre-existing lines.
+            //  * the accepted/blocked branch is read from lines that carry that
+            //    driven state as their input.
+            const gateOpensAfterFailure = expectReleased !== args.interleave;
+            const announcedStarts = args.interleave ? 2 : 1;
+            const callMarkerKeys = index => [
+                `__fxHarnessCreateSessionHeld_${index}`,
+                `__fxHarnessCreateSessionReleased_${index}`,
+                `__fxHarnessCreateSessionFailed_${index}`
+            ];
+            const failureMarkerKeys = [
+                ...callMarkerKeys(1),
+                ...callMarkerKeys(2),
+                "__fxHarnessLoadGenerationBegan"
+            ];
+            // Storage markers are only reachable from an extension page, and
+            // this block runs after the click switched contexts around, so the
+            // reader switches to the console page itself.
+            const readFailureMarkers = async () => {
+                await driver.switchTo().window(consoleTab);
+                return driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .get(${JSON.stringify(failureMarkerKeys)})
+                        .then(v => done(v), err => done({ error: String(err) }));`
+                );
+            };
+            const waitForFailureMarker = async (key, predicate, timeoutMs) => {
+                const deadline = Date.now() + timeoutMs;
+                for (;;) {
+                    const marker = markerFor(await readFailureMarkers(), key);
+                    if (marker && (!predicate || predicate(marker)))
+                        return marker;
+                    if (Date.now() > deadline) return undefined;
+                    await sleep(250);
+                }
+            };
+            const readConnectionsNow = () =>
+                readNdjson(path.join(harnessDir, "spawns.ndjson"))
+                    .filter(entry => entry.event === undefined)
+                    .map(entry => ({
+                        pid: entry.pid,
+                        inbound: readNdjson(
+                            path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
+                        ),
+                        outbound: readNdjson(
+                            path.join(harnessDir, `conn-${entry.pid}-out.ndjson`)
+                        )
+                    }));
+            const wireGenerations = conns =>
+                conns
+                    .flatMap(c => [...c.inbound, ...c.outbound])
+                    .filter(
+                        m =>
+                            m.subject === "bridge:rokuSetLoadGeneration" &&
+                            m.message &&
+                            m.message.data &&
+                            m.message.data.deviceId === FAKE_DEVICE_ID
+                    )
+                    .map(m => m.message.data.loadGeneration);
+            const wireStatusSamples = conns =>
+                conns
+                    .flatMap(c => c.outbound)
+                    .filter(
+                        m =>
+                            m.subject ===
+                                "main:receiverDeviceMediaStatusUpdated" &&
+                            m.message &&
+                            m.message.data &&
+                            m.message.data.deviceId === FAKE_DEVICE_ID
+                    );
+            const readConsoleText = () =>
+                phaseBConsole && fs.existsSync(phaseBConsole)
+                    ? fs.readFileSync(phaseBConsole, "utf8")
+                    : "";
+            const traceLines = event =>
+                readConsoleText()
+                    .split("\n")
+                    .filter(line =>
+                        line.includes(
+                            `Roku media trace [${FAKE_DEVICE_ID}] ${event}`
+                        )
+                    );
+            /** Lines whose recorded input is the state the harness drove. */
+            const drivenInput = line =>
+                /inputPlayerState:\s*"?PLAYING"?/.test(line) &&
+                /inputCurrentTime:\s*"?30"?/.test(line);
+
+            // --- start 2 (interleave only): a newer lifecycle ---------------
+            //
+            // The popup's OWN current-tab cast message, sent from the popup page
+            // (the context production sends it from) rather than by clicking
+            // Stop -> Cast: the Stop affordance only appears once a session is
+            // connected, and this mode needs the newer start to announce while
+            // the older one is still in flight.
+            if (args.interleave) {
+                let secondStarted;
+                if (popupHandle) {
+                    await driver.switchTo().window(popupHandle);
+                    // `action:castCurrentTab` resolves its target with
+                    // `tabs.query({active: true, currentWindow: true})`. Put the
+                    // sender tab in front and active - the state a real click in
+                    // the popup leaves behind - instead of assuming the WebDriver
+                    // window switches did it.
+                    if (senderTabInfo && typeof senderTabInfo.id === "number") {
+                        await driver.executeAsyncScript(
+                            `const done = arguments[arguments.length - 1];
+                             (async () => {
+                                try {
+                                    await browser.windows.update(${JSON.stringify(
+                                        senderTabInfo.windowId
+                                    )}, { focused: true });
+                                    await browser.tabs.update(${JSON.stringify(
+                                        senderTabInfo.id
+                                    )}, { active: true });
+                                    done(true);
+                                } catch (err) {
+                                    done(String(err));
+                                }
+                             })();`
+                        );
+                    }
+                    // Mirror, from the popup's own window, exactly what the
+                    // background's handler will resolve.
+                    const resolvedTarget = await driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
+                         browser.tabs.query({ active: true, currentWindow: true })
+                            .then(tabs => done(tabs.map(t => ({ id: t.id, url: String(t.url || "").slice(0, 40) }))), err => done(String(err)));`
+                    );
+                    check(
+                        "interleave mode: the popup's window has the sender tab active (what the background resolves)",
+                        Array.isArray(resolvedTarget) &&
+                            resolvedTarget.some(
+                                t => t.id === (senderTabInfo && senderTabInfo.id)
+                            ),
+                        JSON.stringify({ resolvedTarget, senderTabInfo })
+                    );
+                    secondStarted = await driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
+                         (async () => {
+                            try {
+                                // Fire and forget, exactly like the popup's own
+                                // 'void castCurrentTab()': the handler does not
+                                // settle until the session it started settles,
+                                // and in this mode that session is HELD.
+                                void browser.runtime
+                                    .sendMessage({
+                                        subject: "action:castCurrentTab",
+                                        data: {
+                                            selection: {
+                                                device: {
+                                                    id: ${JSON.stringify(FAKE_DEVICE_ID)},
+                                                    name: ${JSON.stringify(FAKE_DEVICE_NAME)},
+                                                    deviceType: "roku"
+                                                },
+                                                mediaType: 1
+                                            },
+                                            quality: 0
+                                        }
+                                    })
+                                    .catch(() => {});
+                                done(true);
+                            } catch (err) {
+                                done(String(err));
+                            }
+                         })();`
+                    );
+                }
+                check(
+                    "interleave mode: the popup's current-tab cast started a second lifecycle",
+                    secondStarted === true,
+                    String(secondStarted)
+                );
+                await waitForFailureMarker(
+                    "__fxHarnessCreateSessionHeld_2",
+                    undefined,
+                    20000
+                );
+                // The overlap is proved by BOTH markers existing in the SAME
+                // read, and by call 1 having been held no later than call 2.
+                const bothHeld = await readFailureMarkers();
+                const heldFirst = markerFor(
+                    bothHeld,
+                    "__fxHarnessCreateSessionHeld_1"
+                );
+                const heldSecond = markerFor(
+                    bothHeld,
+                    "__fxHarnessCreateSessionHeld_2"
+                );
+                check(
+                    "interleave mode: both session starts are held at the same moment (call 1 and call 2 differ)",
+                    Boolean(
+                        heldFirst &&
+                            heldSecond &&
+                            heldFirst.callIndex === 1 &&
+                            heldSecond.callIndex === 2 &&
+                            heldFirst.at <= heldSecond.at
+                    ),
+                    JSON.stringify({ heldFirst: heldFirst || null, heldSecond: heldSecond || null })
+                );
+            }
+
+            // --- fail the FIRST start, after both are held -------------------
+            //
+            // The refusal baseline comes from `failureActionBaseline`, captured
+            // when the injection was armed - before this release request and
+            // before the click. Reading it here would classify the very line
+            // under test as pre-existing (the background polls this request
+            // every 150ms and runs the production catch immediately).
+            const refusedBaseline = failureActionBaseline.refused;
+            if (args.interleave) {
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .set({ __fxHarnessReleaseCreateSession: { runId: ${JSON.stringify(
+                            diagnosticRunId
+                        )}, callIndex: 1, action: "fail", at: Date.now() } })
+                        .then(() => done(true), err => done(String(err)));`
+                );
+            }
+            const failedFirst = await waitForFailureMarker(
+                "__fxHarnessCreateSessionFailed_1",
+                undefined,
+                30000
+            );
+            check(
+                "session-failure mode: the first session start failed after announcing its load",
+                Boolean(failedFirst),
+                JSON.stringify(failedFirst || null)
+            );
+            // The predicate waits for the EXPECTED number of announcements:
+            // accepting the first finite marker would read calls=1 in a two
+            // start run and then fail against the expectation at random.
+            const generationMarker = await waitForFailureMarker(
+                "__fxHarnessLoadGenerationBegan",
+                m =>
+                    Number.isFinite(m.loadGeneration) &&
+                    m.loadGenerationCalls === announcedStarts,
+                20000
+            );
+            check(
+                `session-failure mode: ${announcedStarts} start(s) announced, ${announcedStarts} load generation(s), no double advance`,
+                Boolean(generationMarker),
+                JSON.stringify(generationMarker || null)
+            );
+
+            // --- baselines, then drive the device to a known sample ----------
+            // Baselines are taken for the SAME sample identity the assertions
+            // use (the state the harness is about to drive), not merely for the
+            // event: a leftover PLAYING@30 line from an earlier phase would
+            // otherwise satisfy them.
+            const blockedBaseline = traceLines("remote-status-blocked").length;
+            const inputBaseline = traceLines("remote-status-input").length;
+            // NOT read here: the cancel this mode is about (if the gate was
+            // released) already happened in the production catch, before the
+            // failure marker this block waited for. It comes from the
+            // arming-time baseline instead, or `cancelDelta` would be 0 for a
+            // CORRECT implementation.
+            const cancelledBaseline = failureActionBaseline.cancelled;
+            const blockedDrivenBaseline = traceLines("remote-status-blocked").filter(
+                drivenInput
+            ).length;
+            const inputDrivenBaseline = traceLines("remote-status-input").filter(
+                drivenInput
+            ).length;
+            const sampleStartedAt = Date.now();
+            await post("/state", {
+                playerState: "play",
+                position: 30,
+                duration: 600,
+                title: "harness-stale-sample"
+            });
+            console.log(
+                "session-failure mode: fake roku driven to a non-idle sample (PLAYING at 30s)"
+            );
+            const sampleDeadline = Date.now() + 30000;
+            let drivenSamples = [];
+            let blockedDriven = [];
+            let inputDriven = [];
+            for (;;) {
+                drivenSamples = wireStatusSamples(readConnectionsNow()).filter(
+                    m =>
+                        m.at >= sampleStartedAt &&
+                        m.message.data.status &&
+                        m.message.data.status.playerState === "PLAYING" &&
+                        m.message.data.status.currentTime === 30
+                );
+                blockedDriven = traceLines("remote-status-blocked").filter(
+                    drivenInput
+                );
+                inputDriven = traceLines("remote-status-input").filter(
+                    drivenInput
+                );
+                if (
+                    drivenSamples.length &&
+                    (blockedDriven.length || inputDriven.length)
+                )
+                    break;
+                if (Date.now() > sampleDeadline) break;
+                await sleep(500);
+            }
+            check(
+                "session-failure mode: the driven ECP sample (PLAYING at 30s) reached the extension after the failure",
+                drivenSamples.length > 0,
+                JSON.stringify({
+                    drivenSamples: drivenSamples.length,
+                    blockedDriven: blockedDriven.length,
+                    inputDriven: inputDriven.length
+                })
+            );
+            const cancels = traceLines("load-generation-cancelled").length;
+            const cancelDelta = cancels - cancelledBaseline;
+            const blockedDrivenDelta = blockedDriven.length - blockedDrivenBaseline;
+            const inputDrivenDelta = inputDriven.length - inputDrivenBaseline;
+            if (gateOpensAfterFailure) {
+                check(
+                    "session-failure mode: the gate was released (a NEW load-generation-cancelled) and the DRIVEN sample is accepted",
+                    cancelDelta >= 1 &&
+                        inputDrivenDelta >= 1 &&
+                        blockedDrivenDelta === 0,
+                    JSON.stringify({
+                        cancelDelta,
+                        blockedDrivenDelta,
+                        inputDrivenDelta,
+                        baseline: {
+                            blockedBaseline,
+                            inputBaseline,
+                            blockedDrivenBaseline,
+                            inputDrivenBaseline
+                        }
+                    })
+                );
+            } else {
+                check(
+                    "session-failure mode: the gate stays closed (no new cancel, the DRIVEN sample is blocked and never accepted)",
+                    cancelDelta === 0 &&
+                        blockedDrivenDelta >= 1 &&
+                        inputDrivenDelta === 0,
+                    JSON.stringify({
+                        cancelDelta,
+                        blockedDrivenDelta,
+                        inputDrivenDelta,
+                        baseline: {
+                            blockedBaseline,
+                            inputBaseline,
+                            blockedDrivenBaseline,
+                            inputDrivenBaseline
+                        }
+                    })
+                );
+            }
+            if (args.interleave && expectReleased) {
+                // Delta, not an absolute search of the whole phase-B console: a
+                // same-worded line from an earlier lifecycle or another device
+                // must not satisfy it.
+                const refusalLines = readConsoleText()
+                    .split("\n")
+                    .filter(line =>
+                        line.includes("Roku media load release ignored")
+                    );
+                const refusedDelta = refusalLines.length - refusedBaseline;
+                check(
+                    "interleave mode: the older start's release was refused in favour of the newer start (one NEW refusal)",
+                    refusedDelta === 1,
+                    JSON.stringify({
+                        refusedDelta,
+                        refusalLines: refusalLines.slice(-1),
+                        cancelDelta,
+                        blockedDriven: blockedDriven.length
+                    })
+                );
+            }
+            const connsAfter = readConnectionsNow();
+            // Only generations from THIS failure phase: the arming timestamp is
+            // the phase's lower bound, so a replay or a leftover generation from
+            // before the injection cannot be counted as this run's.
+            const generations = connsAfter
+                .flatMap(c => [...c.inbound, ...c.outbound])
+                .filter(
+                    m =>
+                        m.subject === "bridge:rokuSetLoadGeneration" &&
+                        m.message &&
+                        m.message.data &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        m.at >= injectionArmedAt
+                )
+                .map(m => m.message.data.loadGeneration);
+            const uniqueGenerations = [...new Set(generations)];
+            const ascending =
+                JSON.stringify(uniqueGenerations) ===
+                JSON.stringify([...uniqueGenerations].sort((a, b) => a - b));
+            check(
+                "session-failure mode: the generation is monotonic on the wire - never rolled back, never re-sent lower",
+                generations.length > 0 &&
+                    uniqueGenerations.length === announcedStarts &&
+                    uniqueGenerations.every(g => Number.isFinite(g) && g > 0) &&
+                    ascending &&
+                    Math.max(...uniqueGenerations) ===
+                        (generationMarker && generationMarker.loadGeneration),
+                JSON.stringify({
+                    generations,
+                    uniqueGenerations,
+                    announced: generationMarker && generationMarker.loadGeneration
+                })
+            );
+
+            // --- the newer start must survive the older one's failure -------
+            if (args.interleave) {
+                // Association, not "some session exists": the newer host has to
+                // be a NEW process, created after the release, for the fake
+                // device.
+                const sessionPidsBefore = new Set(
+                    readConnectionsNow()
+                        .filter(c =>
+                            c.inbound.some(
+                                m => m.subject === "bridge:createCastSession"
+                            )
+                        )
+                        .map(c => c.pid)
+                );
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .set({ __fxHarnessReleaseCreateSession: { runId: ${JSON.stringify(
+                            diagnosticRunId
+                        )}, callIndex: 2, action: "proceed", at: Date.now() } })
+                        .then(() => done(true), err => done(String(err)));`
+                );
+                const releasedSecond = await waitForFailureMarker(
+                    "__fxHarnessCreateSessionReleased_2",
+                    undefined,
+                    20000
+                );
+                let newerSession;
+                const sessionDeadline = Date.now() + 30000;
+                while (Date.now() < sessionDeadline) {
+                    newerSession = readConnectionsNow().find(
+                        c =>
+                            !sessionPidsBefore.has(c.pid) &&
+                            c.inbound.some(
+                                m =>
+                                    m.subject ===
+                                        "bridge:createCastSession" &&
+                                    m.at >=
+                                        (releasedSecond
+                                            ? releasedSecond.at
+                                            : Number.MAX_SAFE_INTEGER) &&
+                                    m.message &&
+                                    m.message.data &&
+                                    m.message.data.receiverDevice &&
+                                    m.message.data.receiverDevice.id ===
+                                        FAKE_DEVICE_ID
+                            )
+                    );
+                    if (newerSession) break;
+                    await sleep(500);
+                }
+                check(
+                    "interleave mode: the newer start created a NEW session host after its release (new PID, fake device)",
+                    Boolean(releasedSecond && newerSession),
+                    JSON.stringify({
+                        releasedSecond: releasedSecond || null,
+                        newerSessionPid: newerSession && newerSession.pid,
+                        previousPids: [...sessionPidsBefore]
+                    })
+                );
+            }
+
+            // --- what the popup renders: DIAGNOSTIC, not evidence -----------
+            //
+            // Measured fact (2026-09-13, --create-failure-gap): the popup's row
+            // shows the driven title "Media Assistant . harness-stale-sample"
+            // even while the pending gate BLOCKS that device's media status.
+            // The row's now-playing line does not come from
+            // `main:receiverDeviceMediaStatusUpdated`, so it is NOT gated and
+            // cannot serve as evidence either way - an earlier version of this
+            // mode asserted on it and was wrong in both directions. The gate's
+            // evidence is the production branch trace plus the wire sample.
+            let popupText;
+            if (popupHandle) {
+                try {
+                    await driver.switchTo().window(popupHandle);
+                    popupText = await driver.executeScript(
+                        "return (document.body && document.body.innerText) || '';"
+                    );
+                } catch (err) {
+                    popupText = `(popup read failed: ${err.message})`;
+                }
+            }
+            console.log(
+                "session-failure mode: popup text (diagnostic, not gated):",
+                JSON.stringify(String(popupText || "").slice(0, 120))
+            );
+        }
         if (!pathBWasTaken) {
         // The startup synthesis only exists while ECP still reports idle, so the
         // device is pinned there: a device that flips to buffer/play on its own
