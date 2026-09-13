@@ -603,81 +603,81 @@ export default class RokuRemote {
         if (this.destroyed) return;
 
         const pollStartedAt = Date.now();
+        const state = await queryMediaPlayer(this.host);
+
+        // The foreground channel decides whether an application is
+        // reported at all (/query/media-player only knows about active
+        // playback — a player sitting on its home screen reports idle).
+        let activeApp: ActiveAppInfo | undefined;
         try {
-            const state = await queryMediaPlayer(this.host);
-
-            // The foreground channel decides whether an application is
-            // reported at all (/query/media-player only knows about active
-            // playback — a player sitting on its home screen reports idle).
-            let activeApp: ActiveAppInfo | undefined;
-            try {
-                const app = await queryActiveApp(this.host);
-                if (app.id) activeApp = app;
-            } catch {
-                // Keep the previous value on transient failures.
-                activeApp = this.lastActiveApp;
-            }
-            if (this.destroyed) return;
-
-            const previous = this.lastState;
-            this.lastState = state;
-            this.lastActiveApp = activeApp;
-
-            // Media title is only known to us when this remote loaded it;
-            // fall back to whatever the player reports.
-            if (state.title && !this.loadedTitle)
-                this.loadedTitle = state.title;
-
-            const positionMoved =
-                previous.position !== undefined &&
-                state.position !== undefined &&
-                Math.abs(state.position - previous.position) > 2;
-            const stateChanged = previous.state !== state.state;
-            const appChanged =
-                (activeApp?.id ?? undefined) !==
-                (this.lastActiveAppId ?? undefined);
-            this.lastActiveAppId = activeApp?.id;
-
-            if (stateChanged || positionMoved || appChanged) {
-                this.emitReceiverStatus();
-            }
-            // Every completed poll is a sample, and must be published as one
-            // regardless of whether it differs from the cached state: an
-            // observation is "a fresh /query/media-player result", not "a
-            // change". Throttling this to deltas silently starves command
-            // confirmation of the exact case it needs — after a PLAY/PAUSE
-            // keypress the cached state already holds the requested one, so a
-            // poll that agrees with the device can look like "no change" and
-            // never be published, leaving the command unconfirmed.
-            //
-            // (Receiver status, which drives the popup, stays throttled.)
-            const pollProvenance: RokuMediaStatusProvenance = {
-                source: "ecp-poll",
-                pollStartedAt,
-                pollCompletedAt: Date.now(),
-                sequence: ++this.pollSequence
-            };
-            this.emitMediaStatus(pollProvenance);
-            // Also report the raw sample, so an idle poll is still an
-            // observation rather than silence (emitMediaStatus suppresses idle
-            // as "nothing to report").
-            this.options.onPlaybackObservation?.(
-                {
-                    mediaSessionId: 1,
-                    playbackRate: 1,
-                    playerState: this.observedPlayerState(state.state),
-                    currentTime: state.position ?? 0,
-                    supportedMediaCommands: SUPPORTED_MEDIA_COMMANDS,
-                    repeatMode: RepeatMode.OFF,
-                    volume: this.volume,
-                    customData: null
-                },
-                pollProvenance
-            );
+            const app = await queryActiveApp(this.host);
+            if (app.id) activeApp = app;
         } catch {
-            // Leave lastState as-is; deviceBrowser health-checks decide when
-            // the device is gone.
+            // Keep the previous value on transient failures.
+            activeApp = this.lastActiveApp;
         }
+        if (this.destroyed) return;
+
+        const previous = this.lastState;
+        this.lastState = state;
+        this.lastActiveApp = activeApp;
+
+        // Media title is only known to us when this remote loaded it;
+        // fall back to whatever the player reports.
+        if (state.title && !this.loadedTitle) this.loadedTitle = state.title;
+
+        const positionMoved =
+            previous.position !== undefined &&
+            state.position !== undefined &&
+            Math.abs(state.position - previous.position) > 2;
+        const stateChanged = previous.state !== state.state;
+        const appChanged =
+            (activeApp?.id ?? undefined) !==
+            (this.lastActiveAppId ?? undefined);
+        this.lastActiveAppId = activeApp?.id;
+
+        if (stateChanged || positionMoved || appChanged) {
+            this.emitReceiverStatus();
+        }
+        // Every completed poll is a sample, and must be published as one
+        // regardless of whether it differs from the cached state: an
+        // observation is "a fresh /query/media-player result", not "a
+        // change". Throttling this to deltas silently starves command
+        // confirmation of the exact case it needs — after a PLAY/PAUSE
+        // keypress the cached state already holds the requested one, so a
+        // poll that agrees with the device can look like "no change" and
+        // never be published, leaving the command unconfirmed.
+        //
+        // (Receiver status, which drives the popup, stays throttled.)
+        const pollProvenance: RokuMediaStatusProvenance = {
+            source: "ecp-poll",
+            pollStartedAt,
+            pollCompletedAt: Date.now(),
+            sequence: ++this.pollSequence
+        };
+        this.emitMediaStatus(pollProvenance);
+        // Also report the raw sample, so an idle poll is still an
+        // observation rather than silence (emitMediaStatus suppresses idle
+        // as "nothing to report").
+        this.options.onPlaybackObservation?.(
+            {
+                mediaSessionId: 1,
+                playbackRate: 1,
+                playerState: this.observedPlayerState(state.state),
+                currentTime: state.position ?? 0,
+                supportedMediaCommands: SUPPORTED_MEDIA_COMMANDS,
+                repeatMode: RepeatMode.OFF,
+                volume: this.volume,
+                customData: null
+            },
+            pollProvenance
+        );
+        // NOTE: deliberately no catch here. Only the ACTIVE-APP read above is
+        // tolerated locally (its absence is not evidence that the device is
+        // gone, so the previous value is kept). Everything else - notably the
+        // media-player read - must propagate to poll(), which is the single
+        // place that logs a failed sample. Swallowing it here would make that
+        // log unreachable while leaving lastState untouched either way.
     }
 
     private buildApplication(): ReceiverApplication {

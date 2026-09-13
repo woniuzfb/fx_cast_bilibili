@@ -122,7 +122,7 @@ type MessageDefinitions = {
      * The session lives in its own connectNative process and has no access to
      * the discovery process's remotes, so it cannot start the dense sampling
      * itself. It reports the transport instead and the extension relays
-     * main:rokuRequestConfirmationPoll to the right process.
+     * bridge:rokuRequestConfirmationPoll to the right process.
      */
     "main:rokuSessionPlaybackTransport": {
         deviceId: string;
