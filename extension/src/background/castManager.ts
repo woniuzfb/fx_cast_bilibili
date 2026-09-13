@@ -1197,6 +1197,13 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                     break;
                 }
 
+                // The bypass creates a real session too, straight from the
+                // device the trusted page supplied, so it has to announce the
+                // load for the same reason the two paths below do: without a
+                // generation the session's media is never mirrored to the
+                // discovery host, and nothing fails loudly.
+                beginRokuSessionLoad(receiverDevice);
+
                 const session = await createCastSession({
                     instance,
                     deviceId: receiverDevice.id,
@@ -1215,6 +1222,9 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
             }
 
             let pendingRokuMediaDeviceId: string | undefined;
+            // This handler invocation is one session start, so the load it
+            // announces must be announced exactly once.
+            const rokuSessionSeq = beginRokuSessionStart();
             try {
                 logger.info("Waiting for receiver selection", {
                     tabId: instance.contentContext?.tabId,
@@ -1267,8 +1277,9 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                 }
 
                 if (selection.device.deviceType === "roku") {
-                    pendingRokuMediaDeviceId = selection.device.id;
-                    deviceManager.beginRokuMediaLoad(selection.device.id);
+                    if (beginRokuSessionLoad(selection.device, rokuSessionSeq)) {
+                        pendingRokuMediaDeviceId = selection.device.id;
+                    }
                 }
 
                 instance.contentPort.postMessage({
@@ -1392,6 +1403,81 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
 }
 
 /**
+ * Monotonic session-start counter, and the starts whose load has already been
+ * announced. A token is never reused, so remembering the SET (rather than only
+ * the last one) is what makes "exactly one generation per session start" hold
+ * even when two starts interleave.
+ */
+let rokuSessionStartSeq = 0;
+const rokuLoadAnnouncedSeqs = new Set<number>();
+/** Bounds the bookkeeping; only recently started sessions can still re-enter. */
+const ROKU_LOAD_ANNOUNCED_SEQ_LIMIT = 32;
+
+/**
+ * Starts a session-start lifecycle and returns its token. Take one token per
+ * lifecycle (one requestSession handling, one queued cast) and pass it to every
+ * `beginRokuSessionLoad` call that lifecycle can reach.
+ */
+function beginRokuSessionStart(): number {
+    return ++rokuSessionStartSeq;
+}
+
+/**
+ * Announces a Roku media load for a session that is about to be created: this
+ * is the single entry for "a Roku App session is starting, so it needs a load
+ * generation".
+ *
+ * There is more than one way a session gets created, and for a long time only
+ * one of them announced the load:
+ *
+ *  - `main:requestSession`, i.e. the receiver-selector response, which
+ *    announced the load right before dispatching `cast:receiverAction`;
+ *  - the queued-selection path, `triggerCast` -> `loadSender`, which is what
+ *    the popup's auto-cast takes when it casts on its own because the selector
+ *    never reported ready within its timeout;
+ *  - the trusted-sender bypass, which creates a session straight from the
+ *    receiver device the page supplied.
+ *
+ * A session created by either of the other two had no generation at all.
+ * Session media is published against a generation and the session media sync
+ * treats a generation advance as a retirement boundary (`apply()` retires the
+ * stale generations first), so such a session's media could never be mirrored
+ * to the discovery host - and nothing failed loudly.
+ *
+ * Exactly one generation per session start: a repeated call carrying the same
+ * `seq` is a repeat of the same start and must not advance anything, because
+ * that would retire the media the session had just bound.
+ *
+ * Returns true when this call is the one that announced the load.
+ */
+function beginRokuSessionLoad(
+    device: ReceiverDevice | undefined,
+    seq = beginRokuSessionStart()
+): boolean {
+    if (device?.deviceType !== "roku") {
+        return false;
+    }
+
+    if (rokuLoadAnnouncedSeqs.has(seq)) {
+        logger.info("Roku media load already announced for this session start", {
+            deviceId: device.id,
+            seq
+        });
+        return false;
+    }
+
+    rokuLoadAnnouncedSeqs.add(seq);
+    if (rokuLoadAnnouncedSeqs.size > ROKU_LOAD_ANNOUNCED_SEQ_LIMIT) {
+        // A Set preserves insertion order, so this drops the oldest start.
+        rokuLoadAnnouncedSeqs.delete(
+            rokuLoadAnnouncedSeqs.values().next().value as number
+        );
+    }
+    deviceManager.beginRokuMediaLoad(device.id);
+    return true;
+}
+
+/**
  * Loads the appropriate sender for a given receiver selector response.
  */
 async function loadSender(
@@ -1434,6 +1520,18 @@ async function loadSender(
             if (!instance.apiConfig?.sessionRequest.appId) {
                 throw logger.error("Invalid session request");
             }
+
+            // The queued-selection path creates a real session here too, and
+            // it used to be the only one that did not announce the load: the
+            // popup's watchdog casts on its own, `triggerCast` lands in this
+            // branch, and the session came up with no load generation - so its
+            // media was never mirrored to the discovery host. Announce before
+            // the receiver is dispatched and before the session is created,
+            // matching the order the receiver-selector path uses. Nothing to
+            // roll back on failure: the generation is what retires the media
+            // of the previous session, and a session that never comes up
+            // publishes none.
+            beginRokuSessionLoad(selection.device);
 
             instance.contentPort.postMessage({
                 subject: "cast:receiverAction",
