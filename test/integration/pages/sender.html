@@ -3,14 +3,6 @@
     <head>
         <meta charset="utf-8" />
         <title>fx_cast integration sender</title>
-        <!--
-            The real page half: this is the URL a Cast sender loads, and the
-            extension is expected to intercept it (its contentInitial script
-            rewrites the src to the eureka loader URL, and the background's
-            webRequest listener redirects that to the extension's own SDK). No
-            shim, no direct call into extension internals.
-        -->
-        <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js"></script>
     </head>
     <body>
         <h1>fx_cast integration sender</h1>
@@ -19,18 +11,47 @@
             "use strict";
 
             /**
-             * Everything the harness asserts about the PAGE side lands here, so
-             * a green result can never be inferred from the native traces alone.
+             * The Cast SDK is loaded per ARM, selected by `?arm=`, because the
+             * extension only intercepts specific entry URLs and a test that uses
+             * an unsupported one fails for a reason that has nothing to do with
+             * the interception chain.
+             *
+             *   A (production): a Chrome sender extension URL. contentInitial.ts
+             *      rewrites it to the eureka loader, which the background's
+             *      webRequest listener redirects to the extension's own SDK. This
+             *      is the full chain and the only arm that must pass.
+             *   B (diagnostic): the eureka URL directly. Skips contentInitial, so
+             *      it separates "content script did not rewrite" from "background
+             *      did not redirect".
+             *   C (negative control): the generic /cv/js/sender URL. The
+             *      extension does not declare it anywhere, so chrome.cast must
+             *      NOT appear; if it does, the harness is measuring something
+             *      other than the extension.
+             *
+             * The script is created dynamically and its `src` assigned as a
+             * PROPERTY on purpose: contentInitial patches
+             * HTMLScriptElement.prototype.src's setter, and a static src
+             * attribute in the markup never goes through that setter.
              */
+            const ARMS = {
+                A: "chrome-extension://pkedcjkdefgpdelpbcmbmeomcjbeemfm/cast_sender.js",
+                B: "https://www.gstatic.com/eureka/clank/cast_sender.js",
+                C: "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js"
+            };
+            const arm = new URLSearchParams(location.search).get("arm") || "A";
+
             window.__HARNESS_RESULT__ = {
+                arm,
+                armUrl: ARMS[arm],
+                sdkScriptRequested: false,
+                sdkScriptLoaded: false,
                 sdkLoaded: false,
                 initialized: false,
                 requestSessionCalled: false,
                 requestSessionSucceeded: false,
                 selectedDeviceId: undefined,
                 sessionId: undefined,
-                loadCalled: false,
-                loadSucceeded: false,
+                resources: [],
                 errors: []
             };
             const result = window.__HARNESS_RESULT__;
@@ -47,8 +68,40 @@
                 );
             };
 
-            // The Default Media Receiver id, which is what a plain sender uses.
             const APP_ID = "CC1AD845";
+
+            const script = document.createElement("script");
+            script.src = ARMS[arm];
+            result.sdkScriptRequested = true;
+            // Read back what the property setter actually produced. The
+            // extension's contentInitial patches that setter, so this is how the
+            // page can tell "the rewrite never ran" from "it ran and the
+            // redirect failed".
+            result.assignedSrc = ARMS[arm];
+            result.effectiveSrc = script.src;
+            script.onload = () => {
+                result.sdkScriptLoaded = true;
+                status("script loaded");
+            };
+            script.onerror = () => {
+                fail("sdk-script", "the script element fired onerror");
+                status("script failed");
+            };
+            document.head.appendChild(script);
+
+            /** Resource timing is diagnostic evidence, never a pass criterion:
+             *  a cross-scheme redirect may not be observable here at all. */
+            window.__HARNESS_COLLECT_RESOURCES__ = function () {
+                result.resources = performance
+                    .getEntriesByType("resource")
+                    .map(entry => entry.name)
+                    .filter(
+                        name =>
+                            name.includes("cast_sender") ||
+                            name.includes("/cast/content")
+                    );
+                return result.resources;
+            };
 
             window.__HARNESS_WAIT_FOR_SDK__ = function (timeoutMs) {
                 return new Promise((resolve, reject) => {
@@ -65,7 +118,16 @@
                             return;
                         }
                         if (Date.now() > deadline) {
-                            reject(new Error("cast SDK never appeared"));
+                            window.__HARNESS_COLLECT_RESOURCES__();
+                            reject(
+                                new Error(
+                                    "cast SDK never appeared (arm " +
+                                        arm +
+                                        ", resources: " +
+                                        JSON.stringify(result.resources) +
+                                        ")"
+                                )
+                            );
                             return;
                         }
                         setTimeout(tick, 100);
@@ -77,11 +139,8 @@
             window.__HARNESS_INITIALIZE__ = function () {
                 return new Promise((resolve, reject) => {
                     try {
-                        const sessionRequest = new chrome.cast.SessionRequest(
-                            APP_ID
-                        );
                         const apiConfig = new chrome.cast.ApiConfig(
-                            sessionRequest,
+                            new chrome.cast.SessionRequest(APP_ID),
                             () => {},
                             () => {}
                         );
@@ -104,7 +163,6 @@
                 });
             };
 
-            /** Requests a session; resolves with the selected receiver. */
             window.__HARNESS_REQUEST_SESSION__ = function () {
                 return new Promise((resolve, reject) => {
                     result.requestSessionCalled = true;

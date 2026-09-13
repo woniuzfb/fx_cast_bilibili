@@ -56,6 +56,16 @@ const firefox = require(path.join(
     "node_modules/selenium-webdriver/firefox"
 ));
 
+/**
+ * Selenium Manager's download directory, shared across runs on purpose: it is
+ * cached tooling, not run state, and a per-run directory meant the harness
+ * re-downloaded geckodriver (or looked for it in an empty directory).
+ */
+const SELENIUM_CACHE = path.join(
+    os.tmpdir(),
+    "fx-harness-selenium-cache"
+);
+
 const FAKE_DEVICE_ID = "roku-HARNESS0001";
 const FAKE_DEVICE_NAME = "Harness Roku";
 const EXTENSION_ID = require(path.join(repoRoot, "dist/bridge/config.json"))
@@ -172,15 +182,115 @@ function makeProfile(harnessDir) {
     return profileDir;
 }
 
-async function startFirefox(options, label) {
+/**
+ * Runs geckodriver ourselves instead of letting the builder spawn it.
+ *
+ * Why: the extension's own console (where `registerContentScripts` failures and
+ * every `logger.error` land) reaches the browser process's stdout, which
+ * geckodriver owns. Selenium's builder gives us no handle on that process, and
+ * `driver.manage().logs()` is not supported for Firefox ("HTTP method
+ * allowed" / no log types), which left the harness blind exactly when it needed
+ * the extension's error message. Owning geckodriver's stdio fixes that, and
+ * `usingServer` keeps every other Selenium call identical.
+ */
+async function startFirefox(options, label, harnessDir) {
     console.log(`starting Firefox (${label})...`);
+    const geckodriverPath = findGeckodriver(harnessDir);
+    if (!geckodriverPath) {
+        // Degrade instead of failing: the run is still useful, only the
+        // extension console is missing. (The download normally happens on the
+        // first WebDriver start into SELENIUM_CACHE.)
+        console.log(
+            `[${label}] geckodriver not found; letting Selenium spawn it (no console capture)`
+        );
+        const fallback = await new webdriver.Builder()
+            .forBrowser("firefox")
+            .setFirefoxOptions(options)
+            .build();
+        await fallback.manage().setTimeouts({ script: 45000 });
+        return { driver: fallback, consoleLog: undefined };
+    }
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const logFile = path.join(
+        harnessDir,
+        `geckodriver-${label.replace(/\W+/g, "-")}.log`
+    );
+    const logStream = fs.createWriteStream(logFile, { flags: "a" });
+    const gecko = spawn(geckodriverPath, [`--port=${port}`, "-v"], {
+        stdio: ["ignore", "pipe", "pipe"]
+    });
+    gecko.stdout.pipe(logStream);
+    gecko.stderr.pipe(logStream);
+    process.env[`GECKO_${label}`] = String(gecko.pid);
+    console.log(`[${label}] geckodriver pid ${gecko.pid}, log ${logFile}`);
+
+    // Wait for the server to accept connections.
+    const net = require("net");
+    const deadline = Date.now() + 15000;
+    for (;;) {
+        const reachable = await new Promise(resolve => {
+            const socket = net.connect(port, "127.0.0.1");
+            socket.on("connect", () => {
+                socket.destroy();
+                resolve(true);
+            });
+            socket.on("error", () => resolve(false));
+        });
+        if (reachable) break;
+        if (Date.now() > deadline) throw new Error("geckodriver did not listen");
+        await sleep(200);
+    }
+
     const driver = await new webdriver.Builder()
+        .usingServer(`http://127.0.0.1:${port}`)
         .forBrowser("firefox")
         .setFirefoxOptions(options)
         .build();
     // The default 30s script timeout is shorter than the selector waits below.
     await driver.manage().setTimeouts({ script: 45000 });
-    return driver;
+    // Best effort: not every Firefox/geckodriver combination exposes the
+    // browser console, so this is reported rather than relied upon.
+    try {
+        const types = await driver.manage().logs().getAvailableLogTypes();
+        console.log(`[${label}] available log types:`, JSON.stringify(types));
+    } catch (err) {
+        console.log(`[${label}] log types unavailable: ${err.message}`);
+    }
+    return { driver, consoleLog: logFile };
+}
+
+/** The geckodriver Selenium Manager downloaded, wherever it put it. */
+function findGeckodriver(harnessDir) {
+    const roots = [SELENIUM_CACHE, harnessDir];
+    // Earlier runs used a per-run cache; reuse those rather than re-download.
+    try {
+        for (const entry of fs.readdirSync(os.tmpdir())) {
+            if (entry.startsWith("fx-harness-s1-")) {
+                roots.push(path.join(os.tmpdir(), entry));
+            }
+        }
+    } catch {
+        // Not fatal: the stable cache is checked first.
+    }
+
+    for (const root of roots) {
+        const stack = [root];
+        while (stack.length) {
+            const dir = stack.pop();
+            let entries;
+            try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+            } catch {
+                continue;
+            }
+            for (const entry of entries) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) stack.push(full);
+                else if (entry.name === "geckodriver") return full;
+            }
+        }
+    }
+    return undefined;
 }
 
 /** Waits for a window handle whose URL contains `fragment`. */
@@ -249,9 +359,8 @@ async function main() {
     const options = new firefox.Options()
         .setBinary(firefoxPath)
         .setProfile(profileDir);
-    const geckoCache = path.join(harnessDir, "selenium-cache");
-    fs.mkdirSync(geckoCache, { recursive: true });
-    process.env.SE_CACHE_PATH = geckoCache;
+    fs.mkdirSync(SELENIUM_CACHE, { recursive: true });
+    process.env.SE_CACHE_PATH = SELENIUM_CACHE;
     // Privileged navigations (the extension's own pages) are refused unless
     // Firefox starts with system access allowed.
     process.env.MOZ_REMOTE_ALLOW_SYSTEM_ACCESS = "1";
@@ -259,7 +368,9 @@ async function main() {
     let driver;
     try {
         // --- phase A: whitelist, then restart ---------------------------------
-        driver = await startFirefox(options, "phase A: whitelist");
+        let started = await startFirefox(options, "phase A: whitelist", harnessDir);
+        driver = started.driver;
+        const phaseAConsole = started.consoleLog;
         await driver.get(optionsUrl);
         await sleep(1500);
         check(
@@ -273,17 +384,51 @@ async function main() {
                 try {
                     const stored = await browser.storage.sync.get("options");
                     const options = stored.options || {};
+                    // Baseline BEFORE any write: if this is already empty, the
+                    // extension never registers content scripts here and our
+                    // whitelist is not the cause. If it is non-empty and the
+                    // read after the write is empty, our write broke it (most
+                    // likely by replacing the whole options object).
+                    const before = await browser.scripting.getRegisteredContentScripts();
+                    const storedKeys = Object.keys(options);
                     const list = Array.isArray(options.siteWhitelist)
                         ? options.siteWhitelist.slice()
                         : [];
-                    const pattern = ${JSON.stringify(origin)} + "/*";
-                    if (!list.some(entry => entry.pattern === pattern)) {
-                        list.push({ pattern, isEnabled: true });
+                    // Two shapes on purpose: match patterns are not supposed
+                    // to carry ports, so the portless host/* form is the one
+                    // that plausibly registers. Both are written and the
+                    // REGISTERED result is reported below, without guessing.
+                    // ONLY the portless form. Firefox match patterns reject
+                    // ports ("Error: Invalid match pattern" from the extension
+                    // background), and the extension unregisters its whitelist
+                    // content script before re-registering, so one invalid
+                    // pattern leaves it with NO content script at all - which is
+                    // exactly what made arm A fail while arm B worked.
+                    const candidates = ["http://127.0.0.1/*", "http://localhost/*"];
+                    for (const pattern of candidates) {
+                        if (!list.some(entry => entry.pattern === pattern)) {
+                            list.push({ pattern, isEnabled: true });
+                        }
                     }
                     options.siteWhitelist = list;
                     options.siteWhitelistEnabled = true;
                     await browser.storage.sync.set({ options });
-                    done({ ok: true, count: list.length });
+                    await new Promise(r => setTimeout(r, 1500));
+                    const registered = await browser.scripting.getRegisteredContentScripts();
+                    done({
+                        ok: true,
+                        count: list.length,
+                        storedKeys,
+                        before: before.map(script => ({
+                            id: script.id,
+                            matches: script.matches
+                        })),
+                        after: registered.map(script => ({
+                            id: script.id,
+                            matches: script.matches,
+                            js: script.js
+                        }))
+                    });
                 } catch (err) {
                     done({ ok: false, error: String(err) });
                 }
@@ -294,6 +439,29 @@ async function main() {
             whitelisted && whitelisted.ok,
             JSON.stringify(whitelisted)
         );
+        console.log(
+            "stored option keys BEFORE the write:",
+            JSON.stringify(whitelisted && whitelisted.storedKeys)
+        );
+        console.log(
+            "registered content scripts BEFORE:",
+            JSON.stringify(whitelisted && whitelisted.before)
+        );
+        console.log(
+            "registered content scripts AFTER:",
+            JSON.stringify(whitelisted && whitelisted.after)
+        );
+        // The registration must actually cover the test origin, or the SDK src
+        // rewrite (and therefore the whole session flow) cannot happen.
+        const whitelistEntry = (whitelisted && whitelisted.after
+            ? whitelisted.after
+            : []
+        ).find(script => script.id === "whitelist-content");
+        check(
+            "the extension re-registered its whitelist content script",
+            Boolean(whitelistEntry && whitelistEntry.matches.length > 0),
+            JSON.stringify(whitelisted && whitelisted.after)
+        );
         await driver.quit();
         driver = undefined;
         console.log(
@@ -302,10 +470,14 @@ async function main() {
         await sleep(1500);
 
         // --- phase B: the real run -------------------------------------------
-        driver = await startFirefox(options, "phase B: session");
+        started = await startFirefox(options, "phase B: session", harnessDir);
+        driver = started.driver;
+        const phaseBConsole = started.consoleLog;
 
-        // S: the sender page (must stay the active tab).
-        await driver.get(`${origin}/sender.html`);
+        // S: the sender page (must stay the active tab). Arm A is the
+        // production entry; B and C are diagnostics/controls, run only if A
+        // fails, so the pass path measures nothing but the real chain.
+        await driver.get(`${origin}/sender.html?arm=A`);
         const senderTab = await driver.getWindowHandle();
 
         // O: an extension page, used only as the extension-side console (the
@@ -343,15 +515,51 @@ async function main() {
 
         await driver.switchTo().window(senderTab);
         await driver.navigate().refresh();
-        const sdk = await driver.executeAsyncScript(
-            `const done = arguments[arguments.length - 1];
-             window.__HARNESS_WAIT_FOR_SDK__(20000).then(() => done(true), err => done(String(err)));`
-        );
+        const waitForSdk = async ms =>
+            driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 window.__HARNESS_WAIT_FOR_SDK__(${ms}).then(
+                    () => done(true),
+                    err => { window.__HARNESS_COLLECT_RESOURCES__(); done(String(err)); }
+                 );`
+            );
+        const sdk = await waitForSdk(20000);
         check(
-            "the page got chrome.cast from the extension (SDK redirect worked)",
+            "arm A: the page got chrome.cast through the production chain",
             sdk === true,
             String(sdk)
         );
+        if (sdk !== true) {
+            // Separate the two halves of the chain instead of guessing: B skips
+            // contentInitial (the src rewrite) and only needs the background
+            // redirect, C must never work at all.
+            const results = {};
+            for (const arm of ["B", "C"]) {
+                await driver.get(`${origin}/sender.html?arm=${arm}`);
+                results[arm] = await waitForSdk(8000);
+                const defined = await driver.executeScript(
+                    "return Boolean(window.chrome && window.chrome.cast);"
+                );
+                results[arm + "_chromeCastPresent"] = defined;
+            }
+            console.log(
+                "arm diagnostics:",
+                JSON.stringify(results),
+                "(A=full chain, B=background redirect only, C=unsupported URL control)"
+            );
+            check(
+                "arm B: the background redirect alone works (so the break is contentInitial)",
+                results.B === true,
+                JSON.stringify(results)
+            );
+            check(
+                "arm C: an unsupported SDK URL does not produce chrome.cast",
+                results.C_chromeCastPresent === false,
+                JSON.stringify(results)
+            );
+            // Back to the production arm's page for the rest of the flow.
+            await driver.get(`${origin}/sender.html?arm=A`);
+        }
         const initialized = await driver.executeAsyncScript(
             `const done = arguments[arguments.length - 1];
              window.__HARNESS_INITIALIZE__().then(() => done(true), err => done(String(err)));`
@@ -446,6 +654,25 @@ async function main() {
 
         await sleep(4000);
 
+        // The extension's own console: this is where a failed
+        // `registerContentScripts`, a rejected match pattern or a cast error
+        // would show up, and it is the only place that can explain a silently
+        // empty content-script registry.
+        for (const [label, file] of [
+            ["phase A", phaseAConsole],
+            ["phase B", phaseBConsole]
+        ]) {
+            if (!file || !fs.existsSync(file)) continue;
+            const lines = fs
+                .readFileSync(file, "utf8")
+                .split("\n")
+                .filter(line => /fx_cast|whitelist|registerContentScripts|Error|error/i.test(line));
+            console.log(`--- ${label} console (${lines.length} interesting lines) ---`);
+            for (const line of lines.slice(-25)) {
+                console.log("   |", line.slice(0, 220));
+            }
+        }
+
         // --- what the real relay did -----------------------------------------
         const connections = readNdjson(path.join(harnessDir, "spawns.ndjson"))
             .filter(entry => entry.event === undefined)
@@ -506,23 +733,39 @@ async function main() {
             )
         );
 
-        const deviceIds = [];
+        const discovered = [];
+        const actedOn = [];
+        const ACTION_SUBJECTS = new Set([
+            "bridge:sendMediaMessage",
+            "bridge:sendReceiverMessage",
+            "bridge:createCastSession",
+            "bridge:stopCastSession",
+            "bridge:rokuRequestConfirmationPoll"
+        ]);
         for (const conn of connections) {
             for (const message of [...conn.inbound, ...conn.outbound]) {
-                const data = message.message && message.message.data;
-                if (data && data.deviceId) deviceIds.push(data.deviceId);
+                const data = (message.message && message.message.data) || {};
+                if (data.deviceId) {
+                    discovered.push(data.deviceId);
+                    if (ACTION_SUBJECTS.has(String(message.subject))) {
+                        actedOn.push(data.deviceId);
+                    }
+                }
+                if (data.deviceInfo && data.deviceInfo.id) {
+                    discovered.push(data.deviceInfo.id);
+                }
             }
         }
+        const deviceIds = discovered;
         console.log(
             "deviceIds on the wire:",
             JSON.stringify([...new Set(deviceIds)])
         );
+        console.log("deviceIds acted on:", JSON.stringify([...new Set(actedOn)]));
         check(
-            "no LAN Roku was acted on (only the fake device)",
-            !deviceIds.some(
-                id => id && id.startsWith("roku-") && id !== FAKE_DEVICE_ID
-            ),
-            JSON.stringify([...new Set(deviceIds)])
+            "no command was sent to a non-fake device",
+            !actedOn.some(id => id && id !== FAKE_DEVICE_ID),
+            JSON.stringify([...new Set(actedOn)])
         );
         check(
             "the fake Roku received ECP traffic",
