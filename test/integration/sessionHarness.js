@@ -117,11 +117,13 @@ function parseArgs(argv) {
         keepProfile: false,
         extensionDir: path.join(repoRoot, "dist/extension"),
         phaseAOnly: false,
+        startupSynthesis: false,
         instrument: false
     };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--keep-profile") args.keepProfile = true;
         else if (argv[i] === "--phase-a-only") args.phaseAOnly = true;
+        else if (argv[i] === "--startup-synthesis") args.startupSynthesis = true;
         else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
         else if (argv[i] === "--instrument-content-initial")
             args.instrument = true;
@@ -1477,11 +1479,50 @@ async function main() {
         // 60s fallback fires (DEFERRED_CONSUME_FALLBACK_MS). This device is
         // pinned at IDLE and never requests the relay, so neither of the two
         // evidence paths can fire - the fallback is what must release it.
+        // The 60s wait only exists because the device is held at IDLE: an HLS DVR
+        // LOAD registers its media only when a consume signal arrives, and a
+        // device that never moves can only be released by
+        // DEFERRED_CONSUME_FALLBACK_MS. For everything except the startup
+        // synthesis itself, the device can simply start - the post-launch ECP
+        // evidence releases the gate within a poll, so a run takes seconds
+        // instead of minutes. `--startup-synthesis` keeps the slow path for the
+        // assertion that genuinely needs the device to stay idle.
         const readConnPre = pid => ({
             outbound: readNdjson(path.join(harnessDir, `conn-${pid}-out.ndjson`))
         });
-        await sleep(25000);
+        if (!args.startupSynthesis) {
+            await sleep(2500);
+            await post("/state", { playerState: "buffer", position: 1 });
+            console.log("fake roku advanced to buffer to release the consume gate");
+            const mediaDeadline = Date.now() + 25000;
+            let released = false;
+            while (Date.now() < mediaDeadline) {
+                const out = session
+                    ? readNdjson(path.join(harnessDir, `conn-${session.pid}-out.ndjson`))
+                    : [];
+                if (
+                    out.some(
+                        m =>
+                            m.subject === "main:rokuSessionMedia" &&
+                            markerOf(m.message.data.media) === HARNESS_MARKER
+                    )
+                ) {
+                    released = true;
+                    break;
+                }
+                await sleep(250);
+            }
+            check(
+                "the consume gate released from ECP evidence (no fallback wait)",
+                released,
+                "main:rokuSessionMedia did not appear within 25s of the device starting"
+            );
+            console.log("session media released after", ((Date.now() - loadStartedAt) / 1000).toFixed(1) + "s");
+            await sleep(1500);
+        }
+        await sleep(args.startupSynthesis ? 25000 : 0);
         const midSession = session ? readConnPre(session.pid) : { outbound: [] };
+        if (args.startupSynthesis) {
         check(
             "before the fallback: no session media was published",
             !midSession.outbound.some(
@@ -1492,10 +1533,13 @@ async function main() {
             ),
             JSON.stringify(midSession.outbound.map(m => m.subject).slice(0, 8))
         );
-        console.log(
-            "waiting out the 60s deferred-consume fallback (no consume signal: device pinned at IDLE)"
-        );
-        await sleep(60000);
+        }
+        if (args.startupSynthesis) {
+            console.log(
+                "waiting out the 60s deferred-consume fallback (device pinned at IDLE)"
+            );
+        }
+        await sleep(args.startupSynthesis ? 60000 : 0);
 
         const readConn = pid => ({
             inbound: readNdjson(path.join(harnessDir, `conn-${pid}-in.ndjson`)),
@@ -1668,6 +1712,7 @@ async function main() {
                 "session media debug events:",
                 JSON.stringify(debugEvents.slice(-4))
             );
+            if (args.startupSynthesis) {
             check(
                 "the publication came from the deferred-consume fallback",
                 debugEvents.some(
@@ -1677,6 +1722,7 @@ async function main() {
                 ),
                 JSON.stringify(debugEvents.slice(-4))
             );
+            }
         }
 
         // Hop 2: the extension relayed the generation and the media to discovery.
@@ -1754,6 +1800,7 @@ async function main() {
                 m.message.data.provenance.source === "startup-synthetic" &&
                 markerOf(m.message.data.status.media) === HARNESS_MARKER
         );
+        if (args.startupSynthesis) {
         check(
             "hop 3: the media status is startup-synthetic BUFFERING with the session metadata",
             Boolean(
@@ -1771,6 +1818,11 @@ async function main() {
                 }
             )
         );
+        } else {
+            console.log(
+                "hop 3 (startup synthesis) skipped in fast mode: the device was advanced out of idle on purpose"
+            );
+        }
 
         // Hop 4: the confirmation channel still sees the real, idle device.
         const observation = discoveryOutbound.find(
