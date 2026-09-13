@@ -61,6 +61,9 @@ const firefox = require(path.join(
  * cached tooling, not run state, and a per-run directory meant the harness
  * re-downloaded geckodriver (or looked for it in an empty directory).
  */
+/** Servers the harness started itself; `driver.quit()` does not stop them. */
+const ownedGeckodrivers = [];
+
 const SELENIUM_CACHE = path.join(
     os.tmpdir(),
     "fx-harness-selenium-cache"
@@ -108,9 +111,15 @@ function readNdjson(file) {
 }
 
 function parseArgs(argv) {
-    const args = { keepProfile: false };
+    const args = {
+        keepProfile: false,
+        extensionDir: path.join(repoRoot, "dist/extension"),
+        phaseAOnly: false
+    };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--keep-profile") args.keepProfile = true;
+        else if (argv[i] === "--phase-a-only") args.phaseAOnly = true;
+        else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
         else throw new Error(`sessionHarness: unknown argument ${argv[i]}`);
     }
     return args;
@@ -138,7 +147,7 @@ function startSenderServer() {
     });
 }
 
-function makeProfile(harnessDir) {
+function makeProfile(harnessDir, extensionDir) {
     const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-sess-"));
     fs.mkdirSync(path.join(profileDir, "extensions"), { recursive: true });
 
@@ -172,7 +181,7 @@ function makeProfile(harnessDir) {
 
     const xpiPath = path.join(harnessDir, "extension.xpi");
     const zipped = spawnSync("zip", ["-r", "-X", "-q", xpiPath, "."], {
-        cwd: path.join(repoRoot, "dist/extension")
+        cwd: extensionDir
     });
     if (zipped.status !== 0) throw new Error("zip failed: " + zipped.stderr);
     fs.copyFileSync(
@@ -219,6 +228,7 @@ async function startFirefox(options, label, harnessDir) {
     const gecko = spawn(geckodriverPath, [`--port=${port}`, "-v"], {
         stdio: ["ignore", "pipe", "pipe"]
     });
+    ownedGeckodrivers.push(gecko);
     gecko.stdout.pipe(logStream);
     gecko.stderr.pipe(logStream);
     process.env[`GECKO_${label}`] = String(gecko.pid);
@@ -349,7 +359,7 @@ async function main() {
     const { server, origin } = await startSenderServer();
     console.log("sender origin:", origin);
 
-    const profileDir = makeProfile(harnessDir);
+    const profileDir = makeProfile(harnessDir, args.extensionDir);
     const firefoxPath = [
         "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
         "/Applications/Firefox.app/Contents/MacOS/firefox"
@@ -366,6 +376,7 @@ async function main() {
     process.env.MOZ_REMOTE_ALLOW_SYSTEM_ACCESS = "1";
 
     let driver;
+    let phaseAOnlyDone = false;
     try {
         // --- phase A: whitelist, then restart ---------------------------------
         let started = await startFirefox(options, "phase A: whitelist", harnessDir);
@@ -453,15 +464,81 @@ async function main() {
         );
         // The registration must actually cover the test origin, or the SDK src
         // rewrite (and therefore the whole session flow) cannot happen.
+        // The id alternates between -a and -b by design (that is what makes the
+        // replacement atomic), so match the family rather than one id.
         const whitelistEntry = (whitelisted && whitelisted.after
             ? whitelisted.after
             : []
-        ).find(script => script.id === "whitelist-content");
+        ).find(script => /^whitelist-content(-[ab])?$/.test(script.id));
         check(
             "the extension re-registered its whitelist content script",
             Boolean(whitelistEntry && whitelistEntry.matches.length > 0),
             JSON.stringify(whitelisted && whitelisted.after)
         );
+
+        // A user pattern that Firefox rejects must not take the whole
+        // registration down. The old code unregistered the live script and then
+        // handed the entire list to one register call, so a single invalid
+        // pattern (a port is the easy way to write one) left the extension with
+        // NO content script at all - for every site, including the defaults.
+        const withBad = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             (async () => {
+                try {
+                    const stored = await browser.storage.sync.get("options");
+                    const options = stored.options || {};
+                    const list = Array.isArray(options.siteWhitelist)
+                        ? options.siteWhitelist.slice()
+                        : [];
+                    // An invalid pattern: match patterns do not carry ports.
+                    const bad = "http://127.0.0.1:1234/*";
+                    if (!list.some(entry => entry.pattern === bad)) {
+                        list.push({ pattern: bad, isEnabled: true });
+                    }
+                    options.siteWhitelist = list;
+                    await browser.storage.sync.set({ options });
+                    await new Promise(r => setTimeout(r, 2000));
+                    const scripts = await browser.scripting.getRegisteredContentScripts();
+                    done(
+                        scripts
+                            .filter(script => /whitelist-content/.test(script.id))
+                            .map(script => ({ id: script.id, matches: script.matches }))
+                    );
+                } catch (err) {
+                    done({ error: String(err) });
+                }
+             })();`
+        );
+        console.log(
+            "whitelist scripts after adding an INVALID pattern:",
+            JSON.stringify(withBad)
+        );
+        const surviving = Array.isArray(withBad)
+            ? withBad.flatMap(script => script.matches || [])
+            : [];
+        check(
+            "an invalid user pattern does not empty the whitelist registration",
+            Array.isArray(withBad) &&
+                withBad.length > 0 &&
+                surviving.length > 0,
+            JSON.stringify(withBad)
+        );
+        check(
+            "the legal patterns survived the invalid one",
+            surviving.includes("https://www.netflix.com/*") &&
+                surviving.includes("http://127.0.0.1/*"),
+            JSON.stringify(surviving)
+        );
+        check(
+            "the invalid pattern itself was not registered",
+            !surviving.includes("http://127.0.0.1:1234/*"),
+            JSON.stringify(surviving)
+        );
+
+        if (args.phaseAOnly) {
+            console.log("(--phase-a-only: stopping after the whitelist checks)");
+            phaseAOnlyDone = true;
+        }
         await driver.quit();
         driver = undefined;
         console.log(
@@ -470,6 +547,10 @@ async function main() {
         await sleep(1500);
 
         // --- phase B: the real run -------------------------------------------
+        if (args.phaseAOnly) {
+            console.log("(--phase-a-only: skipping phase B)");
+            throw { phaseAOnly: true };
+        }
         started = await startFirefox(options, "phase B: session", harnessDir);
         driver = started.driver;
         const phaseBConsole = started.consoleLog;
@@ -772,8 +853,18 @@ async function main() {
             readNdjson(path.join(rokuDir, "fake-roku-requests.ndjson")).length >
                 0
         );
+    } catch (err) {
+        if (!(err && err.phaseAOnly)) throw err;
     } finally {
         if (driver) await driver.quit().catch(() => {});
+        // Owned servers must be stopped explicitly or the process never exits.
+        for (const gecko of ownedGeckodrivers) {
+            try {
+                gecko.kill("SIGTERM");
+            } catch {
+                // Already gone.
+            }
+        }
         roku.kill("SIGTERM");
         server.close();
         if (args.keepProfile) console.log("profile kept at:", profileDir);
