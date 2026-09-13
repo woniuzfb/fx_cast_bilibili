@@ -19,10 +19,9 @@
  *
  * Environment:
  *   FX_HARNESS_DIR  directory for spawns.ndjson and conn-<pid>-*.ndjson
- *   FX_HOST_ENTRY   path to the bridge entry to exec (default: the dev build's
- *                   launcher script, dist/bridge/fx_cast_bilibili_bridge.sh,
- *                   which is what the repo's own `npm run build:bridge` emits
- *                   and which sets NODE_PATH for the real entry itself)
+ *   FX_HOST_ENTRY   path to the bridge entry to exec; the harness sets it to
+ *                   its OWN private build (never dist/, and never the installed
+ *                   bridge). Required in harness mode.
  *   FX_HOST_NODE_PATH  NODE_PATH for the child, when the entry needs one
  */
 
@@ -35,20 +34,74 @@ const { FrameReader } = require("./nativeProtocol");
 // Firefox passes its own environment to native hosts, so runFirefox.js exports
 // this before launching the browser. The fixed fallback keeps a manually
 // launched browser tracing somewhere predictable instead of failing silently.
+const repoRoot = path.resolve(__dirname, "../..");
+
+/**
+ * Transparent pass-through when NO harness run is active.
+ *
+ * A leftover harness manifest (a SIGKILLed run cannot clean up) used to point at
+ * a wrapper whose only entry was the repo's dev build, so the user's browser
+ * found no bridge at all. The harness now installs its manifest under its OWN
+ * host name, which already removes that risk; this branch is the second line of
+ * defence for a leftover under either name.
+ *
+ * It is deliberately limited to the layout this repo installs on macOS:
+ * /Library/Application Support/fx_cast_bilibili/<executable>. Other platforms'
+ * install layouts are not guessed here - on them a leftover manifest under the
+ * harness name simply finds no bridge (nothing production-facing depends on
+ * this path, because production never requests the harness name).
+ */
+const hostedByHarness = Boolean(process.env.FX_HARNESS_DIR);
+if (!hostedByHarness && !process.env.FX_HOST_ENTRY) {
+    const candidates = [
+        "/Library/Application Support/fx_cast_bilibili/fx_cast_bilibili_bridge"
+    ];
+    const installed = candidates.find(candidate => fs.existsSync(candidate));
+    if (!installed) {
+        process.stderr.write(
+            "fx_cast bridge: no installed bridge found (" +
+                candidates.join(", ") +
+                "); install the bridge or run it from a harness that sets FX_HARNESS_DIR\n"
+        );
+        process.exit(1);
+    }
+    const passthrough = spawn(installed, [], { stdio: "inherit" });
+    passthrough.on("error", err => {
+        process.stderr.write(
+            `fx_cast bridge: cannot start ${installed}: ${err.message}\n`
+        );
+        process.exit(1);
+    });
+    passthrough.on("exit", (code, signal) =>
+        process.exit(code === null ? (signal ? 1 : 0) : code)
+    );
+    // Top-level `return` is legal in CommonJS: the module body is a function.
+    // Everything below is the harness-only tracing wrapper.
+    return;
+}
+
 const harnessDir =
     process.env.FX_HARNESS_DIR ||
     path.join(require("os").tmpdir(), "fx-cast-harness");
 fs.mkdirSync(harnessDir, { recursive: true });
 
-const repoRoot = path.resolve(__dirname, "../..");
-const entry =
-    process.env.FX_HOST_ENTRY ||
-    path.join(repoRoot, "dist/bridge/fx_cast_bilibili_bridge.sh");
+// Set by the harness to its OWN private bridge build. There is deliberately no
+// dist/ default: the harness must not read or write dist/, which the developer's
+// packaging replaces with an artifact.
+const entry = process.env.FX_HOST_ENTRY;
 const nodePath =
     process.env.FX_HOST_NODE_PATH || path.join(repoRoot, "bridge/node_modules");
 
 const pid = process.pid;
 const at = Date.now();
+
+if (!entry) {
+    process.stderr.write(
+        "fx_cast harness wrapper: FX_HOST_ENTRY is not set; this wrapper is only " +
+            "meaningful inside a harness run (see sessionHarness.js)\n"
+    );
+    process.exit(1);
+}
 
 /** Append one NDJSON record, synchronously: a killed host must not lose it. */
 function record(file, value) {

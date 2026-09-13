@@ -48,7 +48,41 @@ const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 
 const repoRoot = path.resolve(__dirname, "../..");
-const { defaultName, install } = require("./installManifest");
+const {
+    install,
+    snapshot: snapshotUserManifest,
+    restore: restoreUserManifest
+} = require("./installManifest");
+
+/**
+ * The user-level native manifest this harness has to install for Firefox to
+ * spawn the WRAPPER, and the state it had before. That directory is read by the
+ * user's normal browser too, and a harness manifest left behind shadows a
+ * system-level bridge install - so a killed harness run must never be able to
+ * break normal usage:
+ *
+ *  - every exit path restores what was here before (`restoreManifest`),
+ *  - `process.on("exit")` and the signal handlers cover the honest ones,
+ *  - a SIGKILL cannot run them, so `hostWrapper.js` ALSO passes through to the
+ *    installed bridge when no harness run is active, and a later restore()
+ *    treats a leftover harness manifest as "there was nothing here before".
+ */
+let userManifestState;
+let manifestRestored = false;
+function restoreManifest(reason) {
+    if (manifestRestored || !userManifestState) return;
+    manifestRestored = true;
+    try {
+        for (const line of restoreUserManifest(userManifestState))
+            console.log(`native manifest (${reason}):`, line);
+    } catch (err) {
+        console.error(
+            "native manifest restore FAILED:",
+            String(err),
+            "- run: node test/integration/installManifest.js --remove"
+        );
+    }
+}
 
 const webdriver = require(path.join(repoRoot, "node_modules/selenium-webdriver"));
 const firefox = require(path.join(
@@ -73,8 +107,26 @@ const SELENIUM_CACHE = path.join(
 
 const FAKE_DEVICE_ID = "roku-HARNESS0001";
 const FAKE_DEVICE_NAME = "Harness Roku";
-const EXTENSION_ID = require(path.join(repoRoot, "dist/bridge/config.json"))
-    .extensionId;
+/**
+ * Everything the harness reads about the product comes from the SOURCE tree,
+ * never from dist/: dist/ belongs to the developer's own build and packaging
+ * (`npm run package:extension` replaces it with an artifact), and a harness that
+ * depended on it both broke when that happened and tempted the harness to write
+ * there.
+ */
+const bridgeConfig = require(path.join(repoRoot, "bridge/config.json"));
+const EXTENSION_ID = bridgeConfig.extensionId;
+/**
+ * The harness asks for its OWN native messaging host name, and builds an
+ * extension copy that requests it, so the manifest it installs cannot shadow a
+ * real bridge install - the real name is never touched, and a harness run and a
+ * normal browser session can be used at the same time.
+ */
+const HARNESS_HOST_NAME = `${bridgeConfig.applicationName}_harness`;
+const HARNESS_BRIDGE_NAME = `${bridgeConfig.applicationExecutableName}_harness`;
+/** The fake device's SSDP responder port: NOT 1900, so the developer's own
+ *  bridge (which searches on 1900) can never discover the harness's fake Roku. */
+const HARNESS_SSDP_PORT = 19009;
 /** Pinned so the harness can address the extension's own pages before launch. */
 const EXTENSION_UUID = "8a1f3c2e-9d4b-4c7a-9f21-2b6c5d8e0a13";
 
@@ -115,7 +167,10 @@ function readNdjson(file) {
 function parseArgs(argv) {
     const args = {
         keepProfile: false,
-        extensionDir: path.join(repoRoot, "dist/extension"),
+        // No default: the harness builds its own copy (see main()) so that it
+        // never reads or writes dist/, which the developer's own build and
+        // packaging own. `--extension-dir` overrides it for controls.
+        extensionDir: undefined,
         phaseAOnly: false,
         startupSynthesis: false,
         mediaBeforeGeneration: false,
@@ -438,7 +493,15 @@ async function main() {
     const expectReleased = args.expectReleased;
     const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-s1-"));
     console.log("harness dir:", harnessDir);
-    install({ name: defaultName });
+    // Snapshot BEFORE installing: whatever the user had here (usually nothing,
+    // since their bridge is installed system-wide) is put back on exit.
+    userManifestState = snapshotUserManifest({ name: HARNESS_HOST_NAME });
+    if (userManifestState.existed && userManifestState.wasHarnessLeftover) {
+        console.log(
+            "native manifest: found a leftover harness manifest from a killed run; it will be removed rather than restored"
+        );
+    }
+    install({ name: HARNESS_HOST_NAME });
     // Firefox passes its environment to native hosts, so the wrappers trace
     // here. Forgetting this does not fail loudly - the wrappers fall back to a
     // shared temp directory, every trace assertion then reads an empty
@@ -450,7 +513,13 @@ async function main() {
     fs.mkdirSync(rokuDir, { recursive: true });
     const roku = spawn(
         process.execPath,
-        [path.join(__dirname, "fakeRoku.js"), "--harness-dir", rokuDir],
+        [
+            path.join(__dirname, "fakeRoku.js"),
+            "--harness-dir",
+            rokuDir,
+            "--ssdp-port",
+            String(HARNESS_SSDP_PORT)
+        ],
         { stdio: ["ignore", "pipe", "pipe"] }
     );
     ownedChildren.push(roku);
@@ -479,6 +548,72 @@ async function main() {
 
     const { server, origin } = await startSenderServer();
     console.log("sender origin:", origin);
+
+    // --- the harness's OWN builds, outside dist/ ---------------------------
+    //
+    // dist/ is the developer's (and their packaging replaces it with an
+    // artifact), so the harness builds private copies into its own directory:
+    // the extension with its own host name, and the bridge whose launcher the
+    // wrapper execs. Neither the repo's dist/ nor the installed bridge is read
+    // or written.
+    const harnessBuildDir = path.join(harnessDir, "build");
+    const buildInto = (label, script, outDir, extra) => {
+        const built = spawnSync(
+            process.execPath,
+            [script, "--out-dir", outDir, ...(extra || [])],
+            { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] }
+        );
+        if (built.status !== 0) {
+            throw new Error(
+                `sessionHarness: ${label} build failed: ` +
+                    String(built.stderr || built.stdout).slice(-600)
+            );
+        }
+        console.log(`harness ${label} build:`, outDir);
+    };
+    buildInto(
+        "extension",
+        path.join(repoRoot, "extension/bin/build.js"),
+        path.join(harnessBuildDir, "extension"),
+        ["--bridge-name", HARNESS_HOST_NAME]
+    );
+    buildInto(
+        "bridge",
+        path.join(repoRoot, "bridge/bin/build.js"),
+        path.join(harnessBuildDir, "bridge")
+    );
+    // Isolate device discovery: the harness bridge searches on its own SSDP
+    // port, so the developer's bridge (1900) never sees the fake device. This
+    // patches the harness's private copy only.
+    {
+        const browser = path.join(
+            harnessBuildDir,
+            "bridge/src/bridge/components/roku/deviceBrowser.js"
+        );
+        const text = fs.readFileSync(browser, "utf8");
+        const marker = "const SSDP_PORT = 1900;";
+        if (!text.includes(marker)) {
+            throw new Error(
+                `sessionHarness: cannot isolate SSDP in ${browser} (marker not found)`
+            );
+        }
+        fs.writeFileSync(
+            browser,
+            text.replace(marker, `const SSDP_PORT = ${HARNESS_SSDP_PORT};`)
+        );
+        console.log(
+            `harness bridge: SSDP isolated to port ${HARNESS_SSDP_PORT} (the repo's build and the installed bridge keep 1900)`
+        );
+    }
+    // What the wrapper execs when a harness run launches it, and what Firefox
+    // loads: both are the harness's private copies.
+    process.env.FX_HOST_ENTRY = path.join(
+        harnessBuildDir,
+        "bridge/fx_cast_bilibili_bridge.sh"
+    );
+    if (!args.extensionDir) {
+        args.extensionDir = path.join(harnessBuildDir, "extension");
+    }
 
     // --- Stage 0: the artifact must be the code under review --------------
     //
@@ -3960,6 +4095,7 @@ async function main() {
     } catch (err) {
         if (!(err && err.phaseAOnly)) throw err;
     } finally {
+        restoreManifest("run finished");
         if (driver) await driver.quit().catch(() => {});
         // Owned servers must be stopped explicitly or the process never exits.
         for (const gecko of ownedGeckodrivers) {
@@ -3985,6 +4121,14 @@ main().catch(err => {
     process.exit(1);
 });
 
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(signal, () => {
+        // A killed run must not leave the user's bridge shadowed.
+        restoreManifest(signal);
+        process.exit(1);
+    });
+}
+
 /**
  * Nothing may outlive the run: an abandoned fake Roku holds port 8060, which
  * makes the NEXT run fail with "the fake Roku did not start (port 8060 busy?)"
@@ -3993,6 +4137,9 @@ main().catch(err => {
  * (Selenium does not stop a server it did not start), so it reaps both.
  */
 process.on("exit", () => {
+    // Covers every path that reaches process.exit(), including ones that never
+    // run the try/finally above.
+    restoreManifest("exit");
     for (const gecko of ownedGeckodrivers) {
         try {
             gecko.kill("SIGKILL");

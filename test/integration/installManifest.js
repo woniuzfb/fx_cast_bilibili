@@ -26,6 +26,14 @@
  * own environment to native hosts, so runFirefox.js exports FX_HARNESS_DIR when
  * it launches the browser (see hostWrapper.js for the fallback).
  *
+ * Whatever is installed here is TEMPORARY: `sessionHarness.js` snapshots this
+ * path before installing and restores it on every exit path (including signals),
+ * because a manifest left behind shadows the user's own system-level bridge
+ * install and breaks their normal browser usage. Killed runs cannot restore, so
+ * `hostWrapper.js` also passes through to the installed bridge when no harness
+ * run is active, and `restore()` treats a leftover harness manifest as "there
+ * was nothing here before".
+ *
  * Usage:
  *   node test/integration/installManifest.js [--name <host name>] [--remove]
  */
@@ -35,7 +43,29 @@ const os = require("os");
 const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "../..");
-const bridgeConfig = require(path.join(repoRoot, "dist/bridge/config.json"));
+
+/**
+ * The host name, read from the bridge SOURCE (`bridge/config.json`). Never from
+ * dist/: that tree belongs to the developer's build and packaging, and this
+ * module is also the emergency cleanup command - it must not be the thing that
+ * crashes when dist/ is empty.
+ */
+const bridgeConfig = (() => {
+    for (const candidate of [
+        // The SOURCE only: the harness must never depend on dist/, which the
+        // developer's own build and packaging own (and replace with artifacts).
+        path.join(repoRoot, "bridge/config.json")
+    ]) {
+        try {
+            return require(candidate);
+        } catch {
+            // Try the next one.
+        }
+    }
+    throw new Error(
+        "installManifest: no bridge/config.json found (it is part of the source tree)"
+    );
+})();
 const defaultName = bridgeConfig.applicationName;
 
 /** The per-user directory Mozilla reads, by platform. */
@@ -132,6 +162,74 @@ function remove({ name }) {
     return [manifestPath];
 }
 
+/**
+ * True when the user-level manifest on disk is the HARNESS's, not the user's.
+ *
+ * A run that is SIGKILLed cannot restore anything, so the next run has to tell
+ * "the user had their own user-level manifest here" from "this is my own
+ * leftover". Only the path tells them apart.
+ */
+function isHarnessManifest(contents) {
+    try {
+        return String(JSON.parse(contents).path || "").endsWith(
+            path.join("test", "integration", "hostWrapper.js")
+        );
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Records the user-level manifest as it is BEFORE the harness installs its own,
+ * so it can be put back exactly as it was.
+ *
+ * The harness must never leave this machine different from how it found it:
+ * this directory is read by the user's normal browser too, and a manifest left
+ * behind here shadows a system-level bridge install (which is exactly how a
+ * killed harness run breaks the user's bridge).
+ */
+function snapshot({ name }) {
+    const manifestPath = path.join(userManifestDir(), `${name}.json`);
+    if (!fs.existsSync(manifestPath)) {
+        return { manifestPath, existed: false, wasHarnessLeftover: false };
+    }
+    const contents = fs.readFileSync(manifestPath, "utf8");
+    const wasHarnessLeftover = isHarnessManifest(contents);
+    return { manifestPath, existed: true, contents, wasHarnessLeftover };
+}
+
+/**
+ * Puts the user-level manifest back: the user's own file if there was one, and
+ * nothing at all if there was not (a harness leftover counts as "nothing", so a
+ * previous killed run cannot keep shadowing the user's install).
+ *
+ * Synchronous on purpose: this also runs from `process.on("exit")`.
+ */
+function restore(snapshotState) {
+    if (!snapshotState) return [];
+    const { manifestPath, existed, contents, wasHarnessLeftover } =
+        snapshotState;
+    const keepInstalled = existed && !wasHarnessLeftover;
+    const current = fs.existsSync(manifestPath)
+        ? fs.readFileSync(manifestPath, "utf8")
+        : undefined;
+
+    if (!keepInstalled) {
+        // Mine, and there was nothing of the user's here before: remove it.
+        if (current === undefined || isHarnessManifest(current)) {
+            if (current !== undefined) fs.rmSync(manifestPath);
+            return [`removed ${manifestPath}`];
+        }
+        // Something else replaced it meanwhile; leave that alone.
+        return [`left ${manifestPath} alone (not the harness manifest any more)`];
+    }
+
+    if (current === contents) return [`kept ${manifestPath} unchanged`];
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    fs.writeFileSync(manifestPath, contents);
+    return [`restored ${manifestPath}`];
+}
+
 if (require.main === module) {
     const args = parseArgs(process.argv.slice(2));
     if (args.remove) {
@@ -153,6 +251,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+    snapshot,
+    restore,
+    isHarnessManifest,
     install,
     remove,
     userManifestDir,

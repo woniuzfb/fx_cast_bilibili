@@ -20,6 +20,86 @@ Nothing here changes production code. The harness only observes.
 | `fakeRoku.js` | SSDP + ECP are production discovery paths; a stub inside the bridge would skip them. |
 | The dev build (`dist/bridge/…`) | Built from the working tree by `npm run build:bridge`, so the harness tests the current source, not an installed binary. |
 
+## Isolation: the harness never touches your build, your bridge or your browser
+
+The harness is designed to run *while* you keep using the extension normally:
+
+| Resource | What the harness does |
+| --- | --- |
+| `dist/` (your build + packaging output) | Never read, never written. The harness builds its OWN copies into its temp dir: `extension/bin/build.js --out-dir …` and `bridge/bin/build.js --out-dir …`. Defaults are unchanged, so your `npm run build:*` behaves exactly as before. |
+| Native messaging manifest | Installs `fx_cast_bilibili_bridge_harness.json` - its own name - so your `fx_cast_bilibili_bridge.json` (system-level from the .pkg, or your own user-level one) is never shadowed and never modified. Restored/removed on every exit path. |
+| Extension it tests | A private build that requests that harness host name, loaded into its own temporary Firefox profile. Your installed extension and profile are untouched. |
+| The installed bridge binary | Never exec'd and never replaced: the wrapper execs the harness's private bridge build. |
+| Device discovery (SSDP) | The harness's private bridge searches on port **19009** and its fake Roku advertises there, so your bridge (1900) can never discover "Harness Roku" - and a real Roku on your LAN is never confused with it. |
+
+Verified end to end: `dist/` is byte-identical before and after a run, the
+real-name manifest count stays 0, the harness-name manifest is installed for the
+run and removed afterwards, and `--auto-cast-fixed` still passes 57/57. The
+manifests are also covered by a fake-HOME test for all three cases (nothing
+before / a user manifest before / a harness leftover before), and
+`selfTest.js` asserts that a private `--out-dir` bridge build is self-contained -
+its manifest points at the launcher inside that directory, not back into `dist/`.
+
+Limits of this isolation, stated rather than implied:
+
+- **One harness run at a time.** The fake Roku's ECP port (8060, on 127.0.0.1) and
+  the isolated SSDP port (19009) are fixed, so two concurrent runs would fight
+  over them. Isolation here means harness vs. production, not harness vs. harness.
+- The wrapper's pass-through (a leftover manifest, no harness run active) knows
+  only the macOS install layout `/Library/Application Support/fx_cast_bilibili/`.
+  On other platforms it finds no bridge, which is harmless: production never asks
+  for the harness host name.
+### What a harness run cleans up, and what it does not
+
+| | Behaviour |
+| --- | --- |
+| `dist/`, your build | Never read, never written (private builds in the harness dir). |
+| Real native host name, installed bridge | Never touched: the harness asks for `<name>_harness` and execs its own bridge build. |
+| Harness manifest (`…_harness.json`) | Removed on normal exit, on `--phase-a-only` bail-out, on a thrown assertion, on `main().catch()`, and on SIGINT/SIGTERM/SIGHUP; a leftover from a previous killed run is deleted rather than restored. |
+| Firefox profile | Removed by default (`--keep-profile` keeps it on purpose). |
+| Children the script owns (Firefox, fake Roku, geckodriver) | Registered on spawn and killed on exit, so an early throw cannot leave a browser or a fake Roku holding port 8060. `runFirefox.js` uses the same ownership model; `--simulate-early-failure` exercises it (verified: exit 1, no fake Roku, 8060 free, no new profile). |
+| Harness working directory (`/tmp/fx-harness-*`: private builds, traces, browser and fake-Roku logs) | **Kept on purpose**, for auditing a failed run; the path is printed at startup. Delete it yourself or let your tmp cleanup policy do it. |
+| `kill -9` of the harness process | Cannot run any JavaScript cleanup. The isolated host name still protects normal usage, but orphan children, the harness manifest, the profile and the working directory can be left behind; the next run removes a leftover manifest it recognises as its own. |
+
+One harness run at a time: the fake Roku's ECP port (8060 on 127.0.0.1) and the
+isolated SSDP port are fixed, and the harness manifest name is shared, so two
+concurrent runs would fight over all three. Isolation here means harness vs.
+production, not harness vs. harness.
+
+- Historically the harness used the REAL host name and had to restore the
+  user-level manifest afterwards, because a left-over one shadowed a system-level
+  bridge install and broke normal usage. That shadowing is now impossible by
+  construction (own host name); the snapshot/restore stays so no test artifact is
+  left behind and so a user's own manifest under the harness name is preserved.
+
+## The harness must not break normal usage
+
+The harness installs a per-user native-messaging manifest, because that is the
+only way to make Firefox spawn the WRAPPER (and therefore see both connections).
+That directory is read by the user's normal browser too, and a manifest left
+there shadows a system-level bridge install - which is exactly what broke a real
+bridge install once. Three things keep that from happening again:
+
+1. `sessionHarness.js` snapshots the user-level manifest BEFORE installing and
+   restores it on every exit path: the run's `finally`, `process.on("exit")`, and
+   SIGINT/SIGTERM/SIGHUP. The restore puts the user's own manifest back verbatim,
+   or removes the file if there was nothing there before - and a leftover HARNESS
+   manifest counts as "nothing", so a previous killed run cannot keep shadowing.
+2. A SIGKILL cannot run any of that, so `hostWrapper.js` passes straight through
+   to the INSTALLED bridge when `FX_HARNESS_DIR` is not set (no tracing, no
+   files, inherited stdio). A stale manifest is therefore harmless: the browser
+   still gets the real bridge.
+3. `node test/integration/installManifest.js --remove` remains the manual
+   cleanup, and it no longer needs the dev build to exist (the host name falls
+   back to `bridge/config.json`), because `npm run package:bridge` replaces
+   `dist/bridge` with just the packaged artifact.
+
+Verified without Firefox: snapshot/restore in a fake HOME for the three cases
+(nothing before, a user manifest before, a harness leftover before), and the
+wrapper both ways - transparent (no trace files, child is
+`/Library/Application Support/fx_cast_bilibili/fx_cast_bilibili_bridge`) and
+under a harness run (traces written, dev build exec'd).
+
 ## Reconnaissance findings (what this environment supports)
 
 1. **Firefox**: Developer Edition is installed and is required — Release ignores
