@@ -611,9 +611,13 @@ async function main() {
                     " const adv = changes.__fxHarnessAdvanceGenerationRequest && changes.__fxHarnessAdvanceGenerationRequest.newValue;" +
                     " if (adv && adv.runId === runId && adv.deviceId && !self.__fxHarnessHandledRequests[adv.requestId]) {" +
                     " self.__fxHarnessHandledRequests[adv.requestId] = true;" +
+                    " const readGen = () => { try { const id = (typeof currentRokuMediaIdentity === 'function') ? currentRokuMediaIdentity(adv.deviceId) : null; return id ? id.loadGeneration : null; } catch (e) { return null; } };" +
+                    " const beforeGeneration = readGen();" +
+                    " if (beforeGeneration !== adv.expectedCurrentGeneration) {" +
+                    " void browser.storage.local.set({ __fxHarnessAdvanceFailed: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, expected: adv.expectedCurrentGeneration, actual: beforeGeneration, at: Date.now() } }); }" +
+                    " else {" +
                     " try { self.beginRokuMediaLoad(adv.deviceId); } catch (e) {}" +
-                    " let newGeneration = null; try { const id = (typeof currentRokuMediaIdentity === 'function') ? currentRokuMediaIdentity(adv.deviceId) : null; newGeneration = id ? id.loadGeneration : null; } catch (e) {}" +
-                    " void browser.storage.local.set({ __fxHarnessGenerationAdvanced: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, previousGeneration: adv.expectedCurrentGeneration, newGeneration: newGeneration, at: Date.now() } }); }" +
+                    " void browser.storage.local.set({ __fxHarnessGenerationAdvanced: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, previousGeneration: beforeGeneration, newGeneration: readGen(), at: Date.now() } }); } }" +
                     " const rep = changes.__fxHarnessReplayMediaRequest && changes.__fxHarnessReplayMediaRequest.newValue;" +
                     " if (rep && rep.runId === runId && rep.deviceId && !self.__fxHarnessHandledRequests[rep.requestId]) {" +
                     " self.__fxHarnessHandledRequests[rep.requestId] = true;" +
@@ -2360,11 +2364,19 @@ async function main() {
             const afterAdvanceIn = discoveryConnectionsNow.flatMap(conn =>
                 readNdjson(path.join(harnessDir, `conn-${conn.pid}-in.ndjson`))
             );
+            // The generation that was actually observed after the advance - never
+            // N+1 computed by the harness: if a legal extra advance happened, the
+            // assertions and the media that follows must use what is real.
+            const actualNextGeneration =
+                advanced && Number.isFinite(advanced.newGeneration)
+                    ? advanced.newGeneration
+                    : Number(generationN) + 1;
             const generationNPlus1 = afterAdvanceIn.find(
                 m =>
                     m.subject === "bridge:rokuSetLoadGeneration" &&
                     m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    Number(m.message.data.loadGeneration) > Number(generationN) &&
+                    Number(m.message.data.loadGeneration) ===
+                        Number(actualNextGeneration) &&
                     (!advanced || m.at >= advanced.at)
             );
             check(
@@ -2385,7 +2397,8 @@ async function main() {
             const mediaNPlus1Yet = afterAdvanceIn.find(
                 m =>
                     m.subject === "bridge:rokuSetSessionMedia" &&
-                    Number(m.message.data.loadGeneration) > Number(generationN)
+                    Number(m.message.data.loadGeneration) ===
+                        Number(actualNextGeneration)
             );
             check(
                 "stage3-3 C2: no N+1 media has arrived yet (retirement is not a swap)",
@@ -2487,7 +2500,7 @@ async function main() {
                         runId: ${JSON.stringify(diagnosticRunId)},
                         requestId: "replay-new-" + Date.now(),
                         deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
-                        loadGeneration: ${Number(generationN) + 1},
+                        loadGeneration: ${Number(actualNextGeneration)},
                         ownerId: ${JSON.stringify(ownerN || "")},
                         media: ${JSON.stringify(mediaNPlus1 || null)}
                     }
