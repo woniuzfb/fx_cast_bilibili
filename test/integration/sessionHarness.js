@@ -1493,22 +1493,26 @@ async function main() {
                 .then(v => done(v), err => done({ error: String(err) }));`
         );
         const began = gateMarkers && gateMarkers.__fxHarnessLoadGenerationBegan;
-        const pathBWasTaken = !pathA || !began;
+        // One predicate, used by both the assertion and the skip decision: a
+        // marker with the wrong runId or device would otherwise assert red while
+        // Stage 2 carried on.
+        const gateBOk = Boolean(
+            began &&
+                began.runId === diagnosticRunId &&
+                began.deviceId === FAKE_DEVICE_ID &&
+                Number.isFinite(began.loadGeneration)
+        );
+        const pathBWasTaken = !pathA || !gateBOk;
         check(
             "Gate B: a load generation was created for the fake device",
-            Boolean(
-                began &&
-                    began.runId === diagnosticRunId &&
-                    began.deviceId === FAKE_DEVICE_ID &&
-                    Number.isFinite(began.loadGeneration)
-            ),
+            gateBOk,
             JSON.stringify(began)
         );
         if (pathBWasTaken) {
             console.log(
                 "selector click used the path that does not create a load generation; " +
                     "Stage 2 assertions would be meaningless, so they are skipped " +
-                    "(Gate A ok:", pathA, "Gate B ok:", Boolean(began), ")"
+                    "(Gate A ok:", pathA, "Gate B ok:", gateBOk, ")"
             );
         }
         await driver.switchTo().window(senderTab);
