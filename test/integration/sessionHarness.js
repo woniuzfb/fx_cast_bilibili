@@ -580,7 +580,11 @@ async function main() {
             return (
                 "\ntry { browser.runtime.sendMessage({ subject: 'popup:debugLog'," +
                 " data: { level: 'info', message: '[harness] onReceiverCast-state'," +
-                ` data: { ${fields}, deviceId: device && device.id } } }); } catch (e) {}`
+                ` data: { ${fields}, deviceId: device && device.id, deviceType: device && device.deviceType } } }); } catch (e) {}` +
+                // Run-bound proof that this run's extension storage is writable and
+                // readable: the background's control marker cannot serve that role
+                // when no session media is ever synced.
+                "\ntry { void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ __fxHarnessClickStorageControl: { runId: r && r.__fxHarnessDiagnosticRunId, deviceId: device && device.id, deviceType: device && device.deviceType, at: Date.now() } })).catch(() => {}); } catch (e) {}"
             );
         });
         // Gate B: was a load generation actually created for this device?
@@ -627,6 +631,19 @@ async function main() {
                     " }).catch(() => {}); }); } catch (e) {} }";
                 return code;
             });
+        }
+        if (args.generationAdvance || true) {
+            // Recorded immediately BEFORE the production Roku condition, so the
+            // next anomalous run distinguishes "the hook ran and did nothing"
+            // from "the hook was legally skipped because the selection object
+            // does not carry deviceType === 'roku'". Anchor is the condition
+            // itself, and the marker goes before it, never inside.
+            patch(
+                "background/background.js",
+                'if (selection.device.deviceType === "roku") {',
+                () =>
+                    "\ntry { void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ __fxHarnessSelectionAtRokuBranch: { runId: r && r.__fxHarnessDiagnosticRunId, deviceId: selection.device.id, deviceType: selection.device.deviceType, mediaType: selection.mediaType, at: Date.now() } })).catch(() => {}); } catch (e) {}\n"
+            );
         }
         patch(
             "background/background.js",
@@ -1574,7 +1591,7 @@ async function main() {
         const gateMarkers = await driver.executeAsyncScript(
             `const done = arguments[arguments.length - 1];
              browser.storage.local
-                .get(["__fxHarnessDiagnosticRunId", "__fxHarnessLoadGenerationBegan"])
+                .get(["__fxHarnessDiagnosticRunId", "__fxHarnessLoadGenerationBegan", "__fxHarnessSelectionAtRokuBranch", "__fxHarnessClickStorageControl"])
                 .then(v => done(v), err => done({ error: String(err) }));`
         );
         const began = gateMarkers && gateMarkers.__fxHarnessLoadGenerationBegan;
@@ -1595,6 +1612,10 @@ async function main() {
             // marker from another run look the same as a boolean, and
             // JSON.stringify(undefined) prints nothing at all.
             JSON.stringify({
+                selectionAtRokuBranch:
+                    gateMarkers && gateMarkers.__fxHarnessSelectionAtRokuBranch,
+                clickStorageControl:
+                    gateMarkers && gateMarkers.__fxHarnessClickStorageControl,
                 markerPresent: Boolean(began),
                 marker: began ?? null,
                 expectedRunId: diagnosticRunId,
