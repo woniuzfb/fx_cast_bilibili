@@ -1631,6 +1631,11 @@ async function main() {
             ? "stage3-generation-N"
             : "stage2";
         const NEXT_MARKER = "stage3-generation-N-plus-1";
+
+        /** The Stage 2 hops assume the generation was relayed with the media,
+         *  which the reordering and advance modes deliberately prevent. */
+        const assertStage2Hops =
+            !args.mediaBeforeGeneration && !args.generationAdvance;
         const afterLoad = entry => entry.at >= loadStartedAt;
         const markerOf = media =>
             media && media.customData && media.customData.harnessMarker;
@@ -1946,8 +1951,8 @@ async function main() {
                 m.message.data.deviceId === FAKE_DEVICE_ID &&
                 markerOf(m.message.data.media) === HARNESS_MARKER
         );
-        const assertStage2Hops =
-            !args.mediaBeforeGeneration && !args.generationAdvance;
+
+
         // The generation is created when the device is SELECTED, which is
         // legitimately before the LOAD, so it is filtered against the session
         // request boundary rather than the LOAD boundary.
