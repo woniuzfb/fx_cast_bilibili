@@ -520,7 +520,7 @@ async function main() {
             () =>
                 bgMarker(
                     "syncRokuSessionMediaToBridge enter",
-                    "deviceId, ownerId, isClear: media === null, hasBridgePort: Boolean(this.bridgePort), mediaPresent: media !== null"
+                    "deviceId, ownerId, isClear: media === null, hasBridgePort: Boolean(this.bridgePort), mediaPresent: media !== null, hasIdentity: (typeof currentRokuMediaIdentity === 'function') ? Boolean(currentRokuMediaIdentity(deviceId)) : 'unknown'"
                 )
         );
         // The popup's console is NOT mirrored, but its runtime-message channel
@@ -1230,9 +1230,10 @@ async function main() {
             );
         }
         const discovery = discoveryConnections[0];
+        const discoveryPids = new Set(discoveryConnections.map(c => c.pid));
         const session = connections.find(
             c =>
-                c.pid !== (discovery && discovery.pid) &&
+                !discoveryPids.has(c.pid) &&
                 c.inbound.some(m =>
                     [
                         "bridge:createCastSession",
@@ -1249,9 +1250,14 @@ async function main() {
             JSON.stringify(connections.map(c => c.pid))
         );
         check(
-            "the session PID differs from the discovery PID",
-            Boolean(session && discovery && session.pid !== discovery.pid),
-            JSON.stringify([session && session.pid, discovery && discovery.pid])
+            "the session PID is none of the discovery PIDs",
+            Boolean(
+                session && !discoveryPids.has(session.pid)
+            ),
+            JSON.stringify({
+                session: session && session.pid,
+                discovery: [...discoveryPids]
+            })
         );
         check(
             "the session connection is used in both directions",
@@ -1604,9 +1610,16 @@ async function main() {
         check(
             "hop 2: the extension sent generation and session media to discovery",
             Boolean(relayedGeneration && relayedMedia),
-            JSON.stringify([
-                ...new Set(discoveryConn.inbound.map(m => m.subject))
-            ].slice(0, 12))
+            // Per connection, so a failure cannot be read as "nothing arrived
+            // anywhere" when in fact the messages went to another process.
+            JSON.stringify(
+                discoveryConnections.map(conn => ({
+                    pid: conn.pid,
+                    subjects: [
+                        ...new Set(conn.inbound.map(m => m.subject))
+                    ].slice(0, 14)
+                }))
+            )
         );
         check(
             "hop 2: both name the fake device and agree on the generation",
