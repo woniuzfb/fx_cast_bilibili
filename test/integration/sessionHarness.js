@@ -833,6 +833,7 @@ async function main() {
         );
 
         const popupHandle = await findHandleByUrl(driver, "/ui/popup/", 20000);
+        let clicked;
         // Guard against a vacuous pass: the popup page renders every device as
         // soon as it mounts, so finding and clicking a row proves nothing about
         // requestSession. The page must have asked first.
@@ -856,7 +857,24 @@ async function main() {
                 "clicking here would have proved nothing"
             );
         } else if (popupHandle) {
-            const clicked = await driver.executeAsyncScript(
+            // Switch back to the selector BEFORE querying its DOM. The guard
+            // above deliberately switched to the sender tab, and forgetting to
+            // return left the click script running in the sender document -
+            // which reported `rows: 0` and read like "the selector has no
+            // devices" rather than "the harness is looking at the wrong page".
+            let selectorUrl = "(switch failed)";
+            try {
+                await driver.switchTo().window(popupHandle);
+                selectorUrl = await driver.getCurrentUrl();
+            } catch (err) {
+                selectorUrl = `(popup handle gone: ${err.message})`;
+            }
+            check(
+                "the click runs in the selector page",
+                selectorUrl.includes("/ui/popup/"),
+                selectorUrl
+            );
+            clicked = await driver.executeAsyncScript(
                 `const done = arguments[arguments.length - 1];
                  const wanted = ${JSON.stringify(FAKE_DEVICE_NAME)};
                  const deadline = Date.now() + 30000;
@@ -1007,20 +1025,37 @@ async function main() {
 
         const discovered = [];
         const actedOn = [];
+        // Only real commands count. `bridge:sendMediaMessage` carrying
+        // GET_STATUS is a read the popup performs for every listed device, so
+        // treating it as "commanding a device" flagged the user's own Roku for
+        // something harmless.
         const ACTION_SUBJECTS = new Set([
-            "bridge:sendMediaMessage",
             "bridge:sendReceiverMessage",
             "bridge:createCastSession",
             "bridge:stopCastSession",
             "bridge:rokuRequestConfirmationPoll"
+        ]);
+        const COMMAND_MEDIA_TYPES = new Set([
+            "PLAY",
+            "PAUSE",
+            "STOP",
+            "SEEK",
+            "VOLUME",
+            "LOAD"
         ]);
         for (const conn of connections) {
             for (const message of [...conn.inbound, ...conn.outbound]) {
                 const data = (message.message && message.message.data) || {};
                 if (data.deviceId) {
                     discovered.push(data.deviceId);
-                    if (ACTION_SUBJECTS.has(String(message.subject))) {
-                        actedOn.push(data.deviceId);
+                    const mediaType =
+                        (data.message && data.message.type) || undefined;
+                    if (
+                        ACTION_SUBJECTS.has(String(message.subject)) ||
+                        (String(message.subject) === "bridge:sendMediaMessage" &&
+                            COMMAND_MEDIA_TYPES.has(String(mediaType)))
+                    ) {
+                        actedOn.push(`${data.deviceId}:${mediaType ?? ""}`);
                     }
                 }
                 if (data.deviceInfo && data.deviceInfo.id) {
@@ -1036,7 +1071,7 @@ async function main() {
         console.log("deviceIds acted on:", JSON.stringify([...new Set(actedOn)]));
         check(
             "no command was sent to a non-fake device",
-            !actedOn.some(id => id && id !== FAKE_DEVICE_ID),
+            !actedOn.some(entry => !entry.startsWith(FAKE_DEVICE_ID)),
             JSON.stringify([...new Set(actedOn)])
         );
         check(
