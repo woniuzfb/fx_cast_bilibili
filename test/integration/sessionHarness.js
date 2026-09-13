@@ -118,12 +118,15 @@ function parseArgs(argv) {
         extensionDir: path.join(repoRoot, "dist/extension"),
         phaseAOnly: false,
         startupSynthesis: false,
+        mediaBeforeGeneration: false,
         instrument: false
     };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--keep-profile") args.keepProfile = true;
         else if (argv[i] === "--phase-a-only") args.phaseAOnly = true;
         else if (argv[i] === "--startup-synthesis") args.startupSynthesis = true;
+        else if (argv[i] === "--media-before-generation")
+            args.mediaBeforeGeneration = true;
         else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
         else if (argv[i] === "--instrument-content-initial")
             args.instrument = true;
@@ -475,6 +478,28 @@ async function main() {
             () =>
                 "\nconsole.info('[harness] beginRokuMediaLoad', JSON.stringify({deviceId, hasBridgePort: Boolean(this.bridgePort)}));"
         );
+        if (args.mediaBeforeGeneration) {
+            // Deterministic reordering, no sleeps: the generation is HELD here
+            // (synchronously, so the production post cannot slip out first) and
+            // released only when the harness writes the release flag, which this
+            // polls for. The hold is decided at instrumentation time precisely
+            // because a method that must decide synchronously cannot read storage
+            // to find out whether it is in hold mode.
+            patch(
+                "background/background.js",
+                "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
+                () =>
+                    "\nif (deviceId === " +
+                    JSON.stringify(FAKE_DEVICE_ID) +
+                    ") { const self = this; const held = { deviceId, loadGeneration };" +
+                    " void browser.storage.local.set({ __fxHarnessHeldGeneration: { deviceId, loadGeneration, at: Date.now() } });" +
+                    " const timer = setInterval(() => { browser.storage.local.get('__fxHarnessReleaseHeldGeneration').then(r => {" +
+                    " if (!r || !r.__fxHarnessReleaseHeldGeneration) return; clearInterval(timer);" +
+                    " try { self.bridgePort.postMessage({ subject: 'bridge:rokuSetLoadGeneration', data: { deviceId: held.deviceId, loadGeneration: held.loadGeneration } });" +
+                    " void browser.storage.local.set({ __fxHarnessGenerationReleased: { deviceId: held.deviceId, loadGeneration: held.loadGeneration, at: Date.now() } }); } catch (e) {}" +
+                    " }).catch(() => {}); }, 200); return; }"
+            );
+        }
         patch(
             "background/background.js",
             "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
@@ -1551,7 +1576,9 @@ async function main() {
         // an observation from before the media ever arrived - a real message
         // from the wrong lifecycle, which is its own kind of false green.
         const loadStartedAt = Date.now();
-        const HARNESS_MARKER = "stage2";
+        const HARNESS_MARKER = args.mediaBeforeGeneration
+            ? "stage3-media-first"
+            : "stage2";
         const afterLoad = entry => entry.at >= loadStartedAt;
         const markerOf = media =>
             media && media.customData && media.customData.harnessMarker;
@@ -1563,7 +1590,9 @@ async function main() {
             loaded = await driver.executeAsyncScript(
                 `const done = arguments[arguments.length - 1];
                  const timer = setTimeout(() => done("timeout: no load callback"), 20000);
-                 window.__HARNESS_LOAD__().then(
+                 window.__HARNESS_LOAD__({ harnessMarker: ${JSON.stringify(
+                 args.mediaBeforeGeneration ? "stage3-media-first" : "stage2"
+             )} }).then(
                     () => { clearTimeout(timer); done(true); },
                     err => { clearTimeout(timer); done(String(err)); }
                  );`
@@ -2003,6 +2032,92 @@ async function main() {
             JSON.stringify(diagnosticMarkers && diagnosticMarkers.__fxHarnessBgControl)
         );
         await driver.switchTo().window(senderTab);
+        // ---- Stage 3, case 2: media first, generation later -----------------
+        //
+        // The generation was HELD at the test copy, so the media that arrives
+        // before it must stay pending and invisible; releasing the generation then
+        // applies it. Nothing here is timing-based: the release is triggered by
+        // the harness only after the media is confirmed on the wire.
+        if (args.mediaBeforeGeneration) {
+            const mediaOnWire = discoveryInbound.find(
+                m =>
+                    m.subject === "bridge:rokuSetSessionMedia" &&
+                    afterLoad(m) &&
+                    markerOf(m.message.data.media) === HARNESS_MARKER
+            );
+            const generationOnWire = discoveryInbound.find(
+                m =>
+                    m.subject === "bridge:rokuSetLoadGeneration" &&
+                    afterSessionRequest(m) &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID
+            );
+            check(
+                "stage3-2 A: the session media reached discovery first",
+                Boolean(mediaOnWire) && !generationOnWire,
+                JSON.stringify({
+                    media: Boolean(mediaOnWire),
+                    generationAlreadyThere: Boolean(generationOnWire)
+                })
+            );
+            const synthesizedBeforeGeneration = discoveryOutbound.filter(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.provenance &&
+                    m.message.data.provenance.source === "startup-synthetic"
+            );
+            check(
+                "stage3-2 B: nothing was synthesised while the generation was unknown",
+                synthesizedBeforeGeneration.length === 0,
+                JSON.stringify(synthesizedBeforeGeneration.map(m => m.at))
+            );
+
+            // explicit release: the harness says when, the background posts then
+            await driver.switchTo().window(consoleTab);
+            await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .set({ __fxHarnessReleaseHeldGeneration: true })
+                    .then(() => done(true), err => done(String(err)));`
+            );
+            await sleep(1500);
+            const released = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .get(["__fxHarnessHeldGeneration", "__fxHarnessGenerationReleased"])
+                    .then(v => done(v), err => done({ error: String(err) }));`
+            );
+            console.log("held/released generation:", JSON.stringify(released));
+            await driver.switchTo().window(senderTab);
+
+            const afterRelease = discoveryConnectionsNow.flatMap(conn =>
+                readNdjson(path.join(harnessDir, `conn-${conn.pid}-in.ndjson`))
+            );
+            const generationAfterRelease = afterRelease.find(
+                m =>
+                    m.subject === "bridge:rokuSetLoadGeneration" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    (!mediaOnWire ||
+                        m.message.data.loadGeneration ===
+                            mediaOnWire.message.data.loadGeneration)
+            );
+            check(
+                "stage3-2 D: the released generation arrived, after the media",
+                Boolean(
+                    generationAfterRelease &&
+                        mediaOnWire &&
+                        generationAfterRelease.at >= mediaOnWire.at
+                ),
+                JSON.stringify({
+                    generationAt: generationAfterRelease && generationAfterRelease.at,
+                    mediaAt: mediaOnWire && mediaOnWire.at,
+                    generation:
+                        generationAfterRelease &&
+                        generationAfterRelease.message.data.loadGeneration
+                })
+            );
+        }
+
         // ---- Stage 3, case 1: generation first, media later ----------------
         //
         // This ordering happens naturally (the generation is pushed when the

@@ -215,7 +215,9 @@
                         customData: {
                             hlsDvr: true,
                             pageDuration: 7200,
-                            harnessMarker: "stage2"
+                            harnessMarker:
+                                (overrides && overrides.harnessMarker) ||
+                                "stage2"
                         }
                     };
                     try {
