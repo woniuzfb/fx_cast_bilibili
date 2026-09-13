@@ -13,7 +13,7 @@ import webExt from "web-ext";
 
 import copyFilesPlugin from "./lib/copyFilesPlugin.js";
 
-const BRIDGE_NAME = "fx_cast_bilibili_bridge";
+const BRIDGE_NAME = process.env.FX_BRIDGE_NAME || "fx_cast_bilibili_bridge";
 
 const MIRRORING_APP_ID = "19A6F4AE";
 
@@ -40,7 +40,28 @@ const argv = yargs()
         choices: ["development", "production"],
         default: "development"
     })
+    .option("out-dir", {
+        describe:
+            "Build into this directory instead of the repo's dist/extension. " +
+            "Used by the integration harness, which must not touch dist/ (the " +
+            "packaged build lives there) and must not share an output directory " +
+            "with a developer's own build.",
+        type: "string"
+    })
+    .option("bridge-name", {
+        describe:
+            "Override the native messaging host name this build asks for. The " +
+            "harness builds with its own host name so its manifest cannot " +
+            "shadow a real bridge install.",
+        type: "string"
+    })
     .parseSync(process.argv);
+
+if (argv.outDir && (argv.package || argv.sign || argv.watch)) {
+    throw new Error(
+        "build: --out-dir cannot be combined with --package/--sign/--watch"
+    );
+}
 
 // If packaging or signing, use production mode
 if (argv.package || argv.sign) {
@@ -61,7 +82,9 @@ const manifestJson = JSON.parse(
 const BRIDGE_VERSION = manifestJson.version;
 const EXTENSION_ID = manifestJson.browser_specific_settings?.gecko?.id;
 
-const distPath = path.join(rootPath, "../dist/extension/");
+const distPath = argv.outDir
+    ? path.resolve(argv.outDir)
+    : path.join(rootPath, "../dist/extension/");
 const unpackedPath = path.join(distPath, "unpacked");
 
 const outPath = argv.package || argv.sign ? unpackedPath : distPath;
@@ -95,7 +118,7 @@ const buildOpts = {
         path.join(srcPath, "ui/options/index.ts")
     ],
     define: {
-        BRIDGE_NAME: `"${BRIDGE_NAME}"`,
+        BRIDGE_NAME: `"${argv.bridgeName || BRIDGE_NAME}"`,
         BRIDGE_VERSION: `"${BRIDGE_VERSION}"`,
         MIRRORING_APP_ID: `"${MIRRORING_APP_ID}"`
     },

@@ -33,6 +33,13 @@ const argv = await yargs()
         describe: "Set build architecture",
         default: os.arch()
     })
+    .option("out-dir", {
+        describe:
+            "Write the built app and launcher here instead of the repo's " +
+            "dist/bridge, and use <dir>/../app as the intermediate. Used by the " +
+            "integration harness, which must not touch dist/.",
+        type: "string"
+    })
     .option("node-version", {
         describe: "Node.js version to target",
         default: "22"
@@ -59,7 +66,19 @@ if (!supportedTargets[process.platform]?.includes(argv.arch)) {
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 const ROOT_PATH = path.join(__dirname, "..");
-const BUILD_PATH = path.join(ROOT_PATH, "dist/app");
+/**
+ * The harness builds a private copy (`--out-dir`) so it never reads or writes
+ * the repo's dist/, which a developer's own build and packaging own.
+ */
+if (argv.outDir && argv.package) {
+    throw new Error("build: --out-dir cannot be combined with --package");
+}
+const OUT_PATH = argv.outDir
+    ? path.resolve(argv.outDir)
+    : paths.DIST_PATH;
+const BUILD_PATH = argv.outDir
+    ? path.join(path.dirname(path.resolve(argv.outDir)), "app")
+    : path.join(ROOT_PATH, "dist/app");
 
 const spawnOptions = {
     shell: true,
@@ -73,8 +92,8 @@ const spawnOptions = {
 fs.rmSync(BUILD_PATH, { force: true, recursive: true });
 fs.mkdirSync(BUILD_PATH, { recursive: true });
 if (argv.package) {
-    fs.rmSync(paths.DIST_PATH, { force: true, recursive: true });
-    fs.mkdirSync(paths.DIST_PATH, { recursive: true });
+    fs.rmSync(OUT_PATH, { force: true, recursive: true });
+    fs.mkdirSync(OUT_PATH, { recursive: true });
 }
 
 const NATIVE_BINDING_PATH = path.join(ROOT_PATH, "build/Release");
@@ -160,7 +179,7 @@ async function build() {
 
         manifest.path =
             !argv.package && argv.usePkg
-                ? path.join(paths.DIST_PATH, executableName)
+                ? path.join(OUT_PATH, executableName)
                 : path.join(executablePath, executableName);
     } else {
         let launcherPath = path.join(
@@ -198,7 +217,11 @@ NODE_PATH="${modulesDir}" node $(dirname $0)/src/main.js --__name $(basename $0)
             }
         }
 
-        manifest.path = path.join(paths.DIST_PATH, path.basename(launcherPath));
+        // The launcher is moved to OUT_PATH below, so the manifest that names it
+        // must point there too: with --out-dir that is the harness's private
+        // directory, and a manifest pointing back into the repo's dist/ would
+        // silently undo the isolation it exists for.
+        manifest.path = path.join(OUT_PATH, path.basename(launcherPath));
 
         // Copy native binding into build/Release so bindings() finds it
         fs.copySync(
@@ -232,13 +255,13 @@ NODE_PATH="${modulesDir}" node $(dirname $0)/src/main.js --__name $(basename $0)
             // Move installer to dist
             fs.moveSync(
                 path.join(BUILD_PATH, installerName),
-                path.join(paths.DIST_PATH, path.basename(installerName)),
+                path.join(OUT_PATH, path.basename(installerName)),
                 { overwrite: true }
             );
         }
     } else {
-        // Move tsc output and launcher to dist
-        fs.moveSync(BUILD_PATH, paths.DIST_PATH, { overwrite: true });
+        // Move tsc output and launcher to the output directory
+        fs.moveSync(BUILD_PATH, OUT_PATH, { overwrite: true });
     }
 
     // Remove build directory

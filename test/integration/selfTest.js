@@ -14,7 +14,12 @@
  *   1. the wrapper forwards bytes verbatim (a reply arrives at all),
  *   2. both directions are traced (a request AND a reply are recorded),
  *   3. the trace records a real subject, not an empty message list,
- *   4. two wrapper instances are two OS processes with different PIDs.
+ *   4. two wrapper instances are two OS processes with different PIDs,
+ *   5. `bridge/bin/build.js --out-dir` really is self-contained: the manifest it
+ *      writes points at the launcher inside that directory, not back into the
+ *      repo's dist/. The harness builds privately for exactly that reason, and a
+ *      manifest pointing at dist/ would quietly undo the isolation - while every
+ *      browser test still passed, because the harness uses its own manifest.
  *
  * Usage: node test/integration/selfTest.js
  */
@@ -22,12 +27,19 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 
 const { encode, FrameReader } = require("./nativeProtocol");
 
 const wrapperPath = path.join(__dirname, "hostWrapper.js");
 const repoRoot = path.resolve(__dirname, "../..");
+
+/**
+ * The private bridge build this self-test makes, published for
+ * `startConnection()`: the wrapper deliberately has no dist/ fallback.
+ */
+let privateBridge = {};
+const privateBridgeEntry = () => privateBridge.entry;
 
 let pass = 0;
 let fail = 0;
@@ -58,7 +70,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function startConnection(harnessDir) {
     const child = spawn(process.execPath, [wrapperPath], {
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, FX_HARNESS_DIR: harnessDir, FX_LABEL: "selftest" }
+        env: {
+            ...process.env,
+            FX_HARNESS_DIR: harnessDir,
+            // The wrapper has no dist/ default on purpose: the entry is always
+            // supplied by whoever runs it, and for this self-test that is the
+            // private build made below.
+            FX_HOST_ENTRY: privateBridgeEntry(),
+            FX_LABEL: "selftest"
+        }
     });
     const replies = [];
     const reader = new FrameReader((message, parseError) => {
@@ -97,6 +117,56 @@ async function waitFor(predicate, timeoutMs, what) {
 (async () => {
     const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-self-"));
     console.log("harness dir:", harnessDir);
+
+    // --- the private build must be self-contained --------------------------
+    {
+        const outDir = path.join(harnessDir, "bridge-out");
+        const built = spawnSync(
+            process.execPath,
+            [path.join(repoRoot, "bridge/bin/build.js"), "--out-dir", outDir],
+            { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] }
+        );
+        check(
+            "bridge/bin/build.js --out-dir builds",
+            built.status === 0,
+            String(built.stderr || built.stdout).slice(-400)
+        );
+        const config = require(path.join(repoRoot, "bridge/config.json"));
+        const manifestPath = path.join(outDir, `${config.applicationName}.json`);
+        let manifest;
+        try {
+            manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+        } catch (err) {
+            manifest = { error: String(err) };
+        }
+        check(
+            "the private build writes its own manifest",
+            Boolean(manifest && manifest.path),
+            JSON.stringify(manifest)
+        );
+        check(
+            "that manifest points at the launcher inside the private directory",
+            Boolean(
+                manifest &&
+                    manifest.path &&
+                    path.dirname(manifest.path) === outDir &&
+                    fs.existsSync(manifest.path)
+            ),
+            JSON.stringify({ manifestPath, path: manifest && manifest.path, outDir })
+        );
+        check(
+            "and NOT back into the repo's dist/ (which would undo the isolation)",
+            Boolean(
+                manifest &&
+                    manifest.path &&
+                    !manifest.path.includes(path.join(repoRoot, "dist"))
+            ),
+            JSON.stringify(manifest && manifest.path)
+        );
+        // The plumbing checks below drive this same private build, so the
+        // self-test never needs (or touches) dist/ either.
+        privateBridge = { entry: manifest && manifest.path };
+    }
 
     const first = startConnection(harnessDir);
     await sleep(400);
