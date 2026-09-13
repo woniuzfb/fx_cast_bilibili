@@ -594,26 +594,33 @@ async function main() {
                 )
         );
         if (args.generationAdvance) {
-            // The generation is advanced by calling the REAL producer
-            // (beginRokuMediaLoad) rather than by faking a bridge message, so the
-            // extension's own generation bookkeeping and its cross-process
-            // forwarding are what the case exercises. onBridgeMessage runs on
-            // every bridge message, which is often enough to act on a request
-            // without adding a timer.
+            // A ONE-TIME storage.onChanged listener, installed on the first bridge
+            // message and guarded by a flag. The previous version polled
+            // storage.local on EVERY bridge message, which (a) does async work for
+            // a request that usually is not there - a pause this harness has no
+            // business injecting before selector binding, where the popup's own
+            // watchdog is 6s, (b) can let two messages read the same request
+            // before the remove lands and advance the generation twice, and
+            // (c) only works if another bridge message happens to arrive. The
+            // listener does nothing at all until a request is written.
             patch("background/background.js", "onBridgeMessage = (message) => {", () => {
                 const code =
-                    "\ntry { browser.storage.local.get(['__fxHarnessAdvanceGenerationRequest', '__fxHarnessReplayMediaRequest', '__fxHarnessDiagnosticRunId']).then(r => {" +
-                    " const runId = r && r.__fxHarnessDiagnosticRunId;" +
-                    " const adv = r && r.__fxHarnessAdvanceGenerationRequest;" +
-                    " if (adv && adv.runId === runId && adv.deviceId) { void browser.storage.local.remove('__fxHarnessAdvanceGenerationRequest');" +
-                    " try { this.beginRokuMediaLoad(adv.deviceId); } catch (e) {}" +
-                    " void browser.storage.local.set({ __fxHarnessGenerationAdvanced: { runId: runId, deviceId: adv.deviceId, previousGeneration: adv.expectedCurrentGeneration, at: Date.now() } }); }" +
-                    " const rep = r && r.__fxHarnessReplayMediaRequest;" +
-                    " if (rep && rep.runId === runId && rep.deviceId) { void browser.storage.local.remove('__fxHarnessReplayMediaRequest');" +
-                    " try { this.bridgePort.postMessage({ subject: 'bridge:rokuSetSessionMedia', data: { deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, ownerId: rep.ownerId, media: rep.media } });" +
-                    " void browser.storage.local.set({ __fxHarnessMediaPosted: { runId: runId, deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, marker: rep.media && rep.media.customData && rep.media.customData.harnessMarker, at: Date.now() } }); }" +
-                    " catch (e) { void browser.storage.local.set({ __fxHarnessMediaPostFailed: { runId: runId, loadGeneration: rep.loadGeneration, error: String(e) } }); } }" +
-                    " }).catch(() => {}); } catch (e) {}";
+                    "\nif (!this.__fxHarnessControlInstalled) { this.__fxHarnessControlInstalled = true; this.__fxHarnessHandledRequests = this.__fxHarnessHandledRequests || {};" +
+                    " try { browser.storage.onChanged.addListener((changes, area) => { if (area !== 'local') return; const self = this;" +
+                    " browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => { const runId = r && r.__fxHarnessDiagnosticRunId;" +
+                    " const adv = changes.__fxHarnessAdvanceGenerationRequest && changes.__fxHarnessAdvanceGenerationRequest.newValue;" +
+                    " if (adv && adv.runId === runId && adv.deviceId && !self.__fxHarnessHandledRequests[adv.requestId]) {" +
+                    " self.__fxHarnessHandledRequests[adv.requestId] = true;" +
+                    " try { self.beginRokuMediaLoad(adv.deviceId); } catch (e) {}" +
+                    " let newGeneration = null; try { const id = (typeof currentRokuMediaIdentity === 'function') ? currentRokuMediaIdentity(adv.deviceId) : null; newGeneration = id ? id.loadGeneration : null; } catch (e) {}" +
+                    " void browser.storage.local.set({ __fxHarnessGenerationAdvanced: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, previousGeneration: adv.expectedCurrentGeneration, newGeneration: newGeneration, at: Date.now() } }); }" +
+                    " const rep = changes.__fxHarnessReplayMediaRequest && changes.__fxHarnessReplayMediaRequest.newValue;" +
+                    " if (rep && rep.runId === runId && rep.deviceId && !self.__fxHarnessHandledRequests[rep.requestId]) {" +
+                    " self.__fxHarnessHandledRequests[rep.requestId] = true;" +
+                    " try { self.bridgePort.postMessage({ subject: 'bridge:rokuSetSessionMedia', data: { deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, ownerId: rep.ownerId, media: rep.media } });" +
+                    " void browser.storage.local.set({ __fxHarnessMediaPosted: { runId: runId, requestId: rep.requestId, deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, marker: rep.media && rep.media.customData && rep.media.customData.harnessMarker, at: Date.now() } }); }" +
+                    " catch (e) { void browser.storage.local.set({ __fxHarnessMediaPostFailed: { runId: runId, requestId: rep.requestId, loadGeneration: rep.loadGeneration, error: String(e) } }); } }" +
+                    " }).catch(() => {}); }); } catch (e) {} }";
                 return code;
             });
         }
@@ -2328,6 +2335,7 @@ async function main() {
                  browser.storage.local.set({
                     __fxHarnessAdvanceGenerationRequest: {
                         runId: ${JSON.stringify(diagnosticRunId)},
+                        requestId: "advance-" + Date.now(),
                         deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
                         expectedCurrentGeneration: ${Number(generationN)}
                     }
@@ -2415,6 +2423,7 @@ async function main() {
                  browser.storage.local.set({
                     __fxHarnessReplayMediaRequest: {
                         runId: ${JSON.stringify(diagnosticRunId)},
+                        requestId: "replay-old-" + Date.now(),
                         deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
                         loadGeneration: ${Number(generationN)},
                         ownerId: ${JSON.stringify(ownerN || "")},
@@ -2476,6 +2485,7 @@ async function main() {
                  browser.storage.local.set({
                     __fxHarnessReplayMediaRequest: {
                         runId: ${JSON.stringify(diagnosticRunId)},
+                        requestId: "replay-new-" + Date.now(),
                         deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
                         loadGeneration: ${Number(generationN) + 1},
                         ownerId: ${JSON.stringify(ownerN || "")},
