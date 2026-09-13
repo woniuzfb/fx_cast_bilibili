@@ -468,17 +468,17 @@ async function main() {
             "background/background.js",
             "beginRokuMediaLoad(deviceId) {",
             () =>
-                "\nconsole.log('[harness] beginRokuMediaLoad', JSON.stringify({deviceId, hasBridgePort: Boolean(this.bridgePort)}));"
+                "\nconsole.info('[harness] beginRokuMediaLoad', JSON.stringify({deviceId, hasBridgePort: Boolean(this.bridgePort)}));"
         );
         patch(
             "background/background.js",
             "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
             () =>
-                "\nconsole.log('[harness] setRokuLoadGenerationOnBridge', JSON.stringify({deviceId, loadGeneration, hasBridgePort: Boolean(this.bridgePort)}));"
+                "\nconsole.info('[harness] setRokuLoadGenerationOnBridge', JSON.stringify({deviceId, loadGeneration, hasBridgePort: Boolean(this.bridgePort)}));"
         );
         // What state was the selector in at the moment of the click?
         patch("ui/popup/index.js", "onReceiverCast(device) {", () =>
-            "\nconsole.log('[harness] onReceiverCast', JSON.stringify({deviceId: device && device.id}));"
+            "\nconsole.info('[harness] onReceiverCast', JSON.stringify({deviceId: device && device.id}));"
         );
         console.log("instrumented test copy:", extensionDir);
     }
