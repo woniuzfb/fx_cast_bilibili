@@ -863,7 +863,12 @@ export default class RokuSession {
                 // a failure verdict - that belongs to the extension's command
                 // lifecycle, not to the sender protocol.
                 this.pendingPlayerIntent = undefined;
-                this.sendMediaStatus(requestId);
+                // Sent as an ASYNC state convergence with a fresh request id,
+                // not as a second answer to the original PLAY/PAUSE request:
+                // that request was already answered when the keypress resolved,
+                // and reusing its id would make one Cast request appear to have
+                // two replies. The media-ended push above does the same.
+                this.sendMediaStatus();
             }, SESSION_PLAYER_INTENT_WINDOW_MS);
             this.pendingIntentTimer.unref?.();
             this.sendMediaStatus(requestId);
