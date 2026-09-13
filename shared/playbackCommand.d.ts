@@ -111,7 +111,15 @@ export type ReceiverPlaybackPhase =
     | "not-started"
     | "requested"
     | "confirmed"
-    | "not-confirmed";
+    | "not-confirmed"
+    /**
+     * The receiver command itself failed: an explicit failure from the page
+     * sender's Cast call (a Promise rejection) rather than a state that was
+     * never observed. A terminal outcome with terminalReason "completed" - it
+     * is NOT a command-level "dispatch-failed", and it must not wait for the
+     * confirmation deadline.
+     */
+    | "failed";
 
 /** How an observation compared to the command's intent. */
 export type PlaybackObservationClassification =
