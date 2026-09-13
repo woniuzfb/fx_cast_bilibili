@@ -1293,6 +1293,30 @@ async function main() {
                 // "the message never arrived", "wrong namespace", "the JSON was
                 // not parsed", "the LOAD arrived but lost its media" and "routed
                 // to the wrong session".
+                // Does the ack correspond to the LOAD? A matching messageId
+                // means the native router FOUND the session (an unknown
+                // sessionId returns false without an ack) and handled it. It
+                // still does not mean the async handleLoad() finished.
+                ackPairing: (() => {
+                    const loadMsg = sessionConn.inbound.find(
+                        m =>
+                            afterLoad(m) &&
+                            m.subject === "bridge:sendCastSessionMessage"
+                    );
+                    const ack = sessionConn.outbound.find(
+                        m =>
+                            afterLoad(m) &&
+                            m.subject === "cast:impl_sendMessage" &&
+                            m.message.data.messageId ===
+                                (loadMsg && loadMsg.message.data.messageId)
+                    );
+                    return {
+                        loadMessageId:
+                            loadMsg && loadMsg.message.data.messageId,
+                        acked: Boolean(ack),
+                        ack: ack && ack.message.data
+                    };
+                })(),
                 loadPayloads: sessionConn.inbound
                     .filter(m => afterLoad(m))
                     .map(m => {
@@ -1302,10 +1326,14 @@ async function main() {
                         // rawTypeof:"undefined" and hid the payload entirely.
                         const raw = data.messageData;
                         let parsed;
+                        let parseError;
+                        // Mirror production: the host parses only when it is a
+                        // string, and passes an object straight through.
                         try {
-                            parsed = raw ? JSON.parse(raw) : undefined;
-                        } catch {
-                            parsed = undefined;
+                            if (typeof raw === "string") parsed = JSON.parse(raw);
+                            else if (raw && typeof raw === "object") parsed = raw;
+                        } catch (err) {
+                            parseError = err.message;
                         }
                         return {
                             subject: m.subject,
@@ -1313,6 +1341,7 @@ async function main() {
                             namespace: data.namespace,
                             messageId: data.messageId,
                             rawTypeof: typeof raw,
+                            parseError,
                             parsedType: parsed && parsed.type,
                             requestId: parsed && parsed.requestId,
                             contentId:
@@ -1324,7 +1353,7 @@ async function main() {
                                 parsed.media &&
                                 parsed.media.customData &&
                                 parsed.media.customData.harnessMarker,
-                            keys: Object.keys(data).slice(0, 8)
+                                        keys: Object.keys(data).slice(0, 8)
                         };
                     })
                     .slice(0, 8)
