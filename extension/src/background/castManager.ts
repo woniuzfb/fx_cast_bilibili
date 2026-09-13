@@ -1201,27 +1201,40 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                 // device the trusted page supplied, so it has to announce the
                 // load for the same reason the two paths below do: without a
                 // generation the session's media is never mirrored to the
-                // discovery host, and nothing fails loudly.
-                beginRokuSessionLoad(receiverDevice);
+                // discovery host, and nothing fails loudly. The announcement is
+                // released below if that session never comes up.
+                const bypassAnnouncement = beginRokuSessionLoad(receiverDevice);
 
-                const session = await createCastSession({
-                    instance,
-                    deviceId: receiverDevice.id,
-                    appId: sessionRequest.appId
-                });
+                try {
+                    const session = await createCastSession({
+                        instance,
+                        deviceId: receiverDevice.id,
+                        appId: sessionRequest.appId
+                    });
 
-                session.bridgePort.postMessage({
-                    subject: "bridge:createCastSession",
-                    data: {
-                        appId: sessionRequest.appId,
-                        receiverDevice
-                    }
-                });
+                    session.bridgePort.postMessage({
+                        subject: "bridge:createCastSession",
+                        data: {
+                            appId: sessionRequest.appId,
+                            receiverDevice
+                        }
+                    });
+
+                    // Session creation and its create message succeeded, so
+                    // this start no longer needs a failure-release handle. This
+                    // only drops castManager's entitlement record: the
+                    // deviceManager gate stays pending until real session media
+                    // releases it.
+                    bypassAnnouncement?.commit();
+                } catch (err) {
+                    bypassAnnouncement?.release();
+                    throw err;
+                }
 
                 break;
             }
 
-            let pendingRokuMediaDeviceId: string | undefined;
+            let pendingRokuMedia: RokuLoadAnnouncement | undefined;
             // This handler invocation is one session start, so the load it
             // announces must be announced exactly once.
             const rokuSessionSeq = beginRokuSessionStart();
@@ -1277,9 +1290,10 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                 }
 
                 if (selection.device.deviceType === "roku") {
-                    if (beginRokuSessionLoad(selection.device, rokuSessionSeq)) {
-                        pendingRokuMediaDeviceId = selection.device.id;
-                    }
+                    pendingRokuMedia = beginRokuSessionLoad(
+                        selection.device,
+                        rokuSessionSeq
+                    );
                 }
 
                 instance.contentPort.postMessage({
@@ -1324,10 +1338,17 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                         receiverDevice: selection.device
                     }
                 });
+
+                // Session creation and its create message succeeded, so this
+                // start no longer needs a failure-release handle. This only
+                // drops castManager's entitlement record: the deviceManager
+                // gate stays pending until real session media releases it.
+                pendingRokuMedia?.commit();
             } catch (err) {
-                if (pendingRokuMediaDeviceId) {
-                    deviceManager.cancelRokuMediaLoad(pendingRokuMediaDeviceId);
-                }
+                // Release only the gate THIS invocation opened: a repeat call
+                // does not announce, and a late failure must not clear a newer
+                // session start's gate.
+                pendingRokuMedia?.release();
                 logger.error("Session request failed in cast manager", err);
                 instance.contentPort.postMessage({
                     subject: "cast:sessionRequestCancelled"
@@ -1403,15 +1424,62 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
 }
 
 /**
- * Monotonic session-start counter, and the starts whose load has already been
- * announced. A token is never reused, so remembering the SET (rather than only
- * the last one) is what makes "exactly one generation per session start" hold
- * even when two starts interleave.
+ * Monotonic session-start counter, and the starts that are currently in flight
+ * with their load announced. A token is remembered only for the lifetime of its
+ * own start and is dropped at `commit()`/`release()`, so the set is bounded by
+ * the number of concurrent starts rather than by how often the user casts.
+ *
+ * What the Set guarantees is therefore exactly this: while a start is IN FLIGHT,
+ * a repeated call carrying its token does not announce twice. It does not (and
+ * cannot) guarantee anything about a start that has already finished - after
+ * `commit()`/`release()` the token is gone by design, so the call graph, not
+ * this Set, is what keeps a completed start from re-entering the shared entry.
+ * The counter stays monotonic, so a token is never handed to a different start.
  */
 let rokuSessionStartSeq = 0;
 const rokuLoadAnnouncedSeqs = new Set<number>();
-/** Bounds the bookkeeping; only recently started sessions can still re-enter. */
-const ROKU_LOAD_ANNOUNCED_SEQ_LIMIT = 32;
+
+/**
+ * One session start's announcement, and the handle that releases the local
+ * pending-media gate it opened.
+ *
+ * The gate is per DEVICE (`deviceManager.pendingRokuMediaLoads`) while
+ * announcements are per session start, so clearing it is only correct when the
+ * gate still belongs to this announcement: a start that fails LATE - after a
+ * newer start has announced - must not clear the newer start's gate, or ECP
+ * evidence the newer start is still waiting to filter gets accepted early.
+ */
+interface RokuLoadAnnouncement {
+    deviceId: string;
+    seq: number;
+    /**
+     * Releases the pending gate if this announcement still owns it. Releasing
+     * never rolls the generation back: that is impossible by design (the
+     * counter is monotonic and the previous load's media was already retired at
+     * discovery when the new generation was relayed).
+     */
+    release(): boolean;
+    /**
+     * Ends this start after its session was created and its
+     * `bridge:createCastSession` was sent: from here on the start can no longer
+     * fail into its catch, so it no longer needs a failure-release entitlement.
+     *
+     * It does NOT release the pending gate. The gate is released by the
+     * session's real media, so between this commit and that media arriving the
+     * gate is still set while this map no longer names anyone - which is the
+     * truth: nobody is entitled to release it on failure any more.
+     */
+    commit(): void;
+}
+
+/**
+ * The in-flight session-start announcement currently entitled to release each
+ * device's pending gate if session creation fails. This is NOT ownership of the
+ * gate itself: the gate lives in `deviceManager` and is released by the
+ * session's real media, or by the entitlement holder when its session never
+ * comes up.
+ */
+const rokuLoadAnnouncements = new Map<string, RokuLoadAnnouncement>();
 
 /**
  * Starts a session-start lifecycle and returns its token. Take one token per
@@ -1445,17 +1513,20 @@ function beginRokuSessionStart(): number {
  * to the discovery host - and nothing failed loudly.
  *
  * Exactly one generation per session start: a repeated call carrying the same
- * `seq` is a repeat of the same start and must not advance anything, because
- * that would retire the media the session had just bound.
+ * `seq` is a repeat of the same start and must not advance anything.
  *
- * Returns true when this call is the one that announced the load.
+ * Returns the announcement, or undefined when nothing was announced (not a
+ * Roku device, or a repeat of the same start). Whoever gets an announcement
+ * owns it: if the session it announces never comes up, it must `release()` it,
+ * otherwise the device's ECP media status stays filtered by the pending gate
+ * until some later successful load, a device-down, or a bridge reconnect.
  */
 function beginRokuSessionLoad(
     device: ReceiverDevice | undefined,
     seq = beginRokuSessionStart()
-): boolean {
+): RokuLoadAnnouncement | undefined {
     if (device?.deviceType !== "roku") {
-        return false;
+        return undefined;
     }
 
     if (rokuLoadAnnouncedSeqs.has(seq)) {
@@ -1463,18 +1534,51 @@ function beginRokuSessionLoad(
             deviceId: device.id,
             seq
         });
-        return false;
+        return undefined;
     }
 
     rokuLoadAnnouncedSeqs.add(seq);
-    if (rokuLoadAnnouncedSeqs.size > ROKU_LOAD_ANNOUNCED_SEQ_LIMIT) {
-        // A Set preserves insertion order, so this drops the oldest start.
-        rokuLoadAnnouncedSeqs.delete(
-            rokuLoadAnnouncedSeqs.values().next().value as number
-        );
-    }
     deviceManager.beginRokuMediaLoad(device.id);
-    return true;
+
+    const announcement: RokuLoadAnnouncement = {
+        deviceId: device.id,
+        seq,
+        release() {
+            const owner = rokuLoadAnnouncements.get(device.id);
+            // This start ends here either way. A REFUSED release still ends it
+            // (the token cannot legitimately re-enter), so the token must not be
+            // remembered forever - that would trade an unbounded set for the
+            // eviction this code deliberately does not do.
+            rokuLoadAnnouncedSeqs.delete(seq);
+            if (owner !== announcement) {
+                logger.info(
+                    // Not necessarily a NEWER start: this start may also have
+                    // ended already (its own commit, or an earlier release), in
+                    // which case nobody holds the entitlement.
+                    "Roku media load release ignored: this start no longer holds the pending gate",
+                    {
+                        deviceId: device.id,
+                        seq,
+                        ownerSeq: owner?.seq
+                    }
+                );
+                return false;
+            }
+
+            rokuLoadAnnouncements.delete(device.id);
+            deviceManager.cancelRokuMediaLoad(device.id);
+            return true;
+        },
+        commit() {
+            rokuLoadAnnouncedSeqs.delete(seq);
+            if (rokuLoadAnnouncements.get(device.id) === announcement) {
+                rokuLoadAnnouncements.delete(device.id);
+            }
+        }
+    };
+    rokuLoadAnnouncements.set(device.id, announcement);
+
+    return announcement;
 }
 
 /**
@@ -1521,38 +1625,52 @@ async function loadSender(
                 throw logger.error("Invalid session request");
             }
 
-            // The queued-selection path creates a real session here too, and
-            // it used to be the only one that did not announce the load: the
-            // popup's watchdog casts on its own, `triggerCast` lands in this
+            // The queued-selection path creates a real session here too, and it
+            // used to be the only one that did not announce the load: the
+            // popup's auto-cast casts on its own, `triggerCast` lands in this
             // branch, and the session came up with no load generation - so its
             // media was never mirrored to the discovery host. Announce before
             // the receiver is dispatched and before the session is created,
-            // matching the order the receiver-selector path uses. Nothing to
-            // roll back on failure: the generation is what retires the media
-            // of the previous session, and a session that never comes up
-            // publishes none.
-            beginRokuSessionLoad(selection.device);
+            // matching the order the receiver-selector path uses.
+            //
+            // If the session never comes up, this caller must release the gate
+            // it opened: the generation stays monotonic (nothing rolls back),
+            // but leaving the gate set would filter this device's ECP media
+            // status forever, with the UI stuck on the state `beginRokuMediaLoad`
+            // left behind.
+            const rokuLoad = beginRokuSessionLoad(selection.device);
 
-            instance.contentPort.postMessage({
-                subject: "cast:receiverAction",
-                data: {
-                    receiver: createReceiver(selection.device),
-                    action: ReceiverAction.CAST
-                }
-            });
+            try {
+                instance.contentPort.postMessage({
+                    subject: "cast:receiverAction",
+                    data: {
+                        receiver: createReceiver(selection.device),
+                        action: ReceiverAction.CAST
+                    }
+                });
 
-            const session = await createCastSession({
-                instance,
-                deviceId: selection.device.id
-            });
+                const session = await createCastSession({
+                    instance,
+                    deviceId: selection.device.id
+                });
 
-            session.bridgePort.postMessage({
-                subject: "bridge:createCastSession",
-                data: {
-                    appId: session.appId,
-                    receiverDevice: selection.device
-                }
-            });
+                session.bridgePort.postMessage({
+                    subject: "bridge:createCastSession",
+                    data: {
+                        appId: session.appId,
+                        receiverDevice: selection.device
+                    }
+                });
+
+                // Session creation and its create message succeeded, so this
+                // start no longer needs a failure-release handle. This only
+                // drops castManager's entitlement record: the deviceManager
+                // gate stays pending until real session media releases it.
+                rokuLoad?.commit();
+            } catch (err) {
+                rokuLoad?.release();
+                throw err;
+            }
 
             break;
         }
