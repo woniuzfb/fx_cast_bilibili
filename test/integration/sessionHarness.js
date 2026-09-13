@@ -479,25 +479,22 @@ async function main() {
                 "\nconsole.info('[harness] beginRokuMediaLoad', JSON.stringify({deviceId, hasBridgePort: Boolean(this.bridgePort)}));"
         );
         if (args.mediaBeforeGeneration) {
-            // Deterministic reordering, no sleeps: the generation is HELD here
-            // (synchronously, so the production post cannot slip out first) and
-            // released only when the harness writes the release flag, which this
-            // polls for. The hold is decided at instrumentation time precisely
-            // because a method that must decide synchronously cannot read storage
-            // to find out whether it is in hold mode.
+            // Deterministic reordering, no sleeps. The hold decision is made
+            // synchronously at the method's entry - it cannot read storage to
+            // find out whether it is in hold mode, because the production post
+            // would already have escaped by the time an async read resolved, so
+            // the mode is baked in at instrumentation time instead.
+            //
+            // ONE controller per device+generation: refresh replays call this
+            // same function for the same generation, and a timer per call would
+            // let several of them race to send, making "which release sent what"
+            // undecidable. Later calls refresh the port the release will use.
+            // A released key falls through to the production path, so same-
+            // generation replays keep their production semantics afterwards.
             patch(
                 "background/background.js",
                 "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
-                () =>
-                    "\nif (deviceId === " +
-                    JSON.stringify(FAKE_DEVICE_ID) +
-                    ") { const self = this; const held = { deviceId, loadGeneration };" +
-                    " void browser.storage.local.set({ __fxHarnessHeldGeneration: { deviceId, loadGeneration, at: Date.now() } });" +
-                    " const timer = setInterval(() => { browser.storage.local.get('__fxHarnessReleaseHeldGeneration').then(r => {" +
-                    " if (!r || !r.__fxHarnessReleaseHeldGeneration) return; clearInterval(timer);" +
-                    " try { self.bridgePort.postMessage({ subject: 'bridge:rokuSetLoadGeneration', data: { deviceId: held.deviceId, loadGeneration: held.loadGeneration } });" +
-                    " void browser.storage.local.set({ __fxHarnessGenerationReleased: { deviceId: held.deviceId, loadGeneration: held.loadGeneration, at: Date.now() } }); } catch (e) {}" +
-                    " }).catch(() => {}); }, 200); return; }"
+                () => "\n" + `if (deviceId === 'roku-HARNESS0001') { const self = this; self.__fxHarnessHolds = self.__fxHarnessHolds || {}; self.__fxHarnessReleased = self.__fxHarnessReleased || {}; const key = deviceId + ':' + loadGeneration; if (!self.__fxHarnessReleased[key]) { let entry = self.__fxHarnessHolds[key]; if (!entry) { entry = { deviceId: deviceId, loadGeneration: loadGeneration }; self.__fxHarnessHolds[key] = entry; entry.timer = setInterval(() => { browser.storage.local.get(['__fxHarnessReleaseHeldGeneration', '__fxHarnessDiagnosticRunId']).then(r => { const rel = r && r.__fxHarnessReleaseHeldGeneration; const runId = r && r.__fxHarnessDiagnosticRunId; if (!rel || rel.deviceId !== entry.deviceId || rel.loadGeneration !== entry.loadGeneration || rel.runId !== runId) return; clearInterval(entry.timer); self.__fxHarnessReleased[key] = true; delete self.__fxHarnessHolds[key]; const port = entry.latestBridgePort || self.bridgePort; try { port.postMessage({ subject: 'bridge:rokuSetLoadGeneration', data: { deviceId: entry.deviceId, loadGeneration: entry.loadGeneration } }); void browser.storage.local.set({ __fxHarnessGenerationReleased: { runId: runId, deviceId: entry.deviceId, loadGeneration: entry.loadGeneration, at: Date.now() } }); } catch (e) { void browser.storage.local.set({ __fxHarnessReleaseFailed: { runId: runId, deviceId: entry.deviceId, loadGeneration: entry.loadGeneration, error: String(e) } }); } }).catch(() => {}); }, 200); } entry.latestBridgePort = this.bridgePort; void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ __fxHarnessHeldGeneration: { runId: r && r.__fxHarnessDiagnosticRunId, deviceId: deviceId, loadGeneration: loadGeneration, at: Date.now() } })).catch(() => {}); return; } }`
             );
         }
         patch(
@@ -1121,7 +1118,7 @@ async function main() {
                 try {
                     await browser.storage.local.remove(${JSON.stringify(
                         diagnosticKeys
-                    )});
+                    ).replace('"]', '", "__fxHarnessHeldGeneration", "__fxHarnessReleaseHeldGeneration", "__fxHarnessGenerationReleased", "__fxHarnessReleaseFailed"]')});
                     await browser.storage.local.set({
                         __fxHarnessDiagnosticRunId: ${JSON.stringify(
                             diagnosticRunId
@@ -2113,14 +2110,20 @@ async function main() {
             await driver.executeAsyncScript(
                 `const done = arguments[arguments.length - 1];
                  browser.storage.local
-                    .set({ __fxHarnessReleaseHeldGeneration: true })
+                    .set({
+                        __fxHarnessReleaseHeldGeneration: {
+                            runId: ${JSON.stringify(diagnosticRunId)},
+                            deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
+                            loadGeneration: 1
+                        }
+                    })
                     .then(() => done(true), err => done(String(err)));`
             );
             await sleep(1500);
             const released = await driver.executeAsyncScript(
                 `const done = arguments[arguments.length - 1];
                  browser.storage.local
-                    .get(["__fxHarnessHeldGeneration", "__fxHarnessGenerationReleased"])
+                    .get(["__fxHarnessHeldGeneration", "__fxHarnessGenerationReleased", "__fxHarnessReleaseFailed"])
                     .then(v => done(v), err => done({ error: String(err) }));`
             );
             console.log("held/released generation:", JSON.stringify(released));
