@@ -7,7 +7,7 @@
 
 A Firefox extension that implements the Chromecast API and exposes it to web apps to enable cast support. Communication with receiver devices is handled by a companion application (bridge).
 
-Receiver devices are discovered over both mDNS (**Chromecast**) and SSDP (**Roku**). Roku devices are controlled via [ECP](https://developer.roku.com/docs/developer-program/dev-tools/external-control-api.md) — the bridge emulates a Chromecast session on top of it, so all senders (media, bilibili, CCTV) work against a Roku unchanged. Playback is handled by the Roku Media Player channel (falling back to Play On Roku), which fetches the media itself — proxied/relayed streams served by the bridge's LAN media server work as long as the Roku can reach this machine.
+Receiver devices are discovered over both mDNS (**Chromecast**) and SSDP (**Roku**). Roku devices are controlled via [ECP](https://developer.roku.com/docs/developer-program/dev-tools/external-control-api.md) — the bridge emulates a Chromecast session on top of it, so all senders (media, bilibili, CCTV) work against a Roku unchanged. Playback happens in a channel on the device that fetches the media itself, so relayed streams served by the bridge's LAN media server work as long as the Roku can reach this machine. See [Roku](#roku).
 
 ## Installing
 
@@ -32,6 +32,33 @@ The extension provides a whitelist for ensuring only trusted sites are allowed t
 Sites may be added to the whitelist, either by clicking one of the whitelist options in the toolbar button context menu whilst visiting the site, or by manually entering a valid [match pattern](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Match_patterns) on the options page.
 
 Whitelisted sites should then display a cast button as in Chrome, provided they're compatible with the extension/Firefox.
+
+## Roku
+
+Roku devices are first-class receivers, not a compatibility shim:
+
+-   **Discovery** is SSDP (`roku:ecp`), not mDNS — no Bonjour/Avahi involved.
+-   **Control** is [ECP](https://developer.roku.com/docs/developer-program/dev-tools/external-control-api.md) over port 8060: launch, keypresses, `/query/media-player` polling for playback state.
+-   **Playback** happens in a channel on the device, chosen by preference: [Media Assistant](https://channelstore.roku.com/details/782875) if installed (it honours the URL parameters everywhere), otherwise **Roku Media Player** (preinstalled on modern boxes), otherwise the legacy **Play On Roku**. The channel fetches the media itself, so anything served by the bridge's LAN media server works as long as the Roku can reach this machine.
+
+Because a channel does the playing, the Roku cannot decode what it does not support, and the page is not always the source:
+
+| Sender        | On a Roku                                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Media / HTML5 | The media URL is handed to the channel; the bridge proxies it when the original URL is not reachable from the device.           |
+| Bilibili      | The DASH video and audio tracks are remuxed into one HLS stream by the bridge, and the page's own player is the capture source. |
+| CCTV live     | A synthetic DVR playlist is built from the live stream so the receiver can seek inside it.                                      |
+
+### Play/pause and the page
+
+The receiver is authoritative: pausing on the Roku (remote, system UI, or any other controller) pauses the page player, and playing resumes it. Page players that produce the captured data — Bilibili's DASH capture and CCTV's live relay — are deliberately kept playing while the receiver is merely `BUFFERING` or starting up, because pausing them there would starve the relay that has to recover. A page that keeps playing while the Roku is paused is a bug, not a feature.
+
+### Requirements and known limits
+
+-   **Same subnet.** SSDP is multicast, so guest networks, access-point/client isolation, and some VPN or virtual adapters prevent discovery. This is unrelated to the Chromecast/Bonjour path.
+-   The Roku must be able to reach this machine over the LAN (the bridge's media server listens on a local address reported to the device).
+-   **No DRM.** The Roku path has no CDM and the bridge never rewrites protected streams, so DRM-encumbered media cannot be cast to a Roku.
+-   Roku Media Player's own limits apply: containers/codecs the channel cannot decode will not play, even when the bridge can serve them.
 
 ## Building
 
@@ -128,6 +155,10 @@ Extension build script (`build:extension`) arguments:
     Package with web-ext.
 -   `--mode` `"development"`, `"production"`
     Sets build mode. Defaults to `development` unless packaging.
+-   `--out-dir` `<path>`
+    Write the built extension here instead of `dist/extension`. Used by the integration harness, which must not read or write `dist/`. Incompatible with `--package`, `--sign` and `--watch`.
+-   `--bridge-name` `<name>`
+    Override the native messaging host name this build asks for. The harness builds with a name of its own so its manifest cannot shadow a real bridge install.
 
 Bridge build script (`build:bridge`) arguments:
 
@@ -137,6 +168,8 @@ Bridge build script (`build:bridge`) arguments:
     Linux installer package type.
 -   `--use-pkg`
     Create single binary with pkg.
+-   `--out-dir` `<path>`
+    Write the built bridge (and its launcher and manifest) here instead of `dist/bridge`. Used by the integration harness; incompatible with `--package`.
 -   `--arch` `"x64"`, `"x86"`, `"arm64"`
     Select platform arch to build for. Defaults to current arch.
 
@@ -157,7 +190,7 @@ $ npm run package
 -   `dist/bridge/`
     ... contains the installer package: `fx_cast_bilibili_bridge-<version>-<arch>.(pkg|deb|rpm|exe)`
 -   `dist/extension/`
-    ... contains the built extension archive: `fx_cast-<version>.xpi`.
+    ... contains the built extension archive: `fx_cast_bilibili-<version>.xpi`.
 
 Packaging examples:
 
@@ -186,6 +219,24 @@ $ npm test
 
 # Or if testing in Chrome
 $ SELENIUM_BROWSER=chrome npm test
+```
+
+Two suites do not need a browser at all:
+
+```sh
+# Page-sender behaviour: which receiver states pause/resume the page, and that a
+# pause does not break the source supply. Bundles the real sender with the cast
+# SDK stubbed; `--pre-fix` runs the same checks against an older revision and
+# requires the known old failures, so it doubles as a negative control.
+$ npm run test:senders
+$ node test/senders/pauseSync.js --pre-fix
+
+# Cross-process integration harness (real Firefox, two native hosts, a fake
+# Roku): the Roku session, LOAD relay, session media and the failure paths.
+# See test/integration/README.md - it builds its own private copies and never
+# touches dist/ or an installed bridge.
+$ node test/integration/selfTest.js
+$ node test/integration/sessionHarness.js
 ```
 
 ## Credit

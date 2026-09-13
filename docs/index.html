@@ -4,12 +4,13 @@
         <meta charset="utf-8" />
         <meta
             name="description"
-            content="A browser extension that enables Chromecast support for casting web apps (like YouTube, Netflix or BBC iPlayer)."
+            content="A browser extension that enables Chromecast and Roku support for casting web apps (like YouTube, Netflix or BBC iPlayer)."
         />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
 
         <title>
-            fx_cast_bilibili: Chromecast for Firefox with bilibili support
+            fx_cast_bilibili: Chromecast and Roku for Firefox with bilibili
+            support
         </title>
 
         <link rel="stylesheet" href="fonts/stylesheet.css" />
@@ -29,7 +30,7 @@
                 <header class="site-header">
                     <h1 class="site-header__title">fx_cast_bilibili</h1>
                     <p class="site-header__subtitle">
-                        Chromecast <nobr>for Firefox</nobr>
+                        Chromecast and Roku <nobr>for Firefox</nobr>
                     </p>
                 </header>
             </div>
@@ -40,8 +41,9 @@
                             <div class="description">
                                 <p>
                                     A Firefox extension that enables Chromecast
-                                    support for casting web apps (like YouTube,
-                                    Netflix or BBC iPlayer) and HTML5 media.
+                                    and Roku support for casting web apps (like
+                                    YouTube, Netflix or BBC iPlayer) and HTML5
+                                    media.
                                 </p>
                                 <p class="disclaimer">
                                     Requires a companion bridge application to
@@ -156,6 +158,131 @@
                             <li class="faqs__list-item">
                                 <details class="faq">
                                     <summary class="faq__summary">
+                                        <h3>
+                                            Does this work with Roku devices?
+                                        </h3>
+                                    </summary>
+                                    <div class="faq__content">
+                                        <p>
+                                            Yes. Roku devices are discovered
+                                            over SSDP and controlled through
+                                            <abbr
+                                                title="External Control Protocol"
+                                                >ECP</abbr
+                                            >
+                                            on port 8060, and the bridge makes a
+                                            Roku look like a cast receiver, so
+                                            the same senders work against it.
+                                        </p>
+                                        <p>
+                                            Playback happens in a channel on the
+                                            device that fetches the media itself
+                                            — Media Assistant when it is
+                                            installed, otherwise Roku Media
+                                            Player, otherwise the older Play On
+                                            Roku. Anything the bridge serves
+                                            from its local media server
+                                            therefore works as long as the Roku
+                                            can reach this computer.
+                                        </p>
+                                        <p>
+                                            Bilibili streams are remuxed into a
+                                            single HLS stream by the bridge, and
+                                            CCTV's live stream is served through
+                                            a synthetic DVR playlist so the
+                                            receiver can seek inside it.
+                                        </p>
+                                        <p class="disclaimer">
+                                            DRM-encumbered media cannot be cast
+                                            to a Roku: there is no CDM on that
+                                            path, and protected streams are
+                                            never rewritten. See
+                                            <a
+                                                href="#Why_can't_I_cast_DRM-encumbered_media?"
+                                                >below</a
+                                            >.
+                                        </p>
+                                    </div>
+                                </details>
+                            </li>
+                            <li class="faqs__list-item">
+                                <details class="faq">
+                                    <summary class="faq__summary">
+                                        <h3>Why isn't my Roku being found?</h3>
+                                    </summary>
+                                    <div class="faq__content">
+                                        <p>
+                                            Roku discovery is SSDP, so the
+                                            Bonjour/Avahi notes below do not
+                                            apply to it — but SSDP is multicast,
+                                            which means the Roku and this
+                                            computer must be on the same subnet.
+                                        </p>
+                                        <p>Common causes:</p>
+                                        <ul>
+                                            <li>
+                                                <p>
+                                                    A guest network, or
+                                                    client/access-point
+                                                    isolation, which drops
+                                                    multicast traffic between
+                                                    clients.
+                                                </p>
+                                            </li>
+                                            <li>
+                                                <p>
+                                                    A VPN or a virtual network
+                                                    adapter taking the multicast
+                                                    traffic off the LAN.
+                                                </p>
+                                            </li>
+                                            <li>
+                                                <p>
+                                                    A network that blocks the
+                                                    device's ECP port (8060), in
+                                                    which case the Roku is found
+                                                    but does not respond to
+                                                    commands.
+                                                </p>
+                                            </li>
+                                        </ul>
+                                    </div>
+                                </details>
+                            </li>
+                            <li class="faqs__list-item">
+                                <details class="faq">
+                                    <summary class="faq__summary">
+                                        <h3>
+                                            Why does the page pause or play when
+                                            I use the Roku remote?
+                                        </h3>
+                                    </summary>
+                                    <div class="faq__content">
+                                        <p>
+                                            The receiver is authoritative: the
+                                            page player follows it, so pausing
+                                            on the Roku pauses the page and
+                                            playing resumes it — no matter which
+                                            controller changed the receiver's
+                                            state (remote, system UI, or the
+                                            extension itself).
+                                        </p>
+                                        <p>
+                                            One exception is deliberate: a page
+                                            whose player produces the data being
+                                            cast (Bilibili's DASH capture,
+                                            CCTV's live relay) keeps playing
+                                            while the receiver is only buffering
+                                            or starting up. Pausing it there
+                                            would starve the relay that has to
+                                            recover.
+                                        </p>
+                                    </div>
+                                </details>
+                            </li>
+                            <li class="faqs__list-item">
+                                <details class="faq">
+                                    <summary class="faq__summary">
                                         <h3>Why do I need the bridge?</h3>
                                     </summary>
                                     <div class="faq__content">
@@ -168,6 +295,22 @@
                                             with Chromecast devices require
                                             making TCP connections, which is
                                             also not possible.
+                                        </p>
+                                        <p>
+                                            Roku devices need the same kind of
+                                            help for the same reason: they are
+                                            discovered over
+                                            <abbr
+                                                title="Simple Service Discovery Protocol"
+                                                >SSDP</abbr
+                                            >
+                                            multicast and controlled over
+                                            <abbr
+                                                title="External Control Protocol"
+                                                >ECP</abbr
+                                            >
+                                            on port 8060, neither of which an
+                                            extension can do on its own.
                                         </p>
                                         <p>Relevant Firefox bugs:</p>
                                         <ul>
@@ -247,9 +390,11 @@
                                         <p>
                                             The bridge relies on system services
                                             (Bonjour on Windows/macOS, Avahi on
-                                            Linux) to provide device discovery.
-                                            If the bridge isn't able to find any
-                                            devices, there may be a
+                                            Linux) for <b>Chromecast</b>
+                                            discovery, and answers
+                                            <b>Roku</b> devices over SSDP
+                                            itself. If the bridge isn't able to
+                                            find any devices, there may be a
                                             configuration issue (either with the
                                             system service or the network).
                                         </p>
@@ -296,6 +441,22 @@
                                                     network adapters typically
                                                     will not work out of the
                                                     box, for example.
+                                                </p>
+                                            </li>
+                                            <li>
+                                                <p>
+                                                    Roku discovery uses
+                                                    multicast SSDP rather than
+                                                    mDNS, so it fails for a
+                                                    different set of reasons:
+                                                    guest networks, client
+                                                    isolation and VPN adapters.
+                                                    See
+                                                    <a
+                                                        href="#Why_isn't_my_Roku_being_found?"
+                                                        >Why isn't my Roku being
+                                                        found?</a
+                                                    >
                                                 </p>
                                             </li>
                                             <li>
@@ -373,7 +534,7 @@
                                             <li>
                                                 <code
                                                     >C:\Program
-                                                    Files\fx_cast\</code
+                                                    Files\fx_cast_bilibili\</code
                                                 >
                                             </li>
 
@@ -398,7 +559,7 @@
                                             <li>
                                                 <code
                                                     >/Library/Application
-                                                    Support/fx_cast/</code
+                                                    Support/fx_cast_bilibili/</code
                                                 >
                                             </li>
                                             <li>
@@ -429,7 +590,9 @@
                                         </p>
                                         <ul>
                                             <li>
-                                                <code>/opt/fx_cast/</code>
+                                                <code
+                                                    >/opt/fx_cast_bilibili/</code
+                                                >
                                             </li>
                                             <li>
                                                 <code
@@ -532,6 +695,14 @@
                                         </h3>
                                     </summary>
                                     <div class="faq__content">
+                                        <p>
+                                            On a Roku this is doubly true: that
+                                            path has no CDM at all, and the
+                                            bridge never rewrites a protected
+                                            stream, so DRM-encumbered media
+                                            cannot be cast to a Roku even when
+                                            it plays in the browser.
+                                        </p>
                                         <p>
                                             Unforunately, for DRM-encumbered
                                             media, there's no network-accessible
