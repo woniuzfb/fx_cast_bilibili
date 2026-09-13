@@ -123,7 +123,6 @@ const EXTENSION_ID = bridgeConfig.extensionId;
  * normal browser session can be used at the same time.
  */
 const HARNESS_HOST_NAME = `${bridgeConfig.applicationName}_harness`;
-const HARNESS_BRIDGE_NAME = `${bridgeConfig.applicationExecutableName}_harness`;
 /** The fake device's SSDP responder port: NOT 1900, so the developer's own
  *  bridge (which searches on 1900) can never discover the harness's fake Roku. */
 const HARNESS_SSDP_PORT = 19009;
@@ -2775,17 +2774,6 @@ async function main() {
                             path.join(harnessDir, `conn-${entry.pid}-out.ndjson`)
                         )
                     }));
-            const wireGenerations = conns =>
-                conns
-                    .flatMap(c => [...c.inbound, ...c.outbound])
-                    .filter(
-                        m =>
-                            m.subject === "bridge:rokuSetLoadGeneration" &&
-                            m.message &&
-                            m.message.data &&
-                            m.message.data.deviceId === FAKE_DEVICE_ID
-                    )
-                    .map(m => m.message.data.loadGeneration);
             const wireStatusSamples = conns =>
                 conns
                     .flatMap(c => c.outbound)
