@@ -139,6 +139,12 @@ export type RokuMediaStatusEmission =
       };
 
 interface RokuRemoteOptions {
+    /**
+     * LOAD generation to attribute samples to from the very first poll. Needed
+     * because the constructor starts polling immediately, so a generation set
+     * after construction is already too late for that first sample.
+     */
+    initialLoadGeneration?: number;
     onReceiverStatusUpdate?: (status: ReceiverStatus) => void;
     onMediaStatusUpdate?: (emission: RokuMediaStatusEmission) => void;
     /**
@@ -202,7 +208,7 @@ export default class RokuRemote {
     private playbackPollToken = 0;
     /**
      * The extension's current LOAD generation for this device, pushed over
-     * bridge:rokuSetLoadGeneration. The bridge cannot derive it (Roku's
+     * bridge:rokuSetLoadGeneration or supplied at construction. The bridge cannot derive it (Roku's
      * mediaSessionId is a constant 1, and a contentId can be loaded twice), so
      * a sample without one is reported without it rather than guessed at.
      */
@@ -296,6 +302,13 @@ export default class RokuRemote {
                 this.emitMediaStatus({ source });
             }
         );
+        // Applied BEFORE the first poll: the constructor kicks that poll off
+        // itself, and a sample snapshots the generation when it starts, so
+        // setting it afterwards would leave exactly one sample unattributed -
+        // and an unattributed sample is accepted by the coordinator by design.
+        if (options.initialLoadGeneration !== undefined) {
+            this.setLoadGeneration(options.initialLoadGeneration);
+        }
         // First update right away so the popup has data on open.
         void this.poll();
     }

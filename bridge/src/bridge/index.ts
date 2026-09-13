@@ -222,6 +222,12 @@ export function run(messaging: Messenger) {
 
                     if (shouldWatchStatus) {
                         const remote = new RokuRemote(device, {
+                            // Must be a constructor option: the remote starts
+                            // polling inside its constructor, so a later
+                            // setLoadGeneration would miss the first sample.
+                            initialLoadGeneration: rokuLoadGenerations.get(
+                                device.id
+                            ),
                             onReceiverStatusUpdate(status) {
                                 messaging.sendMessage({
                                     subject: "main:receiverDeviceStatusUpdated",
@@ -273,12 +279,8 @@ export function run(messaging: Messenger) {
                             }
                         });
 
-                        const pendingGeneration = rokuLoadGenerations.get(
-                            device.id
-                        );
-                        if (pendingGeneration !== undefined) {
-                            remote.setLoadGeneration(pendingGeneration);
-                        }
+                        // The cached generation was passed in above; this is
+                        // only the registration.
                         rokuRemotes.set(device.id, remote);
                     }
                 });
