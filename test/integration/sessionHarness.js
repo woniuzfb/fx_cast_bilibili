@@ -1459,8 +1459,38 @@ async function main() {
             inbound: readNdjson(path.join(harnessDir, `conn-${pid}-in.ndjson`)),
             outbound: readNdjson(path.join(harnessDir, `conn-${pid}-out.ndjson`))
         });
-        const sessionConn = session ? readConn(session.pid) : { inbound: [], outbound: [] };
-        const discoveryConn = discovery ? readConn(discovery.pid) : { inbound: [], outbound: [] };
+        // RE-READ everything here. The connection data used by the checks above
+        // was snapshotted before the LOAD, and the media this section is about
+        // arrives ~60s later - so searching those stale arrays could never find
+        // it. (Same class of mistake as the stale whitelist and the stale
+        // bundle: reading a snapshot instead of the current state.)
+        const connectionsNow = readNdjson(path.join(harnessDir, "spawns.ndjson"))
+            .filter(entry => entry.event === undefined)
+            .map(entry => ({
+                pid: entry.pid,
+                inbound: readNdjson(
+                    path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
+                ),
+                outbound: readNdjson(
+                    path.join(harnessDir, `conn-${entry.pid}-out.ndjson`)
+                )
+            }));
+        const discoveryConnectionsNow = connectionsNow.filter(c =>
+            c.inbound.some(m => m.subject === "bridge:startDiscovery")
+        );
+        console.log(
+            "connections at Stage 2 time:",
+            JSON.stringify(
+                discoveryConnectionsNow.map(c => ({
+                    pid: c.pid,
+                    inbound: [...new Set(c.inbound.map(m => m.subject))]
+                }))
+            )
+        );
+        const sessionConn = session
+            ? readConn(session.pid)
+            : { inbound: [], outbound: [] };
+        const discoveryConn = discoveryConnectionsNow[0] || { inbound: [], outbound: [] };
 
         // Hop 1: the session host publishes the LOAD's media.
         const sessionMedia = sessionConn.outbound.find(
@@ -1608,7 +1638,7 @@ async function main() {
         }
 
         // Hop 2: the extension relayed the generation and the media to discovery.
-        const discoveryInbound = discoveryConnections.flatMap(conn =>
+        const discoveryInbound = discoveryConnectionsNow.flatMap(conn =>
             conn.inbound
         );
         const relayedGeneration = discoveryInbound.find(
@@ -1632,7 +1662,7 @@ async function main() {
             // Per connection, so a failure cannot be read as "nothing arrived
             // anywhere" when in fact the messages went to another process.
             JSON.stringify(
-                discoveryConnections.map(conn => ({
+                discoveryConnectionsNow.map(conn => ({
                     pid: conn.pid,
                     subjects: [
                         ...new Set(conn.inbound.map(m => m.subject))
@@ -1666,7 +1696,7 @@ async function main() {
         );
 
         // Hop 3: the UI channel synthesises BUFFERING, and says so.
-        const discoveryOutbound = discoveryConnections.flatMap(
+        const discoveryOutbound = discoveryConnectionsNow.flatMap(
             conn => conn.outbound
         );
         const statusEmission = discoveryOutbound.find(
