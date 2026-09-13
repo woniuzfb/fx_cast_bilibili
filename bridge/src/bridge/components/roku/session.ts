@@ -836,7 +836,17 @@ export default class RokuSession {
 
         try {
             await keypress(this.receiverDevice.host, key);
-            if (this.tornDown || token !== this.playbackIntentToken) return;
+            if (this.tornDown) return;
+            if (token !== this.playbackIntentToken) {
+                // A newer transport took over while this one was in flight. Its
+                // intent must not be restored, but this request is still a Cast
+                // request waiting for a reply: settle it with the current
+                // effective state instead of leaving it pending forever. The
+                // dense sampling window is deliberately NOT requested here -
+                // the newer transport already owns it.
+                this.sendMediaStatus(requestId);
+                return;
+            }
             this.pendingPlayerIntent = {
                 intent,
                 requestedState:
@@ -1127,6 +1137,10 @@ export default class RokuSession {
             if (this.tornDown) return;
 
             const previousState = this.playerState;
+            // What the sender currently sees. Settling a pending intent below
+            // can change this without the observation moving at all, and the
+            // sender must be told: an opposite poll has to roll it back.
+            const previousEffectiveState = this.effectivePlayerState();
             const previousPosition = this.lastPosition;
 
             if (this.awaitingConsume) {
@@ -1246,12 +1260,19 @@ export default class RokuSession {
                 Math.abs(this.lastPosition - previousPosition) >
                     SEEK_REPORT_THRESHOLD_SECONDS;
             const stateChanged = previousState !== this.playerState;
+            const effectiveStateChanged =
+                previousEffectiveState !== this.effectivePlayerState();
             // Advancing position while PLAYING is the normal heartbeat —
             // push periodically so seek bars move (senders that poll
             // GET_STATUS also get fresh data on demand).
             const heartbeat = this.playerState === "PLAYING";
 
-            if (stateChanged || positionMoved || heartbeat) {
+            if (
+                stateChanged ||
+                effectiveStateChanged ||
+                positionMoved ||
+                heartbeat
+            ) {
                 this.sendMediaStatus();
             }
         } catch {
