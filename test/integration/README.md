@@ -97,6 +97,49 @@ generation for the device. If either fails, the harness reports that the click u
 the generic path and skips the Stage 2 assertions - otherwise a missing generation
 looks exactly like a relay failure, which is how it was mis-read twice.
 
+### The queued-selection gap (`--auto-cast-gap`, `--auto-cast-fixed`)
+
+Gate B exists because a session can be created without a load generation. These two
+modes pin that defect (and its fix) at the root-cause boundary instead of letting it
+show up as a Stage 2 cascade:
+
+```sh
+node test/integration/sessionHarness.js --auto-cast-gap     # pre-fix control, ~90s
+node test/integration/sessionHarness.js --auto-cast-fixed   # post-fix check, ~90s
+```
+
+Both provoke the same production sequence: the popup's own auto-cast timer fires
+because the selector's `popup:init` never reached the popup (the failure the popup's
+watchdog exists for), so `castCurrentTab()` -> `action:castCurrentTab` ->
+`triggerCast()` -> `getReceiverSelection()` **closes the `requestSession` selector and
+opens its own** ("getReceiverSelection: closing selector for the same tab before
+replacement" in the background console). The click that follows therefore resolves a
+replacement selector owned by `triggerCast`, whose session is created by
+`loadSender()`'s App branch - the path that used to skip `beginRokuMediaLoad()`
+entirely.
+
+To make that an order rather than a race, the modes (a) navigate the popup tab only
+*after* a run-bound marker says a selector opened, and (b) suppress the FIRST
+`popup:init` post of the run once, through a run-bound storage flag. Both are
+test-copy-only edits of the instrumented copy; the popup's timers, the init data and
+every other mode are untouched.
+
+Asserted by BOTH modes (the session-creation evidence a fix must not change): the
+popup's auto-cast log and `action:castCurrentTab`, the requestSession selector having
+opened and then been replaced on the same tab, the suppressed first init, the page's
+`requestSession` success callback, a session host with its own PID, and
+`bridge:createCastSession` on it.
+
+`--auto-cast-gap` additionally asserts the defect: no marker before the production
+Roku branch, no `__fxHarnessLoadGenerationBegan`, and **zero**
+`bridge:rokuSetLoadGeneration` for the device on every discovery connection. It
+reports `queued Roku App session was created without establishing a load generation`.
+
+`--auto-cast-fixed` asserts the fix: exactly ONE generation for the session start
+(not "at least one" - a second advance would retire the media the session is about
+to publish), that generation on a discovery connection, and the session media
+carrying that same generation.
+
 ## Status
 
 Validated end to end (real processes, real sockets):

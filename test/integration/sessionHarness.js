@@ -120,6 +120,8 @@ function parseArgs(argv) {
         startupSynthesis: false,
         mediaBeforeGeneration: false,
         generationAdvance: false,
+        autoCastGap: false,
+        autoCastFixed: false,
         instrument: false
     };
     for (let i = 0; i < argv.length; i++) {
@@ -130,6 +132,8 @@ function parseArgs(argv) {
             args.mediaBeforeGeneration = true;
         else if (argv[i] === "--generation-advance")
             args.generationAdvance = true;
+        else if (argv[i] === "--auto-cast-gap") args.autoCastGap = true;
+        else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
         else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
         else if (argv[i] === "--instrument-content-initial")
             args.instrument = true;
@@ -350,6 +354,41 @@ async function findHandleByUrl(driver, fragment, timeoutMs) {
 
 async function main() {
     const args = parseArgs(process.argv.slice(2));
+    /**
+     * The queued-selection gap mode.
+     *
+     * Production defect under test: a Roku App session created by
+     * `loadSender()`'s App branch never establishes a load generation, because
+     * the only `beginRokuMediaLoad()` call sits in the `main:requestSession`
+     * handler — a path a *replacement* selector never reaches. The session is
+     * real (the page's requestSession succeeds, a session host process exists,
+     * `bridge:createCastSession` goes out) and then nothing of it can ever be
+     * mirrored to discovery: a silent failure, not a visible one.
+     *
+     * How the replacement selector is produced here, deterministically: the
+     * popup's own auto-cast timer (500 ms after the popup mounts, "the selector
+     * never told me it was ready") calls `castCurrentTab()` with no selection ->
+     * `action:castCurrentTab` -> `triggerCast()` -> `getReceiverSelection()`,
+     * which CLOSES the `requestSession` selector and opens its own. The click
+     * that follows then resolves the replacement, so `triggerCast()` — not the
+     * `main:requestSession` handler — owns the session that gets created.
+     *
+     * That race is real but not schedulable: normally the popup tab is mounted
+     * seconds before `requestSession`, so the auto-cast fires harmlessly first.
+     * The mode therefore manipulates only the ORDER, not any production logic:
+     *   (a) the popup tab is navigated to the popup page AFTER the
+     *       requestSession selector has opened (a run-bound marker written in
+     *       the test copy's `ReceiverSelector.open` says so), and
+     *   (b) the FIRST `popup:init` post is suppressed, so the popup does not
+     *       learn that a selector is ready and its own timer fires. Suppressed
+     *       is a run-bound, one-shot, test-copy-only edit; the popup's timers,
+     *       the production init data path and every other mode are untouched.
+     * `--auto-cast-gap` asserts the pre-fix outcome (session created, no
+     * generation), `--auto-cast-fixed` asserts the post-fix outcome (the same
+     * session-creation evidence, exactly one generation, media bound to it).
+     */
+    const gapMode = args.autoCastGap || args.autoCastFixed;
+    const expectGap = args.autoCastGap;
     const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-s1-"));
     console.log("harness dir:", harnessDir);
     install({ name: defaultName });
@@ -588,13 +627,17 @@ async function main() {
             );
         });
         // Gate B: was a load generation actually created for this device?
+        //
+        // `loadGenerationCalls` counts the hook's calls for this background, so
+        // "a generation was created" and "exactly one generation was created for
+        // this session start" are different assertions rather than the same one.
         patch(
             "background/background.js",
             "nextRokuLoadGeneration(deviceId);",
             () =>
                 storageMarker(
                     "__fxHarnessLoadGenerationBegan",
-                    "deviceId, loadGeneration"
+                    "deviceId, loadGeneration, loadGenerationCalls: (this.__fxHarnessLoadGenerationCalls = (this.__fxHarnessLoadGenerationCalls || 0) + 1)"
                 )
         );
         {
@@ -688,6 +731,108 @@ async function main() {
                     "deviceId, hasIdentity: Boolean(identity), loadGeneration: identity ? identity.loadGeneration : null"
                 )
         );
+        if (gapMode) {
+            // Run-bound proof that a receiver selector OPENED, which is the
+            // order this mode has to establish: the popup must mount while the
+            // `requestSession` selector is already waiting. Without that, the
+            // popup's first port connection is answered with popup:init and its
+            // auto-cast timer is cleared - no replacement selector, no gap.
+            patch("background/background.js", "async open(opts) {", () =>
+                storageMarker(
+                    "__fxHarnessSelectorOpened",
+                    "selectorTabId: this.tabId, selectorOpenLog: (() => { const log = (globalThis.__fxHarnessSelectorOpenLog = globalThis.__fxHarnessSelectorOpenLog || {}); const key = String(this.tabId); const entry = (log[key] = log[key] || { count: 0, firstAt: Date.now() }); entry.count++; entry.lastAt = Date.now(); return log; })()"
+                )
+            );
+            // Suppress the FIRST `popup:init` post of this run, once, on a
+            // run-bound flag. This is the provocation, and it is deliberately
+            // narrow: it reproduces the exact production failure the popup's
+            // own watchdog exists for ("a stale page<->background messaging
+            // channel... that message never arrives"), i.e. a ready selector
+            // whose init data does not reach the popup. Everything else - the
+            // popup's timers, its state machine, the init data itself - stays
+            // production code.
+            {
+                const initFile = path.join(
+                    extensionDir,
+                    "background/background.js"
+                );
+                const initText = fs.readFileSync(initFile, "utf8");
+                const subjectAt = initText.indexOf('subject: "popup:init",');
+                const callAt =
+                    subjectAt === -1
+                        ? -1
+                        : initText.lastIndexOf(
+                              "this.messagePort.postMessage({",
+                              subjectAt
+                          );
+                if (subjectAt === -1 || callAt === -1) {
+                    throw new Error(
+                        "sessionHarness: cannot instrument the popup:init post (anchor not found)"
+                    );
+                }
+                const objectAt =
+                    callAt + "this.messagePort.postMessage(".length;
+                let depth = 0;
+                let objectEnd = -1;
+                for (let i = objectAt; i < initText.length; i++) {
+                    if (initText[i] === "{") depth++;
+                    else if (initText[i] === "}") {
+                        depth--;
+                        if (depth === 0) {
+                            objectEnd = i;
+                            break;
+                        }
+                    }
+                }
+                let statementEnd = objectEnd + 1;
+                while (
+                    statementEnd < initText.length &&
+                    /\s/.test(initText[statementEnd])
+                )
+                    statementEnd++;
+                if (
+                    objectEnd === -1 ||
+                    initText[statementEnd] !== ")" ||
+                    initText[statementEnd + 1] !== ";"
+                ) {
+                    throw new Error(
+                        "sessionHarness: the popup:init post does not have the expected shape"
+                    );
+                }
+                statementEnd += 2;
+                // `this` stays the ReceiverSelector: the arrow function keeps the
+                // method's lexical `this`, so the data object (`this.appInfo`,
+                // `this.devices`, ...) needs no rewriting.
+                const replacement =
+                    "\n      {\n" +
+                    "        const __fxInitSelf = this;\n" +
+                    "        const __fxInitPost = () => __fxInitSelf.messagePort.postMessage(" +
+                    initText.slice(objectAt, objectEnd + 1) +
+                    ");\n" +
+                    "        try {\n" +
+                    "          browser.storage.local.get(['__fxHarnessSuppressPopupInit', '__fxHarnessDiagnosticRunId']).then(r => {\n" +
+                    "            const flag = r && r.__fxHarnessSuppressPopupInit;\n" +
+                    "            const runId = r && r.__fxHarnessDiagnosticRunId;\n" +
+                    "            if (flag && flag.runId === runId && !globalThis.__fxHarnessPopupInitSuppressedOnce) {\n" +
+                    "              globalThis.__fxHarnessPopupInitSuppressedOnce = true;\n" +
+                    "              void browser.storage.local.set({ __fxHarnessPopupInitSuppressed: { runId: runId, selectorTabId: __fxInitSelf.tabId, at: Date.now() } }).catch(() => {});\n" +
+                    "              return;\n" +
+                    "            }\n" +
+                    "            __fxInitPost();\n" +
+                    "          }, () => __fxInitPost()).catch(() => __fxInitPost());\n" +
+                    "        } catch (e) { __fxInitPost(); }\n" +
+                    "      }";
+                fs.writeFileSync(
+                    initFile,
+                    initText.slice(0, callAt) +
+                        replacement +
+                        initText.slice(statementEnd)
+                );
+                console.log(
+                    "gap mode: the first popup:init post is suppressible for this run"
+                );
+            }
+        }
         for (const relPath of [
             "background/background.js",
             "ui/popup/index.js"
@@ -1009,6 +1154,12 @@ async function main() {
 
         // P: the selector page, created inactive and navigated AFTER S is
         // active again.
+        //
+        // In the gap modes the navigation is deliberately NOT scheduled here:
+        // those modes need the popup to mount after `requestSession` has opened
+        // its selector, so they navigate this same tab later (see the
+        // requestSession block below). Navigating it early would let the
+        // popup's auto-cast fire harmlessly before the selector exists.
         const popupTabId = await driver.executeAsyncScript(
             `const done = arguments[arguments.length - 1];
              (async () => {
@@ -1017,11 +1168,15 @@ async function main() {
                         url: "about:blank",
                         active: false
                     });
-                    setTimeout(() => {
+                    ${
+                        gapMode
+                            ? ""
+                            : `setTimeout(() => {
                         browser.tabs.update(tab.id, {
                             url: ${JSON.stringify(popupUrl)}
                         });
-                    }, 2500);
+                    }, 2500);`
+                    }
                     done(tab.id);
                 } catch (err) {
                     done(null);
@@ -1177,7 +1332,13 @@ async function main() {
         const diagnosticKeys = [
             "__fxHarnessBgControl",
             "__fxHarnessSyncMediaEnter",
-            "__fxHarnessSyncMediaIdentity"
+            "__fxHarnessSyncMediaIdentity",
+            // Gap-mode keys: cleared every run so "no selector had opened yet"
+            // and "the first init was suppressed" cannot be read from an
+            // earlier run's leftovers.
+            "__fxHarnessSelectorOpened",
+            "__fxHarnessPopupInitSuppressed",
+            "__fxHarnessSuppressPopupInit"
         ];
         await driver.switchTo().window(consoleTab);
         const prepared = await driver.executeAsyncScript(
@@ -1250,6 +1411,55 @@ async function main() {
             })
         );
 
+        // Gap modes arm the provocation here, while an extension page is still
+        // the current context (the probe above ran in it): the flag has to be
+        // readable by the background BEFORE the first popup:init post of this
+        // run, and awaiting the write is what makes that an ordering fact.
+        let selectorOpenedBeforeRequest;
+        let senderTabId;
+        let requestSelectorTabId;
+        if (gapMode) {
+            // Independent identity for the sender tab. `tabs.query({url})` with a
+            // match pattern returned nothing here even with the `tabs`
+            // permission, so the list is filtered by URL instead, and the raw
+            // list is reported when it is not exactly one tab.
+            senderTabId = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.tabs.query({}).then(tabs => {
+                    const matches = tabs.filter(t => String(t.url || "").startsWith(${JSON.stringify(
+                        origin
+                    )}));
+                    done(matches.length === 1
+                        ? matches[0].id
+                        : { count: matches.length, urls: tabs.map(t => String(t.url || "").slice(0, 60)) });
+                 }, err => done({ error: String(err) }));`
+            );
+            check(
+                "gap mode: the sender tab is addressable on its own (the selector's tabId)",
+                typeof senderTabId === "number",
+                JSON.stringify(senderTabId)
+            );
+            const armed = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .set({ __fxHarnessSuppressPopupInit: { runId: ${JSON.stringify(
+                        diagnosticRunId
+                    )}, at: Date.now() } })
+                    .then(() => done(true), err => done(String(err)));`
+            );
+            check(
+                "gap mode: the one-shot popup:init suppression is armed for this run",
+                armed === true,
+                String(armed)
+            );
+            selectorOpenedBeforeRequest = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .get("__fxHarnessSelectorOpened")
+                    .then(v => done(v.__fxHarnessSelectorOpened || null), err => done(String(err)));`
+            );
+        }
+
         await driver.switchTo().window(senderTab);
 
         const marksBeforeSession = markCount();
@@ -1257,6 +1467,72 @@ async function main() {
         await driver.executeScript(
             "window.__HARNESS_REQUEST_SESSION__().catch(() => {});"
         );
+
+        if (gapMode) {
+            // The popup mounts only now, i.e. AFTER requestSession opened its
+            // selector: mounting it earlier is what makes the popup's auto-cast
+            // fire harmlessly before any selector exists, which is why the
+            // production race only shows up occasionally.
+            await driver.switchTo().window(consoleTab);
+            let selectorOpened;
+            const selectorDeadline = Date.now() + 20000;
+            while (Date.now() < selectorDeadline) {
+                selectorOpened = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .get("__fxHarnessSelectorOpened")
+                        .then(v => done(v.__fxHarnessSelectorOpened || null), err => done(String(err)));`
+                );
+                // The tab IDENTITY comes from the marker itself: it is the tab
+                // whose selector the run's requestSession opened, which is what
+                // the suppressed init and the replacement have to match. The
+                // separately resolved sender tab id is only a cross-check.
+                const log =
+                    selectorOpened &&
+                    selectorOpened.selectorOpenLog &&
+                    selectorOpened.selectorOpenLog[
+                        String(selectorOpened.selectorTabId)
+                    ];
+                if (
+                    selectorOpened &&
+                    selectorOpened.runId === diagnosticRunId &&
+                    log &&
+                    log.firstAt >= requestAtSession
+                )
+                    break;
+                selectorOpened = undefined;
+                await sleep(100);
+            }
+            requestSelectorTabId =
+                selectorOpened && selectorOpened.selectorTabId;
+            check(
+                "gap mode: the requestSession selector opened before the popup was mounted",
+                Boolean(selectorOpened) &&
+                    !selectorOpenedBeforeRequest &&
+                    senderTabId === requestSelectorTabId,
+                JSON.stringify({
+                    before: selectorOpenedBeforeRequest || null,
+                    after: selectorOpened || null,
+                    openedForSelectorTab: requestSelectorTabId,
+                    senderTabId,
+                    requestAt: requestAtSession
+                })
+            );
+            // Navigating from this extension page (rather than by switching to
+            // the popup tab) keeps the sender tab the ACTIVE tab of its window -
+            // the popup derives its `popup:<tabId>` port name from it, and the
+            // background's `action:castCurrentTab` handler resolves the same
+            // way.
+            await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.tabs
+                    .update(${JSON.stringify(
+                        popupTabId
+                    )}, { url: ${JSON.stringify(popupUrl)} })
+                    .then(() => done(true), err => done(String(err)));`
+            );
+            await driver.switchTo().window(senderTab);
+        }
 
         // --- ordering: wait for the extension to say the selector is bound ----
         // (markCount is defined above, next to where the baseline is taken.)
@@ -1691,9 +1967,20 @@ async function main() {
         );
         // The channel is only self-proven when BOTH run-bound markers are there;
         // without that, a missing Gate B marker explains nothing.
+        //
+        // In the gap modes the selection marker is EXPECTED to be absent - that
+        // absence is the defect's signature, not a broken channel - so the
+        // channel is proven by the popup's click marker instead, which is
+        // written through the same storage path from a different context. The
+        // background's own storage path is separately proven by the run-bound
+        // probe/ack at the top of this run.
         check(
-            "Gate B channel self-proof: the click and selection markers are present for this run",
-            Boolean(clickControl && selectionMarker),
+            gapMode
+                ? "Gate B channel self-proof: the popup's click marker is present for this run (the selection marker is the defect's signature, checked below)"
+                : "Gate B channel self-proof: the click and selection markers are present for this run",
+            gapMode
+                ? Boolean(clickControl)
+                : Boolean(clickControl && selectionMarker),
             JSON.stringify({
                 clickControl: clickControl || null,
                 selectionMarker: selectionMarker || null
@@ -1718,9 +2005,15 @@ async function main() {
                 Number.isFinite(began.loadGeneration)
         );
         const pathBWasTaken = !pathA || !gateBOk;
+        // In `--auto-cast-gap` the missing generation IS the expected result, so
+        // that mode asserts its absence here (and this check is one of the ones
+        // allowed to flip once the defect is fixed). Every other mode - including
+        // `--auto-cast-fixed` - requires the generation.
         check(
-            "Gate B: a load generation was created for the fake device",
-            gateBOk,
+            gapMode && expectGap
+                ? "gap mode: no load generation was created for the fake device (the pre-fix defect)"
+                : "Gate B: a load generation was created for the fake device",
+            gapMode && expectGap ? !gateBOk : gateBOk,
             // The detail must name WHICH way it failed: a missing marker and a
             // marker from another run look the same as a boolean, and
             // JSON.stringify(undefined) prints nothing at all.
@@ -1743,6 +2036,205 @@ async function main() {
                     "Stage 2 assertions would be meaningless, so they are skipped " +
                     "(Gate A ok:", pathA, "Gate B ok:", gateBOk, ")"
             );
+        }
+
+        let gapGenerationMarker;
+        if (gapMode) {
+            // ================= the queued-selection gap ======================
+            //
+            // Reported at the root-cause boundary on purpose: the defect is
+            // "this session start never established a load generation", not the
+            // Stage 2 cascade that follows from it. `--auto-cast-gap` asserts the
+            // pre-fix outcome, `--auto-cast-fixed` the post-fix one; the session
+            // creation evidence is asserted identically by both, so a fix can
+            // only flip the generation assertions.
+            await driver.switchTo().window(consoleTab);
+            gapGenerationMarker = undefined;
+            const gapEvidence = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .get(["__fxHarnessPopupInitSuppressed", "__fxHarnessSelectorOpened", "__fxHarnessLoadGenerationBegan"])
+                    .then(v => done(v), err => done({ error: String(err) }));`
+            );
+            const suppressed = markerFor(
+                gapEvidence,
+                "__fxHarnessPopupInitSuppressed"
+            );
+            const opened = markerFor(gapEvidence, "__fxHarnessSelectorOpened");
+            const generationMarker = markerFor(
+                gapEvidence,
+                "__fxHarnessLoadGenerationBegan"
+            );
+            gapGenerationMarker = generationMarker;
+            // The popup's own words: its auto-cast timer fired, and the cast it
+            // started was the current-tab one (`action:castCurrentTab`). Read
+            // from the captured extension console, which is the only place the
+            // popup's mirrored debug log shows up.
+            const popupLogs =
+                phaseBConsole && fs.existsSync(phaseBConsole)
+                    ? fs.readFileSync(phaseBConsole, "utf8")
+                    : "";
+            const autoCastFired = popupLogs.includes("auto-cast timer fired");
+            const castCurrentTabSent = popupLogs.includes(
+                "castCurrentTab -> action:castCurrentTab"
+            );
+            const selectorRetried = popupLogs.includes(
+                "selector did not open in time; auto-retrying cast once"
+            );
+            check(
+                "gap mode: the popup's own auto-cast fired and sent the current-tab cast (popup log)",
+                autoCastFired && castCurrentTabSent,
+                JSON.stringify({
+                    autoCastFired,
+                    castCurrentTabSent,
+                    selectorRetried
+                })
+            );
+            check(
+                "gap mode: the popup's first init for this run was suppressed, for the requestSession selector's tab",
+                Boolean(
+                    suppressed &&
+                        suppressed.runId === diagnosticRunId &&
+                        suppressed.selectorTabId === requestSelectorTabId
+                ),
+                JSON.stringify({
+                    suppressed: suppressed || null,
+                    expectedRunId: diagnosticRunId,
+                    expectedTabId: requestSelectorTabId
+                })
+            );
+            check(
+                "gap mode: the requestSession selector was REPLACED by the auto-cast's selector for the same tab",
+                Boolean(
+                    opened &&
+                        opened.runId === diagnosticRunId &&
+                        opened.selectorOpenLog &&
+                        opened.selectorOpenLog[String(requestSelectorTabId)] &&
+                        opened.selectorOpenLog[String(requestSelectorTabId)]
+                            .count >= 2
+                ),
+                JSON.stringify({
+                    opened: opened || null,
+                    expectedTabId: requestSelectorTabId,
+                    selectorOpens:
+                        opened &&
+                        opened.selectorOpenLog &&
+                        opened.selectorOpenLog[String(requestSelectorTabId)]
+                })
+            );
+            // Positive half: the session is real. Its native host has its own
+            // PID, the bridge was told to create the session, and the page's own
+            // requestSession success callback ran.
+            const sessionCreated = Boolean(
+                session &&
+                    session.inbound.some(
+                        m => m.subject === "bridge:createCastSession"
+                    )
+            );
+            check(
+                "gap mode: bridge:createCastSession reached the session host",
+                sessionCreated,
+                JSON.stringify(
+                    session
+                        ? session.inbound.map(m => m.subject).slice(0, 10)
+                        : null
+                )
+            );
+            check(
+                "gap mode: the page's requestSession still succeeded",
+                Boolean(
+                    pageResult && pageResult.requestSessionSucceeded === true
+                ),
+                JSON.stringify(pageResult)
+            );
+            // Negative half: nothing in the normal path ran, and no generation
+            // exists for this device on ANY connection.
+            const generationRelays = discoveryConnections.flatMap(conn =>
+                [...conn.inbound, ...conn.outbound].filter(
+                    m =>
+                        m.subject === "bridge:rokuSetLoadGeneration" &&
+                        m.message &&
+                        m.message.data &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID
+                )
+            );
+            check(
+                "gap mode: the selection marker before the Roku branch is absent for this run",
+                !selectionMarker,
+                JSON.stringify({
+                    selectionMarker: selectionMarker || null,
+                    clickMarkerPresent: Boolean(clickControl)
+                })
+            );
+            if (expectGap) {
+                check(
+                    "queued Roku App session was created without establishing a load generation",
+                    Boolean(sessionCreated) &&
+                        Boolean(
+                            pageResult && pageResult.requestSessionSucceeded
+                        ) &&
+                        Boolean(clickControl) &&
+                        Boolean(backgroundControl) &&
+                        !selectionMarker &&
+                        !generationMarker &&
+                        generationRelays.length === 0,
+                    JSON.stringify({
+                        sessionCreated,
+                        pageRequestSessionSucceeded: Boolean(
+                            pageResult && pageResult.requestSessionSucceeded
+                        ),
+                        backgroundStorageControl: Boolean(backgroundControl),
+                        selectionMarker: selectionMarker || null,
+                        loadGenerationBegan: generationMarker || null,
+                        generationRelaysOnDiscovery: generationRelays.length,
+                        discoveryConnections: discoveryConnections.length
+                    })
+                );
+            } else {
+                // Post-fix: the same session start must establish EXACTLY one
+                // generation - not "at least one". A second advance would retire
+                // the media the session is about to publish, because
+                // RokuSessionMediaSync.apply() retires stale generations first.
+                check(
+                    "fixed mode: this session start established exactly one load generation",
+                    Boolean(
+                        generationMarker &&
+                            generationMarker.deviceId === FAKE_DEVICE_ID &&
+                            Number.isFinite(generationMarker.loadGeneration) &&
+                            generationMarker.loadGenerationCalls === 1
+                    ),
+                    JSON.stringify(generationMarker || null)
+                );
+                check(
+                    "fixed mode: that generation reached a discovery connection",
+                    generationRelays.some(
+                        m =>
+                            m.message.data.loadGeneration ===
+                            (generationMarker &&
+                                generationMarker.loadGeneration)
+                    ),
+                    JSON.stringify(
+                        generationRelays.map(m => ({
+                            pid: m.pid,
+                            at: m.at,
+                            subject: m.subject,
+                            loadGeneration: m.message.data.loadGeneration
+                        }))
+                    )
+                );
+                check(
+                    "queued Roku App session established exactly one load generation",
+                    Boolean(sessionCreated) &&
+                        Boolean(generationMarker) &&
+                        generationMarker.loadGenerationCalls === 1 &&
+                        generationRelays.length > 0,
+                    JSON.stringify({
+                        sessionCreated,
+                        loadGenerationBegan: generationMarker || null,
+                        generationRelaysOnDiscovery: generationRelays.length
+                    })
+                );
+            }
         }
         await driver.switchTo().window(senderTab);
 
@@ -2441,6 +2933,26 @@ async function main() {
                     mediaGeneration: relayedMedia.message.data.loadGeneration
                 })
             );
+            if (gapMode) {
+                // The queued session's own media has to carry the generation
+                // the session start established - not merely *a* generation.
+                check(
+                    "fixed mode: the session media carries the generation this session start established",
+                    Boolean(gapGenerationMarker) &&
+                        Number.isFinite(gapGenerationMarker.loadGeneration) &&
+                        relayedMedia.message.data.loadGeneration ===
+                            gapGenerationMarker.loadGeneration,
+                    JSON.stringify({
+                        sessionStartGeneration:
+                            gapGenerationMarker &&
+                            gapGenerationMarker.loadGeneration,
+                        mediaGeneration:
+                            relayedMedia.message.data.loadGeneration,
+                        generationOnDiscovery:
+                            relayedGeneration.message.data.loadGeneration
+                    })
+                );
+            }
         }
         }
         // ---- Stage 3, case 3: generation advance retires the old load --------
