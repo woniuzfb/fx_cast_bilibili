@@ -778,29 +778,9 @@ function applyPageRouteResult(
         return false;
     }
 
-    // A page route may only become the owner if its receiver clock is usable:
-    // the strict observation gate compares pollStartedAt against that value, so
-    // adopting the owner with an implausible one would strand the command in a
-    // state it can never confirm. Rejecting the route here leaves the command
-    // free to fall back to the bridge.
-    if (
-        result.receiverRequested &&
-        !isPlausiblePageDispatchTimestamp(
-            result.receiverDispatchStartedAt,
-            Date.now()
-        )
-    ) {
-        command.routeAttempts.page = "rejected";
-        command.pagePhase = "failed";
-        command.error = "implausible receiver dispatch timestamp";
-        logger.error("Rejected page result with an implausible timestamp", {
-            deviceId: device.id,
-            commandId: command.commandId,
-            receiverDispatchStartedAt: result.receiverDispatchStartedAt
-        });
-        return false;
-    }
-
+    // NOTE: an implausible receiver clock is rejected by the caller before this
+    // runs (normalised to "no usable result"), so that it converges through the
+    // pageProgressObserved conflict path instead of falling back to the bridge.
     assignPlaybackOwner(command, "page-sender");
     command.pagePhase =
         result.disposition === "already-target"
@@ -880,9 +860,32 @@ export async function dispatchPlaybackCommand(
             // Superseded or terminated while the page route was in flight.
             return viewFor(command);
         }
-        const pageResult = isValidPagePlaybackDispatchResult(raw)
+        const structurallyValid = isValidPagePlaybackDispatchResult(raw)
             ? raw
             : undefined;
+        // An accepted result whose receiver clock cannot be trusted is not a
+        // usable page result: the strict observation gate compares pollStartedAt
+        // against exactly that value. Normalising it here (rather than inside
+        // applyPageRouteResult) routes it through the same conflict convergence
+        // as a missing or rejected result, which is what keeps a page that
+        // already proved it executed from being handed to a second owner.
+        const pageResult =
+            structurallyValid?.receiverRequested === true &&
+            !isPlausiblePageDispatchTimestamp(
+                structurallyValid.receiverDispatchStartedAt,
+                Date.now()
+            )
+                ? undefined
+                : structurallyValid;
+        if (structurallyValid && !pageResult) {
+            logger.error("Page result carried an implausible dispatch clock", {
+                deviceId: device.id,
+                commandId: command.commandId,
+                intent,
+                receiverDispatchStartedAt:
+                    structurallyValid.receiverDispatchStartedAt
+            });
+        }
         if (!pageResult) {
             // No usable result: the entry point is missing, the value was not a
             // legal shape, or the call threw. That is only a page rejection if
@@ -927,6 +930,10 @@ export async function dispatchPlaybackCommand(
                 intent,
                 error: pageResult.error
             });
+            // The page's own progress is the stronger evidence and it may
+            // already have established a page phase, a receiver request and its
+            // dispatch clock. Those must survive: an anomalous result may not
+            // write back over facts the page already proved.
             assignPlaybackOwner(command, "page-sender");
             command.routeAttempts.page = "accepted";
             ensureCommandHasWatchdog(device, command);
