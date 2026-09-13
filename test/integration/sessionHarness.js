@@ -1634,7 +1634,10 @@ async function main() {
         );
 
         // Hop 3: the UI channel synthesises BUFFERING, and says so.
-        const statusEmission = discoveryConn.outbound.find(
+        const discoveryOutbound = discoveryConnections.flatMap(
+            conn => conn.outbound
+        );
+        const statusEmission = discoveryOutbound.find(
             m =>
                 m.subject === "main:receiverDeviceMediaStatusUpdated" &&
                 afterLoad(m) &&
@@ -1662,7 +1665,7 @@ async function main() {
         );
 
         // Hop 4: the confirmation channel still sees the real, idle device.
-        const observation = discoveryConn.outbound.find(
+        const observation = discoveryOutbound.find(
             m =>
                 m.subject === "main:rokuPlaybackObservation" &&
                 m.message.data.deviceId === FAKE_DEVICE_ID &&
