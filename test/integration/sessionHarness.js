@@ -481,11 +481,47 @@ async function main() {
         // its marker appears the channel works and the silence of the other
         // background markers becomes meaningful. Absent, no negative conclusion
         // about production flow may be drawn at all.
+        // Background markers must go through the extension's own logger: a
+        // direct console.info from the background never reached the captured
+        // output even for a call site proven to have run. Routing a runtime
+        // message to the background's own handler is the channel that works.
+        const bgMarker = (label, fields) =>
+            `\ntry { browser.runtime.sendMessage({ subject: 'popup:debugLog', data: {` +
+            ` level: 'info', message: '[harness] ${label}', data: { ${fields} } } }); } catch (e) {}`;
         patch(
             "background/background.js",
             "setRokuSessionMedia(deviceId, ownerId, media) {",
+            () => bgMarker("control setRokuSessionMedia", "deviceId: String(deviceId)")
+        );
+        patch(
+            "background/background.js",
+            "beginRokuMediaLoad(deviceId) {",
             () =>
-                "\nconsole.info('[harness] channel-alive setRokuSessionMedia', String(deviceId));"
+                bgMarker(
+                    "beginRokuMediaLoad",
+                    "deviceId, hasBridgePort: Boolean(this.bridgePort)"
+                )
+        );
+        patch("background/background.js", "nextRokuLoadGeneration(deviceId);", () =>
+            bgMarker("beginRokuMediaLoad generation", "deviceId, loadGeneration")
+        );
+        patch(
+            "background/background.js",
+            "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
+            () =>
+                bgMarker(
+                    "setRokuLoadGenerationOnBridge enter",
+                    "deviceId, loadGeneration, hasBridgePort: Boolean(this.bridgePort)"
+                )
+        );
+        patch(
+            "background/background.js",
+            "syncRokuSessionMediaToBridge(deviceId, ownerId, media) {",
+            () =>
+                bgMarker(
+                    "syncRokuSessionMediaToBridge enter",
+                    "deviceId, ownerId, isClear: media === null, hasBridgePort: Boolean(this.bridgePort), mediaPresent: media !== null"
+                )
         );
         // The popup's console is NOT mirrored, but its runtime-message channel
         // is (popupLog -> popup:debugLog -> background logger). So the click's
@@ -506,6 +542,19 @@ async function main() {
                 ` data: { ${payload}, deviceId: device && device.id } } }); } catch (e) {}`
             );
         });
+        for (const relPath of [
+            "background/background.js",
+            "ui/popup/index.js"
+        ]) {
+            const file = path.join(extensionDir, relPath);
+            const parsed = spawnSync(process.execPath, ["--check", file]);
+            if (parsed.status !== 0) {
+                throw new Error(
+                    `sessionHarness: instrumentation produced unparsable ${relPath}: ` +
+                        String(parsed.stderr).slice(0, 300)
+                );
+            }
+        }
         console.log("instrumented test copy:", extensionDir);
     }
     const profileDir = makeProfile(harnessDir, extensionDir);
@@ -1161,9 +1210,26 @@ async function main() {
                 }))
             )
         );
-        const discovery = connections.find(c =>
+        // ALL connections that asked for discovery, not just the first: a
+        // bridge refresh creates a NEW native process, and `.find()` returned
+        // whichever came first - so messages posted to the replacement would
+        // look like messages that were never sent.
+        const discoveryConnections = connections.filter(c =>
             c.inbound.some(m => m.subject === "bridge:startDiscovery")
         );
+        for (const conn of discoveryConnections) {
+            console.log(
+                `discovery connection ${conn.pid}:`,
+                JSON.stringify({
+                    startedAt: (conn.inbound.find(
+                        m => m.subject === "bridge:startDiscovery"
+                    ) || {}).at,
+                    lastInboundAt: (conn.inbound.slice(-1)[0] || {}).at,
+                    subjects: [...new Set(conn.inbound.map(m => m.subject))].slice(0, 14)
+                })
+            );
+        }
+        const discovery = discoveryConnections[0];
         const session = connections.find(
             c =>
                 c.pid !== (discovery && discovery.pid) &&
@@ -1517,13 +1583,16 @@ async function main() {
         }
 
         // Hop 2: the extension relayed the generation and the media to discovery.
-        const relayedGeneration = discoveryConn.inbound.find(
+        const discoveryInbound = discoveryConnections.flatMap(conn =>
+            conn.inbound
+        );
+        const relayedGeneration = discoveryInbound.find(
             m =>
                 m.subject === "bridge:rokuSetLoadGeneration" &&
                 afterLoad(m) &&
                 m.message.data.deviceId === FAKE_DEVICE_ID
         );
-        const relayedMedia = discoveryConn.inbound.find(
+        const relayedMedia = discoveryInbound.find(
             m =>
                 m.subject === "bridge:rokuSetSessionMedia" &&
                 afterLoad(m) &&
