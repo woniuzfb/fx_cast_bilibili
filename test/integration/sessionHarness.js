@@ -600,14 +600,80 @@ async function main() {
         // S: the sender page (must stay the active tab). Arm A is the
         // production entry; B and C are diagnostics/controls, run only if A
         // fails, so the pass path measures nothing but the real chain.
-        await driver.get(`${origin}/sender.html?arm=A`);
+        // This FIRST load is snapshot T0 and is diagnostic only: it happens
+        // before this session's dynamic registration has been confirmed, which
+        // is exactly the ordering the timing question is about.
+        const epoch = () => Math.random().toString(36).slice(2, 10);
+        await driver.get(`${origin}/sender.html?arm=A&epoch=${epoch()}`);
         const senderTab = await driver.getWindowHandle();
+        const t0 = await driver.executeScript(
+            "return window.__HARNESS_SNAPSHOT__();"
+        );
+        console.log(
+            "T0 (first load, before the registration is confirmed):",
+            JSON.stringify({
+                contentInitialRan: t0.contentInitialRan,
+                assignedSrc: t0.assignedSrc,
+                effectiveSrc: t0.effectiveSrc,
+                scriptLoaded: t0.sdkScriptLoaded
+            })
+        );
 
         // O: an extension page, used only as the extension-side console (the
         // one place `browser.tabs.*` can be called from).
         await driver.switchTo().newWindow("tab");
+        const consoleTab = await driver.getWindowHandle();
         await driver.get(optionsUrl);
         await sleep(1500);
+
+        // The whitelist must be written in THIS session. Writing it in phase A
+        // and restarting did NOT persist: phase B came up with the three
+        // defaults only, so every page measured until now was never whitelisted
+        // at all - which quietly invalidated the earlier "not injected" and
+        // "host pattern is not the cause" readings. The storage change
+        // re-registers the content script live, so nothing needs restarting.
+        const writtenInB = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             (async () => {
+                try {
+                    const stored = await browser.storage.sync.get("options");
+                    const options = stored.options || {};
+                    const list = Array.isArray(options.siteWhitelist)
+                        ? options.siteWhitelist.slice()
+                        : [];
+                    for (const pattern of [
+                        "http://127.0.0.1/*",
+                        "http://localhost/*",
+                        "http://*/*"
+                    ]) {
+                        if (!list.some(entry => entry.pattern === pattern)) {
+                            list.push({ pattern, isEnabled: true });
+                        }
+                    }
+                    options.siteWhitelist = list;
+                    options.siteWhitelistEnabled = true;
+                    await browser.storage.sync.set({ options });
+                    // Read back from storage, so "was it stored?" is answered
+                    // rather than assumed.
+                    const verify = await browser.storage.sync.get("options");
+                    done({
+                        ok: true,
+                        stored: (verify.options?.siteWhitelist || []).map(e => e.pattern)
+                    });
+                } catch (err) {
+                    done({ ok: false, error: String(err) });
+                }
+             })();`
+        );
+        check(
+            "the whitelist write is stored in this session",
+            Boolean(
+                writtenInB &&
+                    writtenInB.ok &&
+                    writtenInB.stored.includes("http://*/*")
+            ),
+            JSON.stringify(writtenInB)
+        );
 
         // P: the selector page, created inactive and navigated AFTER S is
         // active again.
@@ -636,8 +702,44 @@ async function main() {
             String(popupTabId)
         );
 
+        // Registration must be confirmed in THIS session: whether a dynamic
+        // registration comes back after a browser restart is one of the facts
+        // under test, so phase A's reading cannot be reused as evidence.
+        const registration = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             const deadline = Date.now() + 20000;
+             const tick = async () => {
+                try {
+                    const scripts = await browser.scripting.getRegisteredContentScripts();
+                    const family = scripts.filter(s => /whitelist-content/.test(s.id));
+                    const wide = family.some(s => (s.matches || []).includes("http://*/*"));
+                    if (family.length && wide) {
+                        done({ ok: true, family: family.map(s => ({ id: s.id, matches: s.matches })) });
+                        return;
+                    }
+                    if (Date.now() > deadline) {
+                        done({ ok: false, family: family.map(s => ({ id: s.id, matches: s.matches })) });
+                        return;
+                    }
+                } catch (err) {
+                    done({ ok: false, error: String(err) });
+                    return;
+                }
+                setTimeout(tick, 250);
+             };
+             tick();`
+        );
+        check(
+            "this session registered the whitelist script (http://*/* present)",
+            Boolean(registration && registration.ok),
+            JSON.stringify(registration)
+        );
+
+        // T1: a NEW document, navigated only after the registration above is
+        // confirmed, so a difference between T0 and T1 is attributable to
+        // ordering rather than to state left in a stale document.
         await driver.switchTo().window(senderTab);
-        await driver.navigate().refresh();
+        await driver.get(`${origin}/sender.html?arm=A&epoch=${epoch()}`);
         const waitForSdk = async ms =>
             driver.executeAsyncScript(
                 `const done = arguments[arguments.length - 1];
@@ -651,6 +753,22 @@ async function main() {
         // whether or not the arm passes.
         const armASnapshot = await driver.executeScript(
             "return window.__HARNESS_SNAPSHOT__();"
+        );
+        const t1 = armASnapshot;
+        const injected = state =>
+            Boolean(state && state.contentInitialRan &&
+                (state.contentInitialRan.head || state.contentInitialRan.tail));
+        console.log(
+            "timing verdict:",
+            injected(t0)
+                ? "T0 was already injected -> ordering is NOT the explanation"
+                : injected(t1)
+                ? "T0 not injected, T1 injected -> PAGE BEAT THE REGISTRATION"
+                : t1.contentInitialRan && t1.contentInitialRan.head && !t1.contentInitialRan.tail
+                ? "T1 injected and threw partway -> contentInitial itself throws"
+                : t1.contentInitialRan && t1.contentInitialRan.head && t1.contentInitialRan.tail
+                ? "T1 fully executed -> the src patch is what does not take"
+                : "T1 still not injected -> ordering excluded; run the executeScript positive control"
         );
         console.log(
             "arm A evidence:",
@@ -718,6 +836,11 @@ async function main() {
         // Guard against a vacuous pass: the popup page renders every device as
         // soon as it mounts, so finding and clicking a row proves nothing about
         // requestSession. The page must have asked first.
+        // Read the page's own record from the SENDER tab: after the search above
+        // the current context can be the popup or the console tab, where this
+        // object does not exist - which reported "false" for a page that had in
+        // fact already called requestSession.
+        await driver.switchTo().window(senderTab);
         const askedForSession = await driver.executeScript(
             "return !!(window.__HARNESS_RESULT__ && window.__HARNESS_RESULT__.requestSessionCalled);"
         );
