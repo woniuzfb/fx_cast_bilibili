@@ -19,6 +19,7 @@ import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusP
 import type { PlaybackCommandProgress } from "../../../shared/playbackCommand";
 
 import {
+    currentRokuMediaIdentities,
     nextRokuLoadGeneration,
     setRokuMediaIdentityFields,
     terminateActivePlaybackCommand,
@@ -416,6 +417,13 @@ export default new (class extends TypedEventTarget<EventMap> {
                 );
             }
 
+            // The discovery process is new (or was recreated), so its remotes
+            // and its generation cache start empty while the extension keeps
+            // its identities across a reconnect. Replay them, otherwise a
+            // device that is mid-playback would report every sample as
+            // unattributed until the next LOAD.
+            this.replayRokuLoadGenerations();
+
             this.bridgePort.postMessage({
                 subject: "bridge:startDiscovery",
                 data: {
@@ -495,6 +503,22 @@ export default new (class extends TypedEventTarget<EventMap> {
                 err
             );
             return false;
+        }
+    }
+
+    /**
+     * Re-pushes every current LOAD generation to the discovery bridge.
+     *
+     * The bridge caches what arrives before the matching remote exists, so the
+     * order relative to bridge:startDiscovery does not matter; what matters is
+     * that a reconnect does not silently drop the binding.
+     */
+    private replayRokuLoadGenerations() {
+        for (const [deviceId, identity] of currentRokuMediaIdentities()) {
+            this.setRokuLoadGenerationOnBridge(
+                deviceId,
+                identity.loadGeneration
+            );
         }
     }
 

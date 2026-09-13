@@ -22,6 +22,17 @@ const remotes = new Map<string, Remote>();
 /** Roku devices discovered alongside cast devices; keyed by device ID. */
 let rokuDeviceBrowser: RokuDeviceBrowser | null = null;
 const rokuRemotes = new Map<string, RokuRemote>();
+/**
+ * LOAD generations that arrived before their RokuRemote existed.
+ *
+ * The extension pushes a generation as soon as a LOAD begins, which can be
+ * before discovery has produced the remote for that device; and a
+ * bridge:startDiscovery handler creates remotes asynchronously, so a push that
+ * follows a reconnect can easily precede them. Keeping the value here means the
+ * remote can be given it whenever it appears, instead of the push being
+ * silently dropped and generation binding quietly degrading to "unattributed".
+ */
+const rokuLoadGenerations = new Map<string, number>();
 let shutdownPromise: Promise<void> | undefined;
 let mediaServerCommandQueue: Promise<void> = Promise.resolve();
 
@@ -210,61 +221,65 @@ export function run(messaging: Messenger) {
                     });
 
                     if (shouldWatchStatus) {
-                        rokuRemotes.set(
-                            device.id,
-                            new RokuRemote(device, {
-                                onReceiverStatusUpdate(status) {
-                                    messaging.sendMessage({
-                                        subject:
-                                            "main:receiverDeviceStatusUpdated",
-                                        data: {
-                                            deviceId: device.id,
-                                            status
-                                        }
-                                    });
-                                },
-                                onPlaybackObservation(
-                                    loadGeneration,
-                                    status,
-                                    provenance
-                                ) {
-                                    messaging.sendMessage({
-                                        subject: "main:rokuPlaybackObservation",
-                                        data: {
-                                            deviceId: device.id,
-                                            status,
-                                            loadGeneration,
-                                            provenance
-                                        }
-                                    });
-                                },
-                                onMediaStatusUpdate(emission) {
-                                    // The clear arm is a local notification and
-                                    // never crosses the bridge (the extension
-                                    // would find no status to apply).
-                                    if (!emission.status) return;
-                                    messaging.sendMessage({
-                                        subject:
-                                            "main:receiverDeviceMediaStatusUpdated",
-                                        data: {
-                                            deviceId: device.id,
-                                            status: emission.status,
-                                            provenance: emission.provenance
-                                        }
-                                    });
-                                },
-                                // Flattened buildStatusMedia snapshot: the
-                                // nested MediaInformation/customData would
-                                // otherwise collapse as `{…}` in the Firefox
-                                // background console preview.
-                                onStatusMediaDebug(debug) {
-                                    messaging.sendMessage({
-                                        subject: "main:rokuStatusMediaDebug",
-                                        data: debug
-                                    });
-                                }
-                            })
+                        const remote = new RokuRemote(device, {
+                            onReceiverStatusUpdate(status) {
+                                messaging.sendMessage({
+                                    subject: "main:receiverDeviceStatusUpdated",
+                                    data: {
+                                        deviceId: device.id,
+                                        status
+                                    }
+                                });
+                            },
+                            onPlaybackObservation(
+                                loadGeneration,
+                                status,
+                                provenance
+                            ) {
+                                messaging.sendMessage({
+                                    subject: "main:rokuPlaybackObservation",
+                                    data: {
+                                        deviceId: device.id,
+                                        status,
+                                        loadGeneration,
+                                        provenance
+                                    }
+                                });
+                            },
+                            onMediaStatusUpdate(emission) {
+                                // The clear arm is a local notification and
+                                // never crosses the bridge (the extension
+                                // would find no status to apply).
+                                if (!emission.status) return;
+                                messaging.sendMessage({
+                                    subject:
+                                        "main:receiverDeviceMediaStatusUpdated",
+                                    data: {
+                                        deviceId: device.id,
+                                        status: emission.status,
+                                        provenance: emission.provenance
+                                    }
+                                });
+                            },
+                            // Flattened buildStatusMedia snapshot: the
+                            // nested MediaInformation/customData would
+                            // otherwise collapse as `{…}` in the Firefox
+                            // background console preview.
+                            onStatusMediaDebug(debug) {
+                                messaging.sendMessage({
+                                    subject: "main:rokuStatusMediaDebug",
+                                    data: debug
+                                });
+                            }
+                        });
+
+                        const pendingGeneration = rokuLoadGenerations.get(
+                            device.id
                         );
+                        if (pendingGeneration !== undefined) {
+                            remote.setLoadGeneration(pendingGeneration);
+                        }
+                        rokuRemotes.set(device.id, remote);
                     }
                 });
 
@@ -288,6 +303,9 @@ export function run(messaging: Messenger) {
 
             case "bridge:rokuSetLoadGeneration": {
                 const { deviceId, loadGeneration } = message.data;
+                // Cache first, then apply: whichever of the generation and the
+                // remote arrives second wins the race.
+                rokuLoadGenerations.set(deviceId, loadGeneration);
                 rokuRemotes.get(deviceId)?.setLoadGeneration(loadGeneration);
                 break;
             }

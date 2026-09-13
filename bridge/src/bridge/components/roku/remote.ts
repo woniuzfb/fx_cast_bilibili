@@ -317,7 +317,11 @@ export default class RokuRemote {
 
     /** Records the extension's current LOAD generation for this device. */
     setLoadGeneration(loadGeneration: number) {
-        if (!Number.isSafeInteger(loadGeneration)) return;
+        // The producer is a monotonic counter that starts at 1; anything else
+        // has crossed a process boundary and is not trusted.
+        if (!Number.isSafeInteger(loadGeneration) || loadGeneration <= 0) {
+            return;
+        }
         this.loadGeneration = loadGeneration;
     }
 

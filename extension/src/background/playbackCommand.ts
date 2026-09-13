@@ -195,6 +195,20 @@ export function currentRokuMediaIdentity(
     return mediaIdentities.get(deviceId);
 }
 
+/**
+ * Every device's current media identity.
+ *
+ * Used to REPLAY the LOAD generations after the discovery bridge reconnects: a
+ * new bridge process starts with an empty cache and its remotes begin with no
+ * generation, so without a replay the binding would silently degrade to
+ * "unattributed" until the next LOAD.
+ */
+export function currentRokuMediaIdentities(): Array<
+    [string, RokuMediaIdentity]
+> {
+    return [...mediaIdentities.entries()];
+}
+
 function sameMediaIdentity(
     left: RokuMediaIdentity,
     right: RokuMediaIdentity | undefined
@@ -411,10 +425,13 @@ export function acceptReceiverObservation(
 ) {
     const command = commands.get(deviceId);
     if (!command) return;
-    // The sample must belong to the load this command was issued under. A
-    // sample the bridge could not attribute (no generation pushed yet) is not
-    // evidence either way, and a sample from an older load must never confirm a
-    // newer command. Checked here, before acceptObservation writes anything.
+    // A known generation mismatch is stale and must be rejected before any
+    // command field is written. An unattributed sample (undefined) is
+    // intentionally accepted for compatibility while generation synchronisation
+    // is not yet available - it is still evidence, and still has to pass the
+    // provenance whitelist, the causal poll-start gate and the sample-order
+    // gate. Do not "fix" that branch into a rejection without first making the
+    // replay guaranteed.
     if (
         loadGeneration !== undefined &&
         command.mediaIdentity.loadGeneration !== loadGeneration
