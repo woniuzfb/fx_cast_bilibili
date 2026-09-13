@@ -160,6 +160,18 @@ interface RokuRemoteOptions {
     onStatusMediaDebug?: (debug: RokuStatusMediaDebug) => void;
 }
 
+/**
+ * A locally-decided state fragment awaiting observation. `revision` preserves
+ * the order the fragments were written: two overlays can touch the same field
+ * (a seek echo's position and a command echo's state), and static precedence
+ * would hide that ordering.
+ */
+interface StateOverlay {
+    revision: number;
+    state?: RokuPlaybackState["state"];
+    position?: number;
+}
+
 interface RokuPlaybackState {
     state?: string;
     position?: number;
@@ -189,7 +201,28 @@ export default class RokuRemote {
     private playbackPollToken = 0;
     private destroyed = false;
 
-    private lastState: RokuPlaybackState = { state: "idle" };
+    /**
+     * The device as last OBSERVED by a completed ECP poll. Every confirmation
+     * observation is built from a poll's own result, never from this cache or
+     * from an overlay, so a locally-written echo can never be mistaken for a
+     * device observation.
+     */
+    private observedState: RokuPlaybackState = { state: "idle" };
+    /**
+     * Locally-written state that the UI should reflect before the device has
+     * been observed in it: the PLAY/PAUSE echo (so the popup does not wait for
+     * a poll), the seek echo, and the HLS DVR startup synthesis.
+     *
+     * These used to be written into one shared `lastState`, which is what made
+     * "observed" and "what we just wrote" indistinguishable. They are composed
+     * on read, in the order they were written (see effectiveState), so the
+     * previous last-writer-wins behaviour is preserved exactly.
+     */
+    private startupOverlay?: StateOverlay;
+    private commandOverlay?: StateOverlay;
+    private seekOverlay?: StateOverlay;
+    /** Orders the overlays so composition matches the old write order. */
+    private overlayRevision = 0;
     /**
      * Monotonic counter for ECP poll samples. Together with pollStartedAt it
      * is what lets a consumer tell an observation that STARTED after a command
@@ -242,11 +275,12 @@ export default class RokuRemote {
                 // changed. Neither performs an ECP query, so neither may be
                 // used to confirm receiver state.
                 let source: RokuMediaStatusSource = "session-media-refresh";
-                if (isHlsDvr && this.lastState.state === "idle") {
-                    this.lastState = {
-                        ...this.lastState,
-                        state: "buffering"
-                    };
+                // The synthesis only applies while nothing else has claimed the
+                // state: what it guards against is an idle OBSERVATION (see
+                // acceptObservedState, which is why the overlay survives an
+                // idle poll).
+                if (isHlsDvr && this.effectiveState().state === "idle") {
+                    this.writeOverlay("startup", { state: "buffering" });
                     source = "startup-synthetic";
                 }
 
@@ -470,10 +504,9 @@ export default class RokuRemote {
         this.playbackPollToken++;
         void keypress(this.host, key)
             .then(() => {
-                this.lastState = {
-                    ...this.lastState,
+                this.writeOverlay("command", {
                     state: intent === "PLAY" ? "play" : "pausing"
-                };
+                });
                 this.emitMediaStatus({ source: "command-echo" });
                 // The transport has landed: this is the moment from which a
                 // sample can observe the command's effect. Started only on
@@ -500,7 +533,7 @@ export default class RokuRemote {
                     appId,
                     buildLaunchParams(url, this.loadedTitle ?? "", position)
                 );
-                this.lastState = { ...this.lastState, state: "play", position };
+                this.writeOverlay("seek", { state: "play", position });
                 this.emitMediaStatus({ source: "seek-echo" });
             }
         } catch (err) {
@@ -618,8 +651,8 @@ export default class RokuRemote {
         }
         if (this.destroyed) return;
 
-        const previous = this.lastState;
-        this.lastState = state;
+        const previous = this.effectiveState();
+        this.acceptObservedState(state);
         this.lastActiveApp = activeApp;
 
         // Media title is only known to us when this remote loaded it;
@@ -707,7 +740,8 @@ export default class RokuRemote {
         if (this.destroyed) return;
 
         const isPlaying =
-            this.lastState.state && this.lastState.state !== "idle";
+            this.effectiveState().state &&
+            this.effectiveState().state !== "idle";
         // A channel is "running" whenever it is foreground — even before
         // playback starts. Without this the popup can never pair the cast
         // session's transportId with a receiver application, leaving the
@@ -784,7 +818,7 @@ export default class RokuRemote {
                 rokuLiveElapsed: isHlsDvr ? "true" : "n/a",
                 loadedUrl: this.loadedUrl ?? "undefined",
                 loadedTitle: this.loadedTitle ?? "undefined",
-                lastState: flattenDebugLine(this.lastState),
+                lastState: flattenDebugLine(this.effectiveState()),
                 sessionMedia: flattenDebugLine(sessionMedia),
                 customDataIn: flattenDebugLine(sessionMedia.customData),
                 customDataOut: flattenDebugLine(result.customData),
@@ -819,7 +853,7 @@ export default class RokuRemote {
                 rokuLiveElapsed: "n/a",
                 loadedUrl: this.loadedUrl,
                 loadedTitle: this.loadedTitle ?? "undefined",
-                lastState: flattenDebugLine(this.lastState),
+                lastState: flattenDebugLine(this.effectiveState()),
                 sessionMedia: "undefined",
                 customDataIn: "null",
                 customDataOut: "null",
@@ -838,7 +872,7 @@ export default class RokuRemote {
             rokuLiveElapsed: "n/a",
             loadedUrl: "undefined",
             loadedTitle: this.loadedTitle ?? "undefined",
-            lastState: flattenDebugLine(this.lastState),
+            lastState: flattenDebugLine(this.effectiveState()),
             sessionMedia: "undefined",
             customDataIn: "undefined",
             customDataOut: "undefined",
@@ -909,11 +943,79 @@ export default class RokuRemote {
         }
     }
 
+    /**
+     * What the UI should show: the last observation with the locally-written
+     * fragments applied in write order.
+     *
+     * The media-status gate reads THIS, not observedState: during an HLS DVR
+     * startup the observation is still idle while the startup overlay says
+     * buffering, and gating on the observation would emit the idle clear that
+     * makes deviceManager drop `media` (losing the progress bar) - the exact
+     * regression that synthesis exists to prevent.
+     */
+    private effectiveState(): RokuPlaybackState {
+        const overlays = [
+            this.startupOverlay,
+            this.commandOverlay,
+            this.seekOverlay
+        ]
+            .filter((overlay): overlay is StateOverlay => overlay !== undefined)
+            .sort((a, b) => a.revision - b.revision);
+
+        return overlays.reduce<RokuPlaybackState>(
+            (state, overlay) => ({
+                ...state,
+                ...(overlay.state !== undefined
+                    ? { state: overlay.state }
+                    : {}),
+                ...(overlay.position !== undefined
+                    ? { position: overlay.position }
+                    : {})
+            }),
+            this.observedState
+        );
+    }
+
+    private writeOverlay(
+        which: "startup" | "command" | "seek",
+        overlay: Omit<StateOverlay, "revision">
+    ) {
+        const written: StateOverlay = {
+            ...overlay,
+            revision: ++this.overlayRevision
+        };
+        if (which === "startup") this.startupOverlay = written;
+        else if (which === "command") this.commandOverlay = written;
+        else this.seekOverlay = written;
+    }
+
+    /**
+     * Folds in a completed poll and expires the overlays it supersedes.
+     *
+     * A poll used to overwrite `lastState` wholesale, so the equivalent here is
+     * to drop the command and seek echoes: they describe a state the device has
+     * now been asked about directly. The startup overlay is the deliberate
+     * exception - it is cleared only once the device reports something other
+     * than idle, which is exactly the old `isHlsDvr && state === "idle"`
+     * condition.
+     *
+     * The echoes are dropped unconditionally rather than only when the
+     * observation matches their target: that would be a different (and
+     * stricter) rule than the old code had, and it would keep an echo alive
+     * indefinitely whenever the device never reached the requested state.
+     */
+    private acceptObservedState(state: RokuPlaybackState) {
+        this.observedState = state;
+        this.commandOverlay = undefined;
+        this.seekOverlay = undefined;
+        if (state.state !== "idle") this.startupOverlay = undefined;
+    }
+
     private emitMediaStatus(provenance: RokuMediaStatusProvenance) {
         if (this.destroyed) return;
 
-        const isPlaying =
-            this.lastState.state && this.lastState.state !== "idle";
+        const composed = this.effectiveState();
+        const isPlaying = composed.state && composed.state !== "idle";
         if (!isPlaying) {
             // Still emit a flattened snapshot: the seek-bar bug we are
             // diagnosing is often "session media is registered but ECP
@@ -922,16 +1024,16 @@ export default class RokuRemote {
                 deviceId: this.device.id,
                 branch: "skippedIdle",
                 playerDuration:
-                    this.lastState.duration == null
+                    this.observedState.duration == null
                         ? "undefined"
-                        : String(this.lastState.duration),
+                        : String(this.observedState.duration),
                 isHlsDvr: "n/a",
                 durationSource: "n/a",
                 duration: "undefined",
                 rokuLiveElapsed: "n/a",
                 loadedUrl: this.loadedUrl ?? "undefined",
                 loadedTitle: this.loadedTitle ?? "undefined",
-                lastState: flattenDebugLine(this.lastState),
+                lastState: flattenDebugLine(this.effectiveState()),
                 sessionMedia: flattenDebugLine(
                     getRokuSessionMedia(this.device.id)
                 ),
@@ -944,7 +1046,7 @@ export default class RokuRemote {
         }
 
         this.options.onMediaStatusUpdate?.({
-            status: this.buildMediaStatus(),
+            status: this.buildMediaStatus(composed),
             provenance
         });
     }
@@ -958,21 +1060,21 @@ export default class RokuRemote {
      * emitMediaStatus, which is why the poll path reports its raw sample
      * through onPlaybackObservation as well.
      */
-    private buildMediaStatus(): MediaStatus {
+    private buildMediaStatus(composed: RokuPlaybackState): MediaStatus {
         return {
             mediaSessionId: 1,
-            media: this.buildStatusMedia(this.lastState.duration),
+            media: this.buildStatusMedia(this.observedState.duration),
             playbackRate: 1,
             playerState:
-                this.lastState.state === "pausing" ||
-                this.lastState.state === "paused" ||
-                this.lastState.state === "pause"
+                composed.state === "pausing" ||
+                composed.state === "paused" ||
+                composed.state === "pause"
                     ? PlayerState.PAUSED
-                    : this.lastState.state === "buffering" ||
-                      this.lastState.state === "buffer"
+                    : composed.state === "buffering" ||
+                      composed.state === "buffer"
                     ? PlayerState.BUFFERING
                     : PlayerState.PLAYING,
-            currentTime: this.lastState.position ?? 0,
+            currentTime: composed.position ?? 0,
             supportedMediaCommands: SUPPORTED_MEDIA_COMMANDS,
             repeatMode: RepeatMode.OFF,
             volume: this.volume,
