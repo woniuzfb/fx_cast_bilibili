@@ -1277,6 +1277,35 @@ async function main() {
             Boolean(sessionMedia),
             JSON.stringify(sessionConn.outbound.map(m => m.subject).slice(0, 10))
         );
+        // Which direction the LOAD died in: if the extension never sent the
+        // session a message, the loss is on the page->extension hop; if it did,
+        // the session received it and did not act.
+        console.log(
+            "session connection subjects:",
+            JSON.stringify({
+                extensionToSession: [
+                    ...new Set(sessionConn.inbound.map(m => m.subject))
+                ].slice(0, 12),
+                sessionToExtension: [
+                    ...new Set(sessionConn.outbound.map(m => m.subject))
+                ].slice(0, 12),
+                loadPayloads: sessionConn.inbound
+                    .filter(m => afterLoad(m))
+                    .map(m => ({
+                        subject: m.subject,
+                        type: (() => {
+                            try {
+                                return JSON.parse(
+                                    m.message.data.message || "{}"
+                                ).type;
+                            } catch {
+                                return undefined;
+                            }
+                        })()
+                    }))
+                    .slice(0, 8)
+            })
+        );
         const sessionMediaData = (sessionMedia && sessionMedia.message && sessionMedia.message.data) || {};
         check(
             "hop 1: it is for the fake device and carries the DVR anchors",
