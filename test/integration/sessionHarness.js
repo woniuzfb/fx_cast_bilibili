@@ -1251,14 +1251,25 @@ async function main() {
         // still passes) but never calls beginRokuMediaLoad - and the missing
         // generation then looks exactly like a relay failure in Stage 2. That is
         // the flakiness this gate exists to name at its source.
-        const clickStateRaw = (() => {
-            if (!phaseBConsole || !fs.existsSync(phaseBConsole)) return undefined;
-            const lines = fs
-                .readFileSync(phaseBConsole, "utf8")
-                .split("\n")
-                .filter(line => line.includes("onReceiverCast-state"));
-            return lines[lines.length - 1];
-        })();
+        // The marker travels popup -> runtime message -> background logger ->
+        // browser stdout -> log file, so it is not there the instant the click
+        // returns; reading once made Gate A report "(no click-state marker)" for
+        // a click that had in fact happened. Bounded polling, not a sleep.
+        let clickStateRaw;
+        const clickStateDeadline = Date.now() + 8000;
+        while (Date.now() < clickStateDeadline) {
+            if (phaseBConsole && fs.existsSync(phaseBConsole)) {
+                const lines = fs
+                    .readFileSync(phaseBConsole, "utf8")
+                    .split("\n")
+                    .filter(line => line.includes("onReceiverCast-state"));
+                if (lines.length) {
+                    clickStateRaw = lines[lines.length - 1];
+                    break;
+                }
+            }
+            await sleep(250);
+        }
         const field = name => {
             if (!clickStateRaw) return undefined;
             const match = new RegExp(`${name}\\s*:\\s*(\\{[^}]*\\}|[^,)}]+)`).exec(
