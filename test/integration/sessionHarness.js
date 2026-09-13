@@ -1632,13 +1632,21 @@ async function main() {
             : "stage2";
         const NEXT_MARKER = "stage3-generation-N-plus-1";
 
+        // Helpers first: they are pure predicates over the trace entries, and
+        // their bodies only read the vars above once called, so defining them
+        // here removes any chance of a use-before-declaration (which has now
+        // bitten this file three times).
+        const afterLoad = entry => entry.at >= loadStartedAt;
+        const afterSessionRequest = entry => entry.at >= requestAtSession;
+        const markerOf = media =>
+            media && media.customData && media.customData.harnessMarker;
+
         /** The Stage 2 hops assume the generation was relayed with the media,
          *  which the reordering and advance modes deliberately prevent. */
         const assertStage2Hops =
             !args.mediaBeforeGeneration && !args.generationAdvance;
-        const afterLoad = entry => entry.at >= loadStartedAt;
-        const markerOf = media =>
-            media && media.customData && media.customData.harnessMarker;
+        
+        
         // A LOAD whose callbacks never settle is itself a finding, not a reason
         // to abort the run: the relay hops below are read from the traces either
         // way, so a timeout here is reported and the evidence is still collected.
@@ -1956,7 +1964,7 @@ async function main() {
         // The generation is created when the device is SELECTED, which is
         // legitimately before the LOAD, so it is filtered against the session
         // request boundary rather than the LOAD boundary.
-        const afterSessionRequest = entry => entry.at >= requestAtSession;
+        
         const generationData = (relayedGeneration && relayedGeneration.message.data) || {};
         const relayedData = (relayedMedia && relayedMedia.message.data) || {};
         if (assertStage2Hops) {
