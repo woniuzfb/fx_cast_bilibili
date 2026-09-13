@@ -540,6 +540,34 @@ async function main() {
                     "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null, identityCount: currentRokuMediaIdentities().length"
                 )
         );
+        // The click-time state snapshot goes through popupLog's runtime channel,
+        // the only one proven to reach the captured output (the popup's own
+        // console is not mirrored, and a background runtime message is not
+        // delivered back to the sender).
+        patch("ui/popup/index.js", "onReceiverCast(device) {", () => {
+            const fields = [
+                "hasSelectorContext",
+                "selectionRequiresRefresh",
+                "mediaType",
+                "availableMediaTypes",
+                "isAppMediaTypeAvailable"
+            ].join(", ");
+            return (
+                "\ntry { browser.runtime.sendMessage({ subject: 'popup:debugLog'," +
+                " data: { level: 'info', message: '[harness] onReceiverCast-state'," +
+                ` data: { ${fields}, deviceId: device && device.id } } }); } catch (e) {}`
+            );
+        });
+        // Gate B: was a load generation actually created for this device?
+        patch(
+            "background/background.js",
+            "nextRokuLoadGeneration(deviceId);",
+            () =>
+                storageMarker(
+                    "__fxHarnessLoadGenerationBegan",
+                    "deviceId, loadGeneration"
+                )
+        );
         patch(
             "background/background.js",
             "setRokuSessionMedia(deviceId, ownerId, media) {",
@@ -1191,6 +1219,45 @@ async function main() {
             );
         }
 
+        // --- Gate A: did the click go through the BOUND selector? ----------
+        //
+        // Without this, a click into the generic popup takes the
+        // castCurrentTab/loadSender path, which creates the session (so Stage 1
+        // still passes) but never calls beginRokuMediaLoad - and the missing
+        // generation then looks exactly like a relay failure in Stage 2. That is
+        // the flakiness this gate exists to name at its source.
+        const clickStateRaw = (() => {
+            if (!phaseBConsole || !fs.existsSync(phaseBConsole)) return undefined;
+            const lines = fs
+                .readFileSync(phaseBConsole, "utf8")
+                .split("\n")
+                .filter(line => line.includes("onReceiverCast-state"));
+            return lines[lines.length - 1];
+        })();
+        const field = name => {
+            if (!clickStateRaw) return undefined;
+            const match = new RegExp(`${name}\\s*:\\s*(\\{[^}]*\\}|[^,)}]+)`).exec(
+                clickStateRaw
+            );
+            return match ? match[1].trim() : undefined;
+        };
+        const pathA =
+            field("hasSelectorContext") === "true" &&
+            field("selectionRequiresRefresh") === "false" &&
+            field("mediaType") === "1" &&
+            String(field("deviceId") || "").includes(FAKE_DEVICE_ID);
+        check(
+            "Gate A: the click used the bound selector (path A, not the generic popup)",
+            pathA,
+            JSON.stringify({
+                raw: clickStateRaw ? clickStateRaw.slice(-220) : "(no click-state marker)",
+                hasSelectorContext: field("hasSelectorContext"),
+                selectionRequiresRefresh: field("selectionRequiresRefresh"),
+                mediaType: field("mediaType"),
+                deviceId: field("deviceId")
+            })
+        );
+
         await driver.switchTo().window(senderTab);
         const pageResult = await driver.executeAsyncScript(
             `const done = arguments[arguments.length - 1];
@@ -1417,6 +1484,35 @@ async function main() {
         // selector just created, then every hop asserted separately, because the
         // point is the extension's relay - the boundary that until now was only
         // supported by reading code.
+        // --- Gate B: was a load generation established for this device? -----
+        await driver.switchTo().window(consoleTab);
+        const gateMarkers = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             browser.storage.local
+                .get(["__fxHarnessDiagnosticRunId", "__fxHarnessLoadGenerationBegan"])
+                .then(v => done(v), err => done({ error: String(err) }));`
+        );
+        const began = gateMarkers && gateMarkers.__fxHarnessLoadGenerationBegan;
+        const pathBWasTaken = !pathA || !began;
+        check(
+            "Gate B: a load generation was created for the fake device",
+            Boolean(
+                began &&
+                    began.runId === diagnosticRunId &&
+                    began.deviceId === FAKE_DEVICE_ID &&
+                    Number.isFinite(began.loadGeneration)
+            ),
+            JSON.stringify(began)
+        );
+        if (pathBWasTaken) {
+            console.log(
+                "selector click used the path that does not create a load generation; " +
+                    "Stage 2 assertions would be meaningless, so they are skipped " +
+                    "(Gate A ok:", pathA, "Gate B ok:", Boolean(began), ")"
+            );
+        }
+        await driver.switchTo().window(senderTab);
+
         const post = async (path, body) => {
             const response = await fetch(
                 `http://127.0.0.1:${rokuControlPort}${path}`,
@@ -1428,6 +1524,7 @@ async function main() {
             );
             return response.json();
         };
+        if (!pathBWasTaken) {
         // The startup synthesis only exists while ECP still reports idle, so the
         // device is pinned there: a device that flips to buffer/play on its own
         // would quietly bypass the boundary under test.
@@ -1872,7 +1969,8 @@ async function main() {
                     "__fxHarnessBridgeConnected",
                     "__fxHarnessBridgeDisconnected",
                     "__fxHarnessBridgeRefresh",
-                    "__fxHarnessBridgeReplay"
+                    "__fxHarnessBridgeReplay",
+                    "__fxHarnessLoadGenerationBegan"
                 ])})
                 .then(v => done(v), err => done({ error: String(err) }));
              `
@@ -1901,6 +1999,7 @@ async function main() {
                 rawIdleObservation: Boolean(observation)
             })
         );
+        }
     } catch (err) {
         if (!(err && err.phaseAOnly)) throw err;
     } finally {
