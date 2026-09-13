@@ -2011,6 +2011,18 @@ async function main() {
         // reordering: nothing may be synthesised for a generation whose media has
         // not arrived, and the media that does arrive must bind to that same
         // generation.
+        // Always emit this, so a missing relay shows up as the Stage 3 case
+        // failing rather than as three checks that quietly never ran (Hop 2
+        // would fail too, but a reader should not need to know that to read
+        // this case's result).
+        check(
+            "stage3-1: the generation and the media were both relayed",
+            Boolean(relayedGeneration && relayedMedia),
+            JSON.stringify({
+                generation: Boolean(relayedGeneration),
+                media: Boolean(relayedMedia)
+            })
+        );
         if (relayedGeneration && relayedMedia) {
             check(
                 "stage3-1: the generation arrived before the media",
