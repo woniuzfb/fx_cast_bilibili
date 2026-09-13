@@ -1506,7 +1506,17 @@ async function main() {
         check(
             "Gate B: a load generation was created for the fake device",
             gateBOk,
-            JSON.stringify(began)
+            // The detail must name WHICH way it failed: a missing marker and a
+            // marker from another run look the same as a boolean, and
+            // JSON.stringify(undefined) prints nothing at all.
+            JSON.stringify({
+                markerPresent: Boolean(began),
+                marker: began ?? null,
+                expectedRunId: diagnosticRunId,
+                runIdMatches: Boolean(
+                    began && began.runId === diagnosticRunId
+                )
+            })
         );
         if (pathBWasTaken) {
             console.log(
