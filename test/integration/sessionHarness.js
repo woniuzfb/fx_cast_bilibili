@@ -885,7 +885,16 @@ async function main() {
                         const button = row.querySelector(".receiver__cast-button")
                             || row.querySelector("button");
                         (button || row).click();
-                        done({ ok: true, rows: rows.length, clicked: button ? "cast-button" : "row" });
+                        done({
+                            ok: true,
+                            rows: rows.length,
+                            clicked: button ? "cast-button" : "row",
+                            // The assertion about WHICH device was clicked reads
+                            // this; the script used to omit it, so the check
+                            // could only ever fail.
+                            text: (row.textContent || "").trim(),
+                            wanted
+                        });
                         return;
                     }
                     if (Date.now() > deadline) {
@@ -1032,16 +1041,24 @@ async function main() {
         const ACTION_SUBJECTS = new Set([
             "bridge:sendReceiverMessage",
             "bridge:createCastSession",
-            "bridge:stopCastSession",
-            "bridge:rokuRequestConfirmationPoll"
+            "bridge:stopCastSession"
         ]);
+        // Sampling requests are tracked separately: asking the discovery
+        // process for a dense poll does not submit anything to a device, so
+        // counting it as a command would make the check mean two things.
+        const polledDevices = [];
+        // The real protocol types (see the sender message union): there is no
+        // generic "VOLUME", and listing one would have let a SET_VOLUME aimed
+        // at a non-fake device pass unnoticed - a new false green.
         const COMMAND_MEDIA_TYPES = new Set([
             "PLAY",
             "PAUSE",
             "STOP",
             "SEEK",
-            "VOLUME",
-            "LOAD"
+            "LOAD",
+            "SET_VOLUME",
+            "VOLUME_UP",
+            "VOLUME_DOWN"
         ]);
         for (const conn of connections) {
             for (const message of [...conn.inbound, ...conn.outbound]) {
@@ -1057,6 +1074,12 @@ async function main() {
                     ) {
                         actedOn.push(`${data.deviceId}:${mediaType ?? ""}`);
                     }
+                    if (
+                        String(message.subject) ===
+                        "bridge:rokuRequestConfirmationPoll"
+                    ) {
+                        polledDevices.push(data.deviceId);
+                    }
                 }
                 if (data.deviceInfo && data.deviceInfo.id) {
                     discovered.push(data.deviceInfo.id);
@@ -1069,6 +1092,15 @@ async function main() {
             JSON.stringify([...new Set(deviceIds)])
         );
         console.log("deviceIds acted on:", JSON.stringify([...new Set(actedOn)]));
+        console.log(
+            "confirmation polls targeted:",
+            JSON.stringify([...new Set(polledDevices)])
+        );
+        check(
+            "no confirmation poll targeted a non-fake device",
+            !polledDevices.some(id => id && id !== FAKE_DEVICE_ID),
+            JSON.stringify([...new Set(polledDevices)])
+        );
         check(
             "no command was sent to a non-fake device",
             !actedOn.some(entry => !entry.startsWith(FAKE_DEVICE_ID)),
