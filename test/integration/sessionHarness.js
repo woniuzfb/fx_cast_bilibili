@@ -1993,6 +1993,48 @@ async function main() {
             JSON.stringify(diagnosticMarkers && diagnosticMarkers.__fxHarnessBgControl)
         );
         await driver.switchTo().window(senderTab);
+        // ---- Stage 3, case 1: generation first, media later ----------------
+        //
+        // This ordering happens naturally (the generation is pushed when the
+        // device is selected; the media arrives after the consume gate), so the
+        // case is about asserting the consequences rather than injecting a
+        // reordering: nothing may be synthesised for a generation whose media has
+        // not arrived, and the media that does arrive must bind to that same
+        // generation.
+        if (relayedGeneration && relayedMedia) {
+            check(
+                "stage3-1: the generation arrived before the media",
+                relayedGeneration.at <= relayedMedia.at,
+                JSON.stringify({
+                    generationAt: relayedGeneration.at,
+                    mediaAt: relayedMedia.at
+                })
+            );
+            const synthesizedBeforeMedia = discoveryOutbound.filter(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.provenance &&
+                    m.message.data.provenance.source === "startup-synthetic" &&
+                    m.at < relayedMedia.at
+            );
+            check(
+                "stage3-1: nothing was synthesised before the media arrived",
+                synthesizedBeforeMedia.length === 0,
+                JSON.stringify(
+                    synthesizedBeforeMedia.map(m => m.at)
+                )
+            );
+            check(
+                "stage3-1: the media bound to the earlier generation",
+                relayedMedia.message.data.loadGeneration ===
+                    relayedGeneration.message.data.loadGeneration,
+                JSON.stringify({
+                    generation: relayedGeneration.message.data.loadGeneration,
+                    mediaGeneration: relayedMedia.message.data.loadGeneration
+                })
+            );
+        }
         console.log(
             "stage 2 round 1 observed:",
             JSON.stringify({
