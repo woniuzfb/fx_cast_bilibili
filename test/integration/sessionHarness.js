@@ -1965,25 +1965,28 @@ async function main() {
             gateMarkers,
             "__fxHarnessSelectionAtRokuBranch"
         );
-        // The channel is only self-proven when BOTH run-bound markers are there;
-        // without that, a missing Gate B marker explains nothing.
+        // Is the observing channel itself proven for this run?
         //
-        // In the gap modes the selection marker is EXPECTED to be absent - that
-        // absence is the defect's signature, not a broken channel - so the
-        // channel is proven by the popup's click marker instead, which is
-        // written through the same storage path from a different context. The
-        // background's own storage path is separately proven by the run-bound
-        // probe/ack at the top of this run.
+        // Both channels that matter are proven independently of the path the
+        // click took: the popup wrote its click-time marker (popup context), and
+        // the background answered this run's storage probe (`backgroundControl`,
+        // asserted above, and the only run-bound proof of the BACKGROUND's write
+        // path).
+        //
+        // The selection marker is deliberately NOT part of this predicate. It is
+        // written immediately before the production Roku branch, so a click that
+        // resolves a replacement selector (the popup's auto-cast route) never
+        // reaches it - and requiring it read "the click went the other way" as
+        // "the channel is broken", which is how a missing Gate B marker was
+        // mis-read twice. Its presence or absence is diagnostic, printed below
+        // and asserted explicitly where it is the point (`--auto-cast-gap`).
         check(
-            gapMode
-                ? "Gate B channel self-proof: the popup's click marker is present for this run (the selection marker is the defect's signature, checked below)"
-                : "Gate B channel self-proof: the click and selection markers are present for this run",
-            gapMode
-                ? Boolean(clickControl)
-                : Boolean(clickControl && selectionMarker),
+            "Gate B channel self-proof: the popup's click marker and the background's probe/ack are both present for this run",
+            Boolean(clickControl && backgroundControl),
             JSON.stringify({
                 clickControl: clickControl || null,
-                selectionMarker: selectionMarker || null
+                selectionMarker: selectionMarker || null,
+                backgroundStorageControl: Boolean(backgroundControl)
             })
         );
         console.log(
