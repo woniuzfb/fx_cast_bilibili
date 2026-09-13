@@ -158,33 +158,57 @@ async function createCastSession(opts: {
 
         return session;
     } catch (error) {
-        if (opts.instance.session === session) {
-            if (opts.instance.bridgeMessageListener) {
-                session.bridgePort.onMessage.removeListener(
-                    opts.instance.bridgeMessageListener
-                );
-            }
-            opts.instance.bridgeMessageListener = undefined;
-            opts.instance.session = undefined;
-            if (opts.instance.contentContext?.tabId !== undefined) {
-                updateActionState(
-                    ActionState.Default,
-                    opts.instance.contentContext.tabId
-                );
-            }
-        }
-        // Remove our own disconnect handler BEFORE closing the port: it calls
-        // destroyCastInstance(), which would tear down the whole instance (its
-        // content port included) for what is only a half-created session.
+        // Reference cleanup is best-effort and must never PREVENT the port from
+        // being closed, nor replace the error that explains what actually failed:
+        // a half-cleaned instance is recoverable, a leaked native host is not.
         try {
-            session.bridgePort.onDisconnect.removeListener(onBridgeDisconnect);
-        } catch {
-            // Best effort: the port may already be gone.
-        }
-        try {
-            session.bridgePort.disconnect();
-        } catch {
-            // Already disconnected.
+            if (opts.instance.session === session) {
+                try {
+                    if (opts.instance.bridgeMessageListener) {
+                        session.bridgePort.onMessage.removeListener(
+                            opts.instance.bridgeMessageListener
+                        );
+                    }
+                } catch (cleanupError) {
+                    logger.error(
+                        "Failed to remove the partial session message listener",
+                        cleanupError
+                    );
+                }
+                // Clear the references even if the removal above failed: they
+                // point at a port that is about to be closed either way.
+                opts.instance.bridgeMessageListener = undefined;
+                opts.instance.session = undefined;
+                try {
+                    if (opts.instance.contentContext?.tabId !== undefined) {
+                        updateActionState(
+                            ActionState.Default,
+                            opts.instance.contentContext.tabId
+                        );
+                    }
+                } catch (cleanupError) {
+                    logger.error(
+                        "Failed to reset action state after a failed session creation",
+                        cleanupError
+                    );
+                }
+            }
+        } finally {
+            // Remove our own disconnect handler BEFORE closing the port: it calls
+            // destroyCastInstance(), which would tear down the whole instance (its
+            // content port included) for what is only a half-created session.
+            try {
+                session.bridgePort.onDisconnect.removeListener(
+                    onBridgeDisconnect
+                );
+            } catch {
+                // Best effort: the port may already be gone.
+            }
+            try {
+                session.bridgePort.disconnect();
+            } catch {
+                // Already disconnected.
+            }
         }
         throw error;
     }
