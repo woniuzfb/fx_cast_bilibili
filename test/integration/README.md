@@ -298,15 +298,20 @@ resolves the requestSession selector and the main handler owns it. Combined with
 `--fail-stage`, each caller can be asked at each checkpoint what the PAGE saw:
 
 - the SDK callback timeline (`sessionCallbacks`, with each callback's type and error
-  code) and `requestSessionCalls` / `successCount` / `errorCount` / `settleCount` /
-  `settleType`;
+  code) plus `requestSessionCalls`, `successCount`, `errorCount` and `settleType`
+  (the FIRST settlement's type). The number of settlements is
+  `sessionCallbacks.length` - deliberately not a counter, since one that counted only
+  callbacks matching the first type would read 1 for an error-then-success double
+  settlement;
 - how many times the background posted `cast:sessionRequestCancelled`, counted at
   every post site (located by brace matching, so a differently indented site cannot
   slip past and make a double settlement look like a single one).
 
 Measured at p0 and p2, identical for both callers: one `requestSession` call, zero
-successes, one error callback with code `cancel`, `settleCount` 1, no session id,
-exactly one background cancel - no double settlement and no hang. Worth knowing:
+successes, one error callback with code `cancel` (`sessionCallbacks.length` 1), no
+session id, and exactly one background cancel - counted as the largest count among
+this run's cancel markers, so a second settlement could not hide behind the first
+key. Worth knowing:
 the queued caller's page-visible cancel is the REPLACED selector's; the failed
 session start itself produces no page event on that path (loadSender only rethrows
 to triggerCast, which logs).

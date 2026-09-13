@@ -3290,14 +3290,23 @@ async function main() {
                     ? settle.sessionCallbacks
                     : [];
                 await driver.switchTo().window(consoleTab);
-                const cancelMarkers = markerFor(
-                    await driver.executeAsyncScript(
-                        `const done = arguments[arguments.length - 1];
-                         browser.storage.local
-                            .get(["__fxHarnessDiagnosticRunId", "__fxHarnessCancelPost_1", "__fxHarnessCancelPost_2", "__fxHarnessCancelPost_3"])
-                            .then(v => done(v), err => done({ error: String(err) }));`
-                    ),
-                    "__fxHarnessCancelPost_1"
+                // Read every cancel marker of THIS run and take the largest
+                // `count`: each post writes its own key, so reading key _1 alone
+                // would report 1 even when a second settlement happened - hiding
+                // exactly what this measurement exists to find.
+                const cancelState = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local.get(null).then(all => {
+                        const runId = all && all.__fxHarnessDiagnosticRunId;
+                        const keys = Object.keys(all || {}).filter(k => k.indexOf("__fxHarnessCancelPost_") === 0);
+                        const mine = keys.map(k => all[k]).filter(m => m && m.runId === runId);
+                        done({
+                            runId,
+                            markerKeys: keys.length,
+                            markersForRun: mine.length,
+                            maxCount: mine.length ? Math.max(...mine.map(m => m.count)) : 0
+                        });
+                     }, err => done({ error: String(err) }));`
                 );
                 console.log(
                     `page settlement (${args.requestSource}/${args.failStage}):`,
@@ -3305,12 +3314,10 @@ async function main() {
                         requestSessionCalls: settle.requestSessionCalls,
                         successCount: settle.successCount,
                         errorCount: settle.errorCount,
-                        settleCount: settle.settleCount,
                         settleType: settle.settleType,
                         sessionId: settle.sessionId,
-                        backgroundCancels: cancelMarkers
-                            ? cancelMarkers.count
-                            : 0,
+                        backgroundCancels: cancelState.maxCount,
+                        cancelMarkers: cancelState.markersForRun,
                         callbacks: callbacks.map(c => ({
                             type: c.type,
                             code: c.payload && c.payload.code
@@ -3321,6 +3328,11 @@ async function main() {
                     `session-failure mode (${args.requestSource}/${args.failStage}): the page's requestSession was settled (not left hanging)`,
                     callbacks.length >= 1,
                     JSON.stringify({ callbacks })
+                );
+                check(
+                    `session-failure mode (${args.requestSource}/${args.failStage}): the background settled the page at least once (counted as the largest count among this run's markers)`,
+                    cancelState.maxCount >= 1,
+                    JSON.stringify(cancelState)
                 );
                 if (args.failStage === "p0") {
                     check(

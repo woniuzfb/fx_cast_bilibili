@@ -53,8 +53,11 @@
                 // invoked, and with what" are different questions, and the second
                 // one is what a double settlement shows up in.
                 requestSessionCalls: 0,
+                // The authoritative total is sessionCallbacks.length: a counter
+                // that only counted callbacks matching the FIRST type would read 1
+                // for an error->success double settlement, which is exactly the
+                // case this instrumentation exists to expose.
                 sessionCallbacks: [],
-                settleCount: 0,
                 successCount: 0,
                 errorCount: 0,
                 settleType: undefined,
@@ -270,9 +273,9 @@
                 if (type === "success") result.successCount++;
                 else result.errorCount++;
                 if (result.settleType === undefined) {
+                    // First settlement TYPE only; the count is the array length.
                     result.settleType = type;
                 }
-                if (result.settleType === type) result.settleCount++;
             };
 
             window.__HARNESS_REQUEST_SESSION__ = function () {
