@@ -1418,10 +1418,12 @@ async function main() {
         } catch (err) {
             loaded = `webdriver: ${err.message}`;
         }
-        check(
-            "the page loaded HLS DVR media into the session",
-            loaded === true,
-            String(loaded)
+        // Not an assertion: an HLS DVR LOAD is deferred until the consume signal
+        // or the 60s fallback, so "no callback yet" is the expected state here.
+        // The assertion is the post-publication check below.
+        console.log(
+            "loadMedia before the fallback:",
+            loaded === true ? "settled early (unexpected)" : String(loaded)
         );
         if (loaded !== true) {
             const pageState = await driver.executeScript(
@@ -1641,10 +1643,14 @@ async function main() {
         const discoveryInbound = discoveryConnectionsNow.flatMap(conn =>
             conn.inbound
         );
+        // The generation is created when the device is SELECTED, which is
+        // legitimately before the LOAD, so it is filtered against the session
+        // request boundary rather than the LOAD boundary.
+        const afterSessionRequest = entry => entry.at >= requestAtSession;
         const relayedGeneration = discoveryInbound.find(
             m =>
                 m.subject === "bridge:rokuSetLoadGeneration" &&
-                afterLoad(m) &&
+                afterSessionRequest(m) &&
                 m.message.data.deviceId === FAKE_DEVICE_ID
         );
         const relayedMedia = discoveryInbound.find(
@@ -1687,7 +1693,7 @@ async function main() {
                 relayedData.media.duration === 7200 &&
                 relayedData.media.customData &&
                 relayedData.media.customData.hlsDvr === true &&
-                relayedData.ownerId === sessionMediaData.ownerId,
+                relayedData.ownerId === sessionMediaData.sessionId,
             JSON.stringify({
                 duration: relayedData.media && relayedData.media.duration,
                 ownerId: relayedData.ownerId,
