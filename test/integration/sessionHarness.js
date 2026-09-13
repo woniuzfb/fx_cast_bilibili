@@ -1729,6 +1729,13 @@ async function main() {
             : { inbound: [], outbound: [] };
         const discoveryConn = discoveryConnectionsNow[0] || { inbound: [], outbound: [] };
 
+        if (args.mediaBeforeGeneration) {
+            console.log(
+                "Stage 2 hops and case 1 are not asserted in --media-before-generation mode: " +
+                    "the generation is deliberately held, and they require it to have been relayed " +
+                    "alongside the media"
+            );
+        }
         // Hop 1: the session host publishes the LOAD's media.
         const sessionMedia = sessionConn.outbound.find(
             m =>
@@ -1880,25 +1887,31 @@ async function main() {
         const discoveryInbound = discoveryConnectionsNow.flatMap(conn =>
             conn.inbound
         );
+        const assertStage2Hops = !args.mediaBeforeGeneration;
         // The generation is created when the device is SELECTED, which is
         // legitimately before the LOAD, so it is filtered against the session
         // request boundary rather than the LOAD boundary.
         const afterSessionRequest = entry => entry.at >= requestAtSession;
-        const relayedGeneration = discoveryInbound.find(
-            m =>
-                m.subject === "bridge:rokuSetLoadGeneration" &&
-                afterSessionRequest(m) &&
-                m.message.data.deviceId === FAKE_DEVICE_ID
-        );
-        const relayedMedia = discoveryInbound.find(
-            m =>
-                m.subject === "bridge:rokuSetSessionMedia" &&
-                afterLoad(m) &&
-                m.message.data.deviceId === FAKE_DEVICE_ID &&
-                markerOf(m.message.data.media) === HARNESS_MARKER
-        );
         const generationData = (relayedGeneration && relayedGeneration.message.data) || {};
         const relayedData = (relayedMedia && relayedMedia.message.data) || {};
+        const relayedGeneration = assertStage2Hops
+            ? discoveryInbound.find(
+                  m =>
+                      m.subject === "bridge:rokuSetLoadGeneration" &&
+                      afterSessionRequest(m) &&
+                      m.message.data.deviceId === FAKE_DEVICE_ID
+              )
+            : undefined;
+        const relayedMedia = assertStage2Hops
+            ? discoveryInbound.find(
+                  m =>
+                      m.subject === "bridge:rokuSetSessionMedia" &&
+                      afterLoad(m) &&
+                      m.message.data.deviceId === FAKE_DEVICE_ID &&
+                      markerOf(m.message.data.media) === HARNESS_MARKER
+              )
+            : undefined;
+        if (assertStage2Hops) {
         check(
             "hop 2: the extension sent generation and session media to discovery",
             Boolean(relayedGeneration && relayedMedia),
@@ -1938,6 +1951,7 @@ async function main() {
             })
         );
 
+        }
         // Hop 3: the UI channel synthesises BUFFERING, and says so.
         const discoveryOutbound = discoveryConnectionsNow.flatMap(
             conn => conn.outbound
@@ -2141,6 +2155,7 @@ async function main() {
         // failing rather than as three checks that quietly never ran (Hop 2
         // would fail too, but a reader should not need to know that to read
         // this case's result).
+        if (assertStage2Hops) {
         check(
             "stage3-1: the generation and the media were both relayed",
             Boolean(relayedGeneration && relayedMedia),
@@ -2182,6 +2197,7 @@ async function main() {
                     mediaGeneration: relayedMedia.message.data.loadGeneration
                 })
             );
+        }
         }
         console.log(
             "stage 2 round 1 observed:",
