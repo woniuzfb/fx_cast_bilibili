@@ -50,6 +50,12 @@ interface PlaybackCommand {
     /** Last reported failure message, page or receiver side. */
     error?: string;
     /**
+     * True once the page has proven it executed this command. Blocks the device
+     * fallback: a page that already drove the receiver must not be joined by a
+     * second execution owner.
+     */
+    pageProgressObserved?: boolean;
+    /**
      * Diagnosis only, reported with a page timeout: whether the page element
      * was already paused when the armed window expired. Never used to advance a
      * phase - "the page changed but the receiver was never dispatched" and
@@ -393,6 +399,19 @@ export function acceptReceiverObservation(
     acceptObservation(device, command, status, provenance, receivedAt);
 }
 
+/**
+ * Guarantees an active command has a watchdog. Used by the conflict paths above,
+ * where the command keeps running without a dispatch result to switch on.
+ */
+function ensureCommandHasWatchdog(
+    device: ReceiverDevice,
+    command: PlaybackCommand
+) {
+    if (command.lifecycle !== "active") return;
+    if (command.watchdogTimer !== undefined) return;
+    armWatchdog(device, command);
+}
+
 function armWatchdog(device: ReceiverDevice, command: PlaybackCommand) {
     clearWatchdog(command);
     command.watchdogTimer = setTimeout(() => {
@@ -484,6 +503,25 @@ export function isValidPagePlaybackDispatchResult(
     return false;
 }
 
+/**
+ * Whether a progress delta proves the page actually started executing the
+ * command. This is what forbids a device fallback later: falling back after the
+ * page has already driven (or is driving) the receiver would create a second
+ * execution owner.
+ *
+ * Deliberately a closed set. A sync rejection never produces progress, so the
+ * only page phases that appear here are the asynchronous ones.
+ */
+function provesPageExecution(progress: PagePlaybackProgress): boolean {
+    return (
+        progress.pagePhase === "transition-requested" ||
+        progress.pagePhase === "target-observed" ||
+        progress.pagePhase === "timeout" ||
+        progress.receiverPhase === "requested" ||
+        progress.receiverPhase === "failed"
+    );
+}
+
 /** The page-side progress shape (see extension/messaging.ts). */
 export interface PagePlaybackProgress {
     deviceId?: string;
@@ -566,18 +604,27 @@ export function acceptPagePlaybackProgress(progress: PagePlaybackProgress) {
 
     for (const [deviceId, command] of candidates) {
         if (!command || command.lifecycle !== "active") continue;
-        // Only a page-owned command has a page leg. Accepting progress for a
-        // device-owned one would let a late page fact (e.g. "failed", or a
-        // receiver dispatch the page did make before it was replaced) rewrite
-        // the state of an execution owner that never asked for it - and the two
-        // routes have separate receiver dispatch boundaries.
-        if (command.owner !== "page-sender") {
+        // A page fact is only meaningful for the page leg. It may legitimately
+        // arrive BEFORE the executeScript result (separate channels, no shared
+        // ordering), so an unresolved owner with the page route still in flight
+        // is accepted; anything else must not be able to rewrite the state of
+        // an execution owner that never asked for it - the device route has a
+        // different receiver dispatch clock entirely.
+        const ownsPageLeg =
+            command.owner === "page-sender" ||
+            (command.owner === undefined &&
+                command.routeAttempts.page === "trying" &&
+                command.routeAttempts.device === "not-tried");
+        if (!ownsPageLeg) {
             logger.info("Page progress for a non-page-owned command ignored", {
                 deviceId,
                 commandId: progress.commandId,
                 owner: command.owner ?? "unresolved"
             });
             continue;
+        }
+        if (provesPageExecution(progress)) {
+            command.pageProgressObserved = true;
         }
         if (command.commandId !== progress.commandId) {
             logger.info("Stale page progress ignored", {
@@ -754,8 +801,27 @@ export async function dispatchPlaybackCommand(
             ? raw
             : undefined;
         if (!pageResult) {
-            // Entry point missing, an illegal shape, or a throw: the page never
-            // reported executing anything, so the bridge may take over.
+            // No usable result: the entry point is missing, the value was not a
+            // legal shape, or the call threw. That is only a page rejection if
+            // the page never proved it executed anything - if progress already
+            // arrived, the page DID run and claiming otherwise would hand the
+            // command to a second owner.
+            if (command.pageProgressObserved) {
+                logger.warn(
+                    "Page result missing or malformed after page progress",
+                    {
+                        deviceId: device.id,
+                        commandId: command.commandId,
+                        intent,
+                        rawResult: raw === undefined ? "undefined" : typeof raw
+                    }
+                );
+                assignPlaybackOwner(command, "page-sender");
+                command.routeAttempts.page = "accepted";
+                ensureCommandHasWatchdog(device, command);
+                publish(device, command);
+                return viewFor(command);
+            }
             command.routeAttempts.page = "rejected";
             command.pagePhase = "failed";
             logger.info(
@@ -767,6 +833,22 @@ export async function dispatchPlaybackCommand(
                     rawResult: raw === undefined ? "undefined" : typeof raw
                 }
             );
+        } else if (!pageResult.accepted && command.pageProgressObserved) {
+            // The page reported executing the command and then rejected it.
+            // Only one of those can be true; the progress is the harder
+            // evidence (it comes from the page itself, after it acted), so the
+            // page keeps the command and no fallback happens.
+            logger.warn("Page result contradicts observed page progress", {
+                deviceId: device.id,
+                commandId: command.commandId,
+                intent,
+                error: pageResult.error
+            });
+            assignPlaybackOwner(command, "page-sender");
+            command.routeAttempts.page = "accepted";
+            ensureCommandHasWatchdog(device, command);
+            publish(device, command);
+            return viewFor(command);
         } else {
             const finished = applyPageRouteResult(device, command, pageResult);
             if (finished || command.owner === "page-sender") {
