@@ -12,6 +12,11 @@
  *
  * Keyed by receiver device ID. The session registers on a successful LOAD and
  * unregisters on teardown; the remote reads on every status emit.
+ *
+ * The session lives in its own connectNative process, so its call into this
+ * module writes an instance the discovery-side remote can never observe. What
+ * the remote actually reads is this process's own registry, and this process
+ * writes it through RokuSessionMediaSync from the extension's mirror.
  */
 import type { MediaInformation } from "../cast/types";
 
@@ -21,6 +26,8 @@ interface RegisteredRokuSessionMedia {
 }
 
 const sessionMediaByDevice = new Map<string, RegisteredRokuSessionMedia>();
+/** LOAD generation each registration belongs to, when the caller knows one. */
+const registeredGenerations = new Map<string, number>();
 
 /**
  * Observers receive `undefined` when the media for this device is cleared, so a
@@ -34,9 +41,12 @@ const sessionMediaObservers = new Map<string, Set<RokuSessionMediaObserver>>();
 export function registerRokuSessionMedia(
     deviceId: string,
     sessionId: string,
-    media: MediaInformation
+    media: MediaInformation,
+    loadGeneration?: number
 ) {
     sessionMediaByDevice.set(deviceId, { sessionId, media });
+    if (loadGeneration === undefined) registeredGenerations.delete(deviceId);
+    else registeredGenerations.set(deviceId, loadGeneration);
     const observers = sessionMediaObservers.get(deviceId);
     if (!observers) return;
     for (const observer of observers) {
@@ -88,6 +98,7 @@ export function unregisterRokuSessionMedia(
     const current = sessionMediaByDevice.get(deviceId);
     if (current?.sessionId !== sessionId) return;
     sessionMediaByDevice.delete(deviceId);
+    registeredGenerations.delete(deviceId);
     // Tell observers the media is gone: a consumer that synthesised state from
     // it (the HLS DVR startup overlay) must be able to drop it immediately
     // rather than keeping a stale claim until some later poll happens to clear
@@ -101,6 +112,36 @@ export function unregisterRokuSessionMedia(
             // Best-effort notification only.
         }
     }
+}
+
+/**
+ * Drops the registered media of a superseded LOAD generation, returning
+ * whether anything was dropped.
+ *
+ * Advancing a device from one LOAD generation to the next must retire the
+ * previous load's metadata at once: until the new load's media arrives, the
+ * remote would keep reading the old duration and synthetic-DVR anchors and
+ * synthesise them for a load they do not describe.
+ *
+ * Media registered without a known generation is left alone — nothing here can
+ * tell whether it is stale, and dropping it would be the more damaging guess.
+ */
+export function retireRokuSessionMediaIfGenerationStale(
+    deviceId: string,
+    currentLoadGeneration: number
+): boolean {
+    const registered = registeredGenerations.get(deviceId);
+    if (registered === undefined) return false;
+    if (registered === currentLoadGeneration) return false;
+    const current = sessionMediaByDevice.get(deviceId);
+    // Both maps are written together; the delete is a guard against a state
+    // that should not occur rather than an expected branch.
+    if (!current) {
+        registeredGenerations.delete(deviceId);
+        return false;
+    }
+    unregisterRokuSessionMedia(deviceId, current.sessionId);
+    return true;
 }
 
 /** The media a Roku session currently has loaded on the device, if any. */

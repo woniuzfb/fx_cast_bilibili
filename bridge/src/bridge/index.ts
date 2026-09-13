@@ -6,12 +6,8 @@ import Remote from "./components/cast/remote";
 
 import { handleRokuMessage, handleRokuSessionMessage } from "./components/roku";
 import RokuDeviceBrowser from "./components/roku/deviceBrowser";
-import type { MediaInformation } from "./components/cast/types";
 import RokuRemote from "./components/roku/remote";
-import {
-    registerRokuSessionMedia,
-    unregisterRokuSessionMedia
-} from "./components/roku/sessionMedia";
+import { RokuSessionMediaSync } from "./components/roku/sessionMediaSync";
 
 import {
     mediaServerRequestId,
@@ -28,26 +24,16 @@ const remotes = new Map<string, Remote>();
 let rokuDeviceBrowser: RokuDeviceBrowser | null = null;
 const rokuRemotes = new Map<string, RokuRemote>();
 /**
- * LOAD generations that arrived before their RokuRemote existed.
+ * Mirrors Roku session media onto the device's current LOAD generation.
  *
- * The extension pushes a generation as soon as a LOAD begins, which can be
- * before discovery has produced the remote for that device; and a
- * bridge:startDiscovery handler creates remotes asynchronously, so a push that
- * follows a reconnect can easily precede them. Keeping the value here means the
- * remote can be given it whenever it appears, instead of the push being
- * silently dropped and generation binding quietly degrading to "unattributed".
+ * Both the generation and the media are pushed by the extension, in either
+ * order, and the media may arrive before discovery has produced the remote for
+ * that device. The module owns the resulting decision table (wait for the
+ * generation, retire superseded media, ignore stragglers) and the cached
+ * generation the remote is created with.
  */
-const rokuLoadGenerations = new Map<string, number>();
-/**
- * Session media mirrored from the extension, cached before the remote exists
- * (the same early-arrival race as the LOAD generation). Keyed by device and
- * carrying the generation it belongs to, so a message from a superseded load
- * cannot overwrite the current one.
- */
-const rokuSessionMedia = new Map<
-    string,
-    { loadGeneration: number; ownerId: string; media: MediaInformation }
->();
+const rokuSessionMediaSync = new RokuSessionMediaSync();
+
 let shutdownPromise: Promise<void> | undefined;
 let mediaServerCommandQueue: Promise<void> = Promise.resolve();
 
@@ -240,9 +226,10 @@ export function run(messaging: Messenger) {
                             // Must be a constructor option: the remote starts
                             // polling inside its constructor, so a later
                             // setLoadGeneration would miss the first sample.
-                            initialLoadGeneration: rokuLoadGenerations.get(
-                                device.id
-                            ),
+                            initialLoadGeneration:
+                                rokuSessionMediaSync.currentLoadGeneration(
+                                    device.id
+                                ),
                             onReceiverStatusUpdate(status) {
                                 messaging.sendMessage({
                                     subject: "main:receiverDeviceStatusUpdated",
@@ -294,20 +281,10 @@ export function run(messaging: Messenger) {
                             }
                         });
 
-                        // The cached generation was passed in above. Session
-                        // media may also have arrived before this remote
-                        // existed: registering it now replays it to the
-                        // observer the constructor just installed.
-                        const pendingSessionMedia = rokuSessionMedia.get(
-                            device.id
-                        );
-                        if (pendingSessionMedia) {
-                            registerRokuSessionMedia(
-                                device.id,
-                                pendingSessionMedia.ownerId,
-                                pendingSessionMedia.media
-                            );
-                        }
+                        // Session media needs no replay here: the registry
+                        // applies it as soon as the generation agrees, and
+                        // observeRokuSessionMedia hands whatever is already
+                        // registered to the observer the constructor installed.
                         rokuRemotes.set(device.id, remote);
                     }
                 });
@@ -331,40 +308,22 @@ export function run(messaging: Messenger) {
             }
 
             case "bridge:rokuSetSessionMedia": {
-                const { deviceId, loadGeneration, ownerId, media } =
-                    message.data;
-                const currentGeneration = rokuLoadGenerations.get(deviceId);
-                // The generation is the media-identity key; the owner alone is
-                // not enough because it names whoever published last.
-                if (
-                    currentGeneration !== undefined &&
-                    currentGeneration !== loadGeneration
-                ) {
-                    break;
-                }
-                if (media) {
-                    rokuSessionMedia.set(deviceId, {
-                        loadGeneration,
-                        ownerId,
-                        media
-                    });
-                    registerRokuSessionMedia(deviceId, ownerId, media);
-                } else {
-                    const cached = rokuSessionMedia.get(deviceId);
-                    // Owner-aware: a late clear from a replaced session must
-                    // not drop the current one's metadata.
-                    if (cached?.ownerId !== ownerId) break;
-                    rokuSessionMedia.delete(deviceId);
-                    unregisterRokuSessionMedia(deviceId, ownerId);
-                }
+                // The payload carries the LOAD generation because that, not the
+                // owner (whoever published last), is the media-identity key;
+                // the module decides whether it may be applied yet.
+                rokuSessionMediaSync.setSessionMedia(message.data);
                 break;
             }
 
             case "bridge:rokuSetLoadGeneration": {
                 const { deviceId, loadGeneration } = message.data;
-                // Cache first, then apply: whichever of the generation and the
-                // remote arrives second wins the race.
-                rokuLoadGenerations.set(deviceId, loadGeneration);
+                // The module caches the generation and applies any session
+                // media that was waiting for it; whichever of the generation
+                // and the remote arrives second wins the race.
+                rokuSessionMediaSync.setLoadGeneration(
+                    deviceId,
+                    loadGeneration
+                );
                 rokuRemotes.get(deviceId)?.setLoadGeneration(loadGeneration);
                 break;
             }
