@@ -383,36 +383,104 @@ async function main() {
     const { server, origin } = await startSenderServer();
     console.log("sender origin:", origin);
 
-    // 判定2: a test-only build that marks contentInitial's own execution. It is
-    // made in the harness directory, never in dist/, and the mark is not part of
-    // any production behaviour.
+    // --- Stage 0: the artifact must be the code under review --------------
+    //
+    // Reading current source while the browser runs a stale bundle produces
+    // conclusions about neither, so the markers the current source is supposed
+    // to emit are asserted BEFORE anything is launched. `--extension-dir`
+    // controls are labelled as such rather than silently accepted.
+    const backgroundBundle = path.join(
+        args.extensionDir,
+        "background/background.js"
+    );
+    if (!fs.existsSync(backgroundBundle)) {
+        throw new Error(
+            `sessionHarness: no background bundle at ${backgroundBundle} - run npm run build:extension`
+        );
+    }
+    const requiredBundleMarkers = [
+        "bridge:rokuSetLoadGeneration",
+        "bridge:rokuSetSessionMedia",
+        "load-generation-began"
+    ];
+    const bundleText = fs.readFileSync(backgroundBundle, "utf8");
+    const missingMarkers = requiredBundleMarkers.filter(
+        marker => !bundleText.includes(marker)
+    );
+    if (missingMarkers.length) {
+        throw new Error(
+            `sessionHarness: the extension bundle is stale - missing ${missingMarkers.join(", ")}`
+        );
+    }
+    const bundleHash = require("crypto")
+        .createHash("sha256")
+        .update(bundleText)
+        .digest("hex");
+    console.log(
+        "stage 0: bundle fresh",
+        JSON.stringify({
+            extensionDir: args.extensionDir,
+            backgroundSha256: bundleHash.slice(0, 16),
+            gitHead: (() => {
+                try {
+                    return require("child_process")
+                        .execSync("git rev-parse --short HEAD", {
+                            cwd: repoRoot
+                        })
+                        .toString()
+                        .trim();
+                } catch {
+                    return "unknown";
+                }
+            })()
+        })
+    );
+
+    // --- ungated instrumentation of the TEST COPY only --------------------
+    //
+    // `logRokuDebug` is gated by a debug option whose timing made an earlier
+    // "the log line is absent" conclusion unreliable, so these markers use
+    // console.log, which is not gated, and read state at the call site instead
+    // of inferring it. The copy lives in the harness directory; dist/ is never
+    // touched and this is not production behaviour.
     let extensionDir = args.extensionDir;
-    if (args.instrument) {
+    {
         extensionDir = path.join(harnessDir, "extension-instrumented");
         fs.cpSync(args.extensionDir, extensionDir, { recursive: true });
-        const target = path.join(extensionDir, "cast/contentInitial.js");
-        // HEAD and TAIL markers, because "never injected" and "injected and
-        // threw" look identical from the page if the only marker sits at the
-        // end of the file (the first attempt made exactly that mistake):
-        //   head only        -> the script ran and threw before finishing
-        //   head and tail    -> the script completed, so the patch itself is
-        //                       what failed to affect the page
-        //   neither          -> the script was not injected at all
-        const original = fs.readFileSync(target, "utf8");
-        const marker = name =>
-            `try { document.documentElement.setAttribute(${JSON.stringify(
-                name
-            )}, "1"); } catch (e) {}\n`;
-        fs.writeFileSync(
-            target,
-            "// HARNESS ONLY instrumentation\n" +
-                'console.log("[harness] contentInitial.js entered");\n' +
-                marker("data-fx-harness-ci-head") +
-                original +
-                "\n" +
-                marker("data-fx-harness-ci-tail")
+        const patch = (relPath, marker, build) => {
+            const file = path.join(extensionDir, relPath);
+            const original = fs.readFileSync(file, "utf8");
+            const index = original.indexOf(marker);
+            if (index === -1) {
+                throw new Error(
+                    `sessionHarness: cannot instrument ${relPath} (marker not found): ${marker}`
+                );
+            }
+            const at = index + marker.length;
+            fs.writeFileSync(
+                file,
+                original.slice(0, at) + build() + original.slice(at)
+            );
+        };
+        // Did the LOAD generation hook run at all, and was the bridge port
+        // available at that instant?
+        patch(
+            "background/background.js",
+            "beginRokuMediaLoad(deviceId) {",
+            () =>
+                "\nconsole.log('[harness] beginRokuMediaLoad', JSON.stringify({deviceId, hasBridgePort: Boolean(this.bridgePort)}));"
         );
-        console.log("instrumented contentInitial:", target);
+        patch(
+            "background/background.js",
+            "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
+            () =>
+                "\nconsole.log('[harness] setRokuLoadGenerationOnBridge', JSON.stringify({deviceId, loadGeneration, hasBridgePort: Boolean(this.bridgePort)}));"
+        );
+        // What state was the selector in at the moment of the click?
+        patch("ui/popup/index.js", "onReceiverCast(device) {", () =>
+            "\nconsole.log('[harness] onReceiverCast', JSON.stringify({deviceId: device && device.id}));"
+        );
+        console.log("instrumented test copy:", extensionDir);
     }
     const profileDir = makeProfile(harnessDir, extensionDir);
     const firefoxPath = [
