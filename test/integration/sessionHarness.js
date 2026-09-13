@@ -131,9 +131,23 @@ function parseArgs(argv) {
 /** Serves the sender page: file:// is never a whitelisted SDK origin. */
 function startSenderServer() {
     const server = http.createServer((req, res) => {
-        const name = path.basename(new URL(req.url, "http://x").pathname);
+        const pathname = new URL(req.url, "http://x").pathname;
+        const name = path.basename(pathname);
         const file = path.join(__dirname, "pages", name);
         if (!fs.existsSync(file)) {
+            // The LOAD's contentId points here. Serving a minimal playlist keeps
+            // the URL legitimate for the session (which validates the scheme)
+            // without a 404 disturbing whatever later uses it.
+            if (pathname === "/harness-stage2.m3u8") {
+                res.writeHead(200, {
+                    "content-type": "application/vnd.apple.mpegurl"
+                });
+                res.end(
+                    "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n" +
+                        "#EXTINF:6.0,\nsegment0.ts\n#EXT-X-ENDLIST\n"
+                );
+                return;
+            }
             res.writeHead(404).end("not found");
             return;
         }
@@ -1194,6 +1208,15 @@ async function main() {
         console.log("fake roku pinned to idle for the LOAD");
 
         await driver.switchTo().window(senderTab);
+        // Everything below is this LOAD's: the discovery connection has been
+        // polling since Stage 1, so an unfiltered `.find()` would happily return
+        // an observation from before the media ever arrived - a real message
+        // from the wrong lifecycle, which is its own kind of false green.
+        const loadStartedAt = Date.now();
+        const HARNESS_MARKER = "stage2";
+        const afterLoad = entry => entry.at >= loadStartedAt;
+        const markerOf = media =>
+            media && media.customData && media.customData.harnessMarker;
         // A LOAD whose callbacks never settle is itself a finding, not a reason
         // to abort the run: the relay hops below are read from the traces either
         // way, so a timeout here is reported and the evidence is still collected.
@@ -1232,7 +1255,22 @@ async function main() {
 
         // Hop 1: the session host publishes the LOAD's media.
         const sessionMedia = sessionConn.outbound.find(
-            m => m.subject === "main:rokuSessionMedia"
+            m =>
+                m.subject === "main:rokuSessionMedia" &&
+                afterLoad(m) &&
+                m.message.data.deviceId === FAKE_DEVICE_ID &&
+                markerOf(m.message.data.media) === HARNESS_MARKER
+        );
+        const loadFailed = sessionConn.outbound.find(
+            m =>
+                afterLoad(m) &&
+                m.subject === "cast:sessionMessageReceived" &&
+                String(m.message.data.messageData || "").includes("LOAD_FAILED")
+        );
+        check(
+            "the session did not reject the LOAD (no LOAD_FAILED)",
+            !loadFailed,
+            JSON.stringify(loadFailed && loadFailed.message.data)
         );
         check(
             "hop 1: the session host published main:rokuSessionMedia",
@@ -1256,10 +1294,17 @@ async function main() {
 
         // Hop 2: the extension relayed the generation and the media to discovery.
         const relayedGeneration = discoveryConn.inbound.find(
-            m => m.subject === "bridge:rokuSetLoadGeneration"
+            m =>
+                m.subject === "bridge:rokuSetLoadGeneration" &&
+                afterLoad(m) &&
+                m.message.data.deviceId === FAKE_DEVICE_ID
         );
         const relayedMedia = discoveryConn.inbound.find(
-            m => m.subject === "bridge:rokuSetSessionMedia"
+            m =>
+                m.subject === "bridge:rokuSetSessionMedia" &&
+                afterLoad(m) &&
+                m.message.data.deviceId === FAKE_DEVICE_ID &&
+                markerOf(m.message.data.media) === HARNESS_MARKER
         );
         const generationData = (relayedGeneration && relayedGeneration.message.data) || {};
         const relayedData = (relayedMedia && relayedMedia.message.data) || {};
@@ -1299,9 +1344,11 @@ async function main() {
         const statusEmission = discoveryConn.outbound.find(
             m =>
                 m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                afterLoad(m) &&
                 m.message.data.deviceId === FAKE_DEVICE_ID &&
                 m.message.data.provenance &&
-                m.message.data.provenance.source === "startup-synthetic"
+                m.message.data.provenance.source === "startup-synthetic" &&
+                markerOf(m.message.data.status.media) === HARNESS_MARKER
         );
         check(
             "hop 3: the media status is startup-synthetic BUFFERING with the session metadata",
@@ -1327,7 +1374,9 @@ async function main() {
                 m.subject === "main:rokuPlaybackObservation" &&
                 m.message.data.deviceId === FAKE_DEVICE_ID &&
                 m.message.data.provenance &&
-                m.message.data.provenance.source === "ecp-poll"
+                m.message.data.provenance.source === "ecp-poll" &&
+                // only samples that STARTED after this LOAD
+                m.message.data.provenance.pollStartedAt >= loadStartedAt
         );
         const observationProvenance =
             (observation && observation.message.data.provenance) || {};

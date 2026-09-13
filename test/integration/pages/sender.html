@@ -199,8 +199,11 @@
                     }
                     result.loadCalled = true;
                     const media = {
+                        // Must be a real http(s) URL: RokuSession.handleLoad()
+                        // rejects anything else with LOAD_FAILED before it
+                        // launches, registers session media or publishes it.
                         contentId: (overrides && overrides.contentId) ||
-                            "harness-hls-dvr",
+                            location.origin + "/harness-stage2.m3u8",
                         contentType: "application/vnd.apple.mpegurl",
                         streamType: "BUFFERED",
                         duration: (overrides && overrides.duration) || 7200,
