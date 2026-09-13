@@ -64,6 +64,12 @@ import {
 const NS_MEDIA = "urn:x-cast:com.google.cast.media";
 
 const MEDIA_POLL_INTERVAL_MS = 2500;
+/**
+ * How long a PLAY/PAUSE intent stays ahead of the session's own observation.
+ * The poll runs every 2.5s, so this has to outlast at least one sample or the
+ * sender would see the intent flicker.
+ */
+const SESSION_PLAYER_INTENT_WINDOW_MS = 6_000;
 /** How long after a launch an idle /query/media-player is treated as
  * "player starting" rather than "media ended/dismissed". Covers slow HLS
  * starts and channels that briefly report idle before playback. */
@@ -174,6 +180,26 @@ export default class RokuSession {
     private playerAppId?: string;
     private loadedMedia?: MediaInformation;
     private playerState: PlayerState = PlayerState.IDLE;
+    /**
+     * Optimistic overlay for a PLAY/PAUSE transport that has been accepted by
+     * the device but not yet observed.
+     *
+     * The sender protocol needs the intent immediately, but the session also
+     * runs its own ECP poll, so the overlay has to expire on evidence rather
+     * than stand in for it: a poll that observes the requested state (or the
+     * opposite one) clears it. It is deliberately NOT the extension's command
+     * lifecycle - the two state machines stay separate, so there is no
+     * "not-confirmed" verdict here, only "back to what was observed".
+     */
+    private pendingPlayerIntent?: {
+        intent: "PLAY" | "PAUSE";
+        requestedState: PlayerState;
+        expiresAt: number;
+        token: number;
+    };
+    /** Cancels a pending intent when a newer transport starts. */
+    private playbackIntentToken = 0;
+    private pendingIntentTimer?: NodeJS.Timeout;
     private lastPosition?: number;
     /** Bilibili DASH uses a remux-relative monotonic clock after the first
      * confirmed Roku ECP sample. Later Media Assistant position glitches must
@@ -419,6 +445,10 @@ export default class RokuSession {
         message: Extract<SenderMediaMessage, { type: "LOAD" }>
     ) {
         const requestId = message.requestId ?? 0;
+        // A new media object: a PLAY/PAUSE intent for the previous one must not
+        // colour its status. The LOAD path below establishes the new baseline.
+        this.playbackIntentToken++;
+        this.clearPendingPlayerIntent();
         const url = message.media?.contentId;
         if (!url || !/^https?:\/\//i.test(url)) {
             this.messaging.sendMessage({
@@ -756,6 +786,42 @@ export default class RokuSession {
     /** PLAY/PAUSE keypresses: an absolute intent mapped to its ECP key.
      * Whether the Play key toggles on some firmware is not verified here, so
      * the mapping is kept mechanical (see the note below). */
+    /** What the sender protocol should report: intent while it is pending. */
+    private effectivePlayerState(): PlayerState {
+        return this.pendingPlayerIntent?.requestedState ?? this.playerState;
+    }
+
+    /**
+     * Settles a pending intent against a real observation.
+     *
+     * Matching the requested state confirms it; observing the opposite state
+     * refutes it immediately rather than waiting for the deadline. BUFFERING is
+     * transitional in both directions and settles nothing, which mirrors the
+     * extension coordinator's classification - the same rule applied to the
+     * session's own clock. IDLE is deliberately NOT treated as an opposite
+     * state here: the launch and live-relay paths (awaitingConsume, the deferred
+     * consume fallback, sawPostLoadIdle) own that interpretation, and a generic
+     * rule would race with them.
+     */
+    private reconcilePendingIntentFromObservation(observed: PlayerState) {
+        const pending = this.pendingPlayerIntent;
+        if (!pending) return;
+        if (observed === PlayerState.BUFFERING) return;
+        const matched = observed === pending.requestedState;
+        const opposite =
+            (pending.intent === "PLAY" && observed === PlayerState.PAUSED) ||
+            (pending.intent === "PAUSE" && observed === PlayerState.PLAYING);
+        if (matched || opposite) this.clearPendingPlayerIntent();
+    }
+
+    private clearPendingPlayerIntent() {
+        if (this.pendingIntentTimer) {
+            clearTimeout(this.pendingIntentTimer);
+            this.pendingIntentTimer = undefined;
+        }
+        this.pendingPlayerIntent = undefined;
+    }
+
     private async handlePlayPause(requestId: number, intent: "PLAY" | "PAUSE") {
         // Absolute intent -> ECP key, one-to-one. The previous "already
         // playing/paused; harmless no-op" branches were an identity
@@ -763,11 +829,33 @@ export default class RokuSession {
         // the observed playerState never affected the key and the no-op
         // assumption in those comments was never actually enforced.
         const key = intent === "PLAY" ? "Play" : "Pause";
+        // Taken before the await: if a newer transport arrives while this one is
+        // in flight, its result must not resurrect this intent.
+        const token = ++this.playbackIntentToken;
+        this.clearPendingPlayerIntent();
 
         try {
             await keypress(this.receiverDevice.host, key);
-            this.playerState =
-                intent === "PLAY" ? PlayerState.PLAYING : PlayerState.PAUSED;
+            if (this.tornDown || token !== this.playbackIntentToken) return;
+            this.pendingPlayerIntent = {
+                intent,
+                requestedState:
+                    intent === "PLAY"
+                        ? PlayerState.PLAYING
+                        : PlayerState.PAUSED,
+                expiresAt: Date.now() + SESSION_PLAYER_INTENT_WINDOW_MS,
+                token
+            };
+            this.pendingIntentTimer = setTimeout(() => {
+                this.pendingIntentTimer = undefined;
+                if (token !== this.playbackIntentToken) return;
+                // Deadline: fall back to the last observed state. Never invent
+                // a failure verdict - that belongs to the extension's command
+                // lifecycle, not to the sender protocol.
+                this.pendingPlayerIntent = undefined;
+                this.sendMediaStatus(requestId);
+            }, SESSION_PLAYER_INTENT_WINDOW_MS);
+            this.pendingIntentTimer.unref?.();
             this.sendMediaStatus(requestId);
             // The transport has landed on the device. The dense observation
             // window belongs to the discovery process (which owns the polling
@@ -856,6 +944,10 @@ export default class RokuSession {
     }
 
     private async handleStop(requestId: number) {
+        // The session is going home: a pending intent would otherwise keep
+        // reporting PLAYING/PAUSED while the status is forced idle.
+        this.playbackIntentToken++;
+        this.clearPendingPlayerIntent();
         try {
             await keypress(this.receiverDevice.host, "Home");
         } catch (err) {
@@ -919,7 +1011,7 @@ export default class RokuSession {
             mediaSessionId: this.mediaSessionId,
             media,
             playbackRate: 1,
-            playerState: this.playerState,
+            playerState: this.effectivePlayerState(),
             currentTime: isDashRemuxMedia(this.loadedMedia)
                 ? Number(
                       (
@@ -1146,6 +1238,7 @@ export default class RokuSession {
             }
             this.playerState = nextState;
             this.lastDuration = state.duration ?? this.lastDuration;
+            this.reconcilePendingIntentFromObservation(nextState);
 
             const positionMoved =
                 previousPosition !== undefined &&
@@ -1172,6 +1265,9 @@ export default class RokuSession {
     private teardown() {
         if (this.tornDown) return;
         this.tornDown = true;
+        // No intent outlives the session, and no timer may fire afterwards.
+        this.playbackIntentToken++;
+        this.clearPendingPlayerIntent();
         this.consumeWatchGeneration++;
         this.clearDeferredConsume();
         this.launchBaselineSegmentKey = "";
