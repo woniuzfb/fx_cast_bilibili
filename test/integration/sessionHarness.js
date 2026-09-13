@@ -1289,20 +1289,44 @@ async function main() {
                 sessionToExtension: [
                     ...new Set(sessionConn.outbound.map(m => m.subject))
                 ].slice(0, 12),
+                // Full payload shape, not just the type: this is what separates
+                // "the message never arrived", "wrong namespace", "the JSON was
+                // not parsed", "the LOAD arrived but lost its media" and "routed
+                // to the wrong session".
                 loadPayloads: sessionConn.inbound
                     .filter(m => afterLoad(m))
-                    .map(m => ({
-                        subject: m.subject,
-                        type: (() => {
-                            try {
-                                return JSON.parse(
-                                    m.message.data.message || "{}"
-                                ).type;
-                            } catch {
-                                return undefined;
-                            }
-                        })()
-                    }))
+                    .map(m => {
+                        const data = m.message.data || {};
+                        // The field is `messageData` (a JSON string), not
+                        // `message` - reading the wrong one printed
+                        // rawTypeof:"undefined" and hid the payload entirely.
+                        const raw = data.messageData;
+                        let parsed;
+                        try {
+                            parsed = raw ? JSON.parse(raw) : undefined;
+                        } catch {
+                            parsed = undefined;
+                        }
+                        return {
+                            subject: m.subject,
+                            sessionId: data.sessionId,
+                            namespace: data.namespace,
+                            messageId: data.messageId,
+                            rawTypeof: typeof raw,
+                            parsedType: parsed && parsed.type,
+                            requestId: parsed && parsed.requestId,
+                            contentId:
+                                parsed &&
+                                parsed.media &&
+                                parsed.media.contentId,
+                            harnessMarker:
+                                parsed &&
+                                parsed.media &&
+                                parsed.media.customData &&
+                                parsed.media.customData.harnessMarker,
+                            keys: Object.keys(data).slice(0, 8)
+                        };
+                    })
                     .slice(0, 8)
             })
         );
