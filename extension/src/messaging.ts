@@ -221,6 +221,23 @@ type BridgeMessageDefinitions = {
         deviceId: string;
     };
 
+    /**
+     * Mirrors one Roku session-media state into the discovery process.
+     *
+     * The session and the discovery bridge are different connectNative
+     * processes, so RokuSession's registerRokuSessionMedia() writes a module
+     * instance that RokuRemote's observeRokuSessionMedia() can never see. The
+     * extension is the only layer that sees both, so it forwards the state -
+     * owner-aware (null only clears the matching owner) and bound to the LOAD
+     * generation, which is the media-identity key.
+     */
+    "bridge:rokuSetSessionMedia": {
+        deviceId: string;
+        loadGeneration: number;
+        ownerId: string;
+        media: MediaInfo | null;
+    };
+
     /** Tell the discovery bridge the extension's current LOAD generation for a
      *  device, so its poll samples can be attributed to that load. */
     "bridge:rokuSetLoadGeneration": {

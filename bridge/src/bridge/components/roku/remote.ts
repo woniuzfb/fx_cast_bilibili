@@ -273,6 +273,17 @@ export default class RokuRemote {
             media => {
                 if (this.destroyed) return;
 
+                if (!media) {
+                    // The session's media is gone. Anything synthesised from it
+                    // - the startup overlay in particular - is no longer
+                    // justified, so it is dropped before the status is
+                    // rebuilt. The status itself stays whatever the
+                    // observation says; no IDLE is fabricated here.
+                    this.startupOverlay = undefined;
+                    this.emitReceiverStatus();
+                    this.emitMediaStatus({ source: "session-media-refresh" });
+                    return;
+                }
                 // A CCTV Roku LOAD can register the synthetic-DVR media before
                 // /query/media-player reports the new channel as playing. If we
                 // emit IDLE here, deviceManager immediately removes `media`,

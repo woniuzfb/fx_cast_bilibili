@@ -6,7 +6,12 @@ import Remote from "./components/cast/remote";
 
 import { handleRokuMessage, handleRokuSessionMessage } from "./components/roku";
 import RokuDeviceBrowser from "./components/roku/deviceBrowser";
+import type { MediaInformation } from "./components/cast/types";
 import RokuRemote from "./components/roku/remote";
+import {
+    registerRokuSessionMedia,
+    unregisterRokuSessionMedia
+} from "./components/roku/sessionMedia";
 
 import {
     mediaServerRequestId,
@@ -33,6 +38,16 @@ const rokuRemotes = new Map<string, RokuRemote>();
  * silently dropped and generation binding quietly degrading to "unattributed".
  */
 const rokuLoadGenerations = new Map<string, number>();
+/**
+ * Session media mirrored from the extension, cached before the remote exists
+ * (the same early-arrival race as the LOAD generation). Keyed by device and
+ * carrying the generation it belongs to, so a message from a superseded load
+ * cannot overwrite the current one.
+ */
+const rokuSessionMedia = new Map<
+    string,
+    { loadGeneration: number; ownerId: string; media: MediaInformation }
+>();
 let shutdownPromise: Promise<void> | undefined;
 let mediaServerCommandQueue: Promise<void> = Promise.resolve();
 
@@ -279,8 +294,20 @@ export function run(messaging: Messenger) {
                             }
                         });
 
-                        // The cached generation was passed in above; this is
-                        // only the registration.
+                        // The cached generation was passed in above. Session
+                        // media may also have arrived before this remote
+                        // existed: registering it now replays it to the
+                        // observer the constructor just installed.
+                        const pendingSessionMedia = rokuSessionMedia.get(
+                            device.id
+                        );
+                        if (pendingSessionMedia) {
+                            registerRokuSessionMedia(
+                                device.id,
+                                pendingSessionMedia.ownerId,
+                                pendingSessionMedia.media
+                            );
+                        }
                         rokuRemotes.set(device.id, remote);
                     }
                 });
@@ -300,6 +327,36 @@ export function run(messaging: Messenger) {
                 });
 
                 rokuDeviceBrowser.start();
+                break;
+            }
+
+            case "bridge:rokuSetSessionMedia": {
+                const { deviceId, loadGeneration, ownerId, media } =
+                    message.data;
+                const currentGeneration = rokuLoadGenerations.get(deviceId);
+                // The generation is the media-identity key; the owner alone is
+                // not enough because it names whoever published last.
+                if (
+                    currentGeneration !== undefined &&
+                    currentGeneration !== loadGeneration
+                ) {
+                    break;
+                }
+                if (media) {
+                    rokuSessionMedia.set(deviceId, {
+                        loadGeneration,
+                        ownerId,
+                        media
+                    });
+                    registerRokuSessionMedia(deviceId, ownerId, media);
+                } else {
+                    const cached = rokuSessionMedia.get(deviceId);
+                    // Owner-aware: a late clear from a replaced session must
+                    // not drop the current one's metadata.
+                    if (cached?.ownerId !== ownerId) break;
+                    rokuSessionMedia.delete(deviceId);
+                    unregisterRokuSessionMedia(deviceId, ownerId);
+                }
                 break;
             }
 

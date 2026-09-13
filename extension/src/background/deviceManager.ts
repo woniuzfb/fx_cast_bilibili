@@ -20,6 +20,7 @@ import type { PlaybackCommandProgress } from "../../../shared/playbackCommand";
 
 import {
     currentRokuMediaIdentities,
+    currentRokuMediaIdentity,
     nextRokuLoadGeneration,
     setRokuMediaIdentityFields,
     terminateActivePlaybackCommand,
@@ -251,10 +252,20 @@ export default new (class extends TypedEventTarget<EventMap> {
             const current = this.rokuSessionMedia.get(deviceId);
             if (current?.ownerId === ownerId) {
                 this.rokuSessionMedia.delete(deviceId);
+                // A clear must travel too, or the discovery process keeps
+                // synthesizing from a session that is gone.
+                this.syncRokuSessionMediaToBridge(deviceId, ownerId, null);
             }
             return;
         }
         this.rokuSessionMedia.set(deviceId, { ownerId, media });
+        // The discovery bridge runs the RokuRemote whose observer builds the
+        // popup's media status, and it is a DIFFERENT connectNative process, so
+        // its own sessionMedia registry is a separate module instance that this
+        // write can never reach. Without forwarding, the HLS DVR startup
+        // synthesis and the session metadata (duration, customData) that
+        // buildStatusMedia expects are simply never visible there.
+        this.syncRokuSessionMediaToBridge(deviceId, ownerId, media);
         // Refine the CURRENT load generation's identity. Optimistic relay media
         // and the real LOAD media both land here for the same load, so this
         // must never fork the generation.
@@ -519,6 +530,44 @@ export default new (class extends TypedEventTarget<EventMap> {
                 deviceId,
                 identity.loadGeneration
             );
+        }
+        // The new process's session-media cache is empty too.
+        for (const [deviceId, entry] of this.rokuSessionMedia) {
+            this.syncRokuSessionMediaToBridge(
+                deviceId,
+                entry.ownerId,
+                entry.media
+            );
+        }
+    }
+
+    /**
+     * Mirrors one session-media state to the discovery bridge.
+     *
+     * Carries the LOAD generation as well as the owner: the generation is the
+     * media-identity key, and a message from a superseded load must not
+     * overwrite the current one even if its owner string happens to match.
+     */
+    private syncRokuSessionMediaToBridge(
+        deviceId: string,
+        ownerId: string,
+        media: MediaInfo | null
+    ) {
+        if (!this.bridgePort) return;
+        const identity = currentRokuMediaIdentity(deviceId);
+        if (!identity) return;
+        try {
+            this.bridgePort.postMessage({
+                subject: "bridge:rokuSetSessionMedia",
+                data: {
+                    deviceId,
+                    loadGeneration: identity.loadGeneration,
+                    ownerId,
+                    media
+                }
+            });
+        } catch (err) {
+            logger.error("Failed to mirror Roku session media", err);
         }
     }
 

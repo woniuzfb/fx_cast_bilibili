@@ -22,7 +22,12 @@ interface RegisteredRokuSessionMedia {
 
 const sessionMediaByDevice = new Map<string, RegisteredRokuSessionMedia>();
 
-type RokuSessionMediaObserver = (media: MediaInformation) => void;
+/**
+ * Observers receive `undefined` when the media for this device is cleared, so a
+ * consumer can drop whatever it synthesised from it. The previous shape
+ * (media only) meant a clear was silent, leaving a stale synthesis in place.
+ */
+type RokuSessionMediaObserver = (media: MediaInformation | undefined) => void;
 const sessionMediaObservers = new Map<string, Set<RokuSessionMediaObserver>>();
 
 /** Registers the media a Roku session currently has loaded for a device. */
@@ -83,6 +88,19 @@ export function unregisterRokuSessionMedia(
     const current = sessionMediaByDevice.get(deviceId);
     if (current?.sessionId !== sessionId) return;
     sessionMediaByDevice.delete(deviceId);
+    // Tell observers the media is gone: a consumer that synthesised state from
+    // it (the HLS DVR startup overlay) must be able to drop it immediately
+    // rather than keeping a stale claim until some later poll happens to clear
+    // it.
+    const observers = sessionMediaObservers.get(deviceId);
+    if (!observers) return;
+    for (const observer of observers) {
+        try {
+            observer(undefined);
+        } catch {
+            // Best-effort notification only.
+        }
+    }
 }
 
 /** The media a Roku session currently has loaded on the device, if any. */
