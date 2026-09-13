@@ -1887,6 +1887,20 @@ async function main() {
         const discoveryInbound = discoveryConnectionsNow.flatMap(conn =>
             conn.inbound
         );
+
+        const relayedGeneration = discoveryInbound.find(
+            m =>
+                m.subject === "bridge:rokuSetLoadGeneration" &&
+                afterSessionRequest(m) &&
+                m.message.data.deviceId === FAKE_DEVICE_ID
+        );
+        const relayedMedia = discoveryInbound.find(
+            m =>
+                m.subject === "bridge:rokuSetSessionMedia" &&
+                afterLoad(m) &&
+                m.message.data.deviceId === FAKE_DEVICE_ID &&
+                markerOf(m.message.data.media) === HARNESS_MARKER
+        );
         const assertStage2Hops = !args.mediaBeforeGeneration;
         // The generation is created when the device is SELECTED, which is
         // legitimately before the LOAD, so it is filtered against the session
@@ -1894,23 +1908,6 @@ async function main() {
         const afterSessionRequest = entry => entry.at >= requestAtSession;
         const generationData = (relayedGeneration && relayedGeneration.message.data) || {};
         const relayedData = (relayedMedia && relayedMedia.message.data) || {};
-        const relayedGeneration = assertStage2Hops
-            ? discoveryInbound.find(
-                  m =>
-                      m.subject === "bridge:rokuSetLoadGeneration" &&
-                      afterSessionRequest(m) &&
-                      m.message.data.deviceId === FAKE_DEVICE_ID
-              )
-            : undefined;
-        const relayedMedia = assertStage2Hops
-            ? discoveryInbound.find(
-                  m =>
-                      m.subject === "bridge:rokuSetSessionMedia" &&
-                      afterLoad(m) &&
-                      m.message.data.deviceId === FAKE_DEVICE_ID &&
-                      markerOf(m.message.data.media) === HARNESS_MARKER
-              )
-            : undefined;
         if (assertStage2Hops) {
         check(
             "hop 2: the extension sent generation and session media to discovery",
