@@ -38,6 +38,7 @@ import {
     terminateActivePlaybackCommandForRelay
 } from "./playbackCommand";
 import type { MediaStatus } from "../cast/sdk/types";
+import type { PlaybackPageCommand } from "../../../shared/playbackCommand";
 import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
 import { ActionState, updateActionState } from "./action";
 import {
@@ -1769,25 +1770,31 @@ function createSelector(tabId: number) {
      */
     const pagePlaybackRoute = async (
         deviceId: string,
-        intent: "PLAY" | "PAUSE"
-    ): Promise<boolean> => {
+        command: PlaybackPageCommand
+    ): Promise<unknown> => {
         const instance = castManager.getInstanceByDeviceId(deviceId);
         const tabId = instance?.contentContext?.tabId;
-        if (tabId === undefined) return false;
-        const action = intent === "PAUSE" ? "pause" : "play";
+        if (tabId === undefined) return undefined;
         try {
             const results = await browser.scripting.executeScript({
                 target: { tabId },
-                func: ((playback: "play" | "pause") =>
+                // The page returns the structured result itself. It must NOT be
+                // collapsed to a boolean here: `=== true` would always be false
+                // for an object, and a plain truthiness test would accept
+                // `{ accepted: false }` and strand the command on the page
+                // route. Validation happens in the coordinator.
+                func: ((pageCommand: PlaybackPageCommand) =>
                     (window as any).__fxCastBilibili?.controlPlayback?.(
-                        playback
-                    ) === true) as any,
-                args: [action]
+                        pageCommand
+                    )) as any,
+                args: [command]
             });
-            return results.some(result => result.result === true);
+            return results
+                .map(result => result.result)
+                .find(v => v !== undefined);
         } catch (err) {
             logger.error("Failed to route popup playback to page sender", err);
-            return false;
+            return undefined;
         }
     };
 

@@ -1,5 +1,7 @@
 import type {
+    PagePlaybackDispatchResult,
     PagePlaybackPhase,
+    PlaybackPageCommand,
     PlaybackCommandLifecycle,
     PlaybackCommandTerminalReason,
     PlaybackExecutionOwner,
@@ -45,6 +47,8 @@ interface PlaybackCommand {
     terminalReason?: PlaybackCommandTerminalReason;
     pagePhase: PagePlaybackPhase;
     receiverPhase: ReceiverPlaybackPhase;
+    /** Last reported failure message, page or receiver side. */
+    error?: string;
     /**
      * When the extension STARTED submitting the receiver command to the
      * bridge - sampled before the port call, not after it. postMessage() is an
@@ -91,7 +95,7 @@ let onViewChanged: ((deviceId: string) => void) | undefined;
  * page sender reported that it accepted the control flow.
  */
 let pageRouteAttempt:
-    | ((deviceId: string, intent: PlaybackIntent) => Promise<boolean>)
+    | ((deviceId: string, command: PlaybackPageCommand) => Promise<unknown>)
     | undefined;
 /**
  * Hands the command to the bridge. Returns true only when the message was
@@ -105,8 +109,8 @@ export function configurePlaybackCommands(options: {
     onViewChanged: (deviceId: string) => void;
     pageRouteAttempt?: (
         deviceId: string,
-        intent: PlaybackIntent
-    ) => Promise<boolean>;
+        command: PlaybackPageCommand
+    ) => Promise<unknown>;
     deviceRouteAttempt: (
         deviceId: string,
         message: SenderMediaMessage
@@ -183,6 +187,7 @@ function viewFor(command: PlaybackCommand): ReceiverPlaybackView {
         receiverPending:
             command.lifecycle === "active" &&
             command.receiverPhase === "requested",
+        receiverDispatchStartedAt: command.receiverDispatchStartedAt,
         pagePhase: command.pagePhase,
         receiverPhase: command.receiverPhase,
         lastObservation: command.lastObservation?.classification
@@ -192,6 +197,26 @@ function viewFor(command: PlaybackCommand): ReceiverPlaybackView {
 function publish(device: ReceiverDevice, command: PlaybackCommand) {
     device.playbackCommand = viewFor(command);
     onViewChanged?.(device.id);
+}
+
+/**
+ * Single owner invariant. A command may take an owner once; switching owners
+ * would mean two execution paths (page and bridge) both driving the receiver.
+ */
+function assignPlaybackOwner(
+    command: PlaybackCommand,
+    owner: PlaybackExecutionOwner
+) {
+    if (command.owner !== undefined && command.owner !== owner) {
+        logger.error("Invalid playback owner transition", {
+            commandId: command.commandId,
+            currentOwner: command.owner,
+            requestedOwner: owner
+        });
+        return false;
+    }
+    command.owner = owner;
+    return true;
 }
 
 function clearWatchdog(command: PlaybackCommand) {
@@ -399,6 +424,137 @@ function armWatchdog(device: ReceiverDevice, command: PlaybackCommand) {
 }
 
 /**
+ * Runtime validation of the page sender's structured reply.
+ *
+ * Without it a truthy-but-malformed object would be treated as a successful
+ * page route. The matrix below is deliberately explicit: each arm of the union
+ * has exactly one legal shape, so a field that only makes sense on another arm
+ * is rejected rather than ignored.
+ */
+export function isValidPagePlaybackDispatchResult(
+    value: unknown
+): value is PagePlaybackDispatchResult {
+    if (!value || typeof value !== "object") return false;
+    const result = value as Record<string, unknown>;
+    if (typeof result.accepted !== "boolean") return false;
+    if (result.error !== undefined && typeof result.error !== "string")
+        return false;
+
+    if (result.accepted === false) {
+        return (
+            result.disposition === undefined &&
+            result.receiverRequested !== true &&
+            result.receiverDispatchStartedAt === undefined &&
+            result.armedAt === undefined &&
+            result.expiresAt === undefined
+        );
+    }
+
+    if (result.disposition === "already-target") {
+        // The page drove the receiver directly: no page transition, no arm,
+        // but a dispatch timestamp the strict gate needs.
+        return (
+            result.receiverRequested === true &&
+            typeof result.receiverDispatchStartedAt === "number" &&
+            Number.isFinite(result.receiverDispatchStartedAt) &&
+            result.armedAt === undefined &&
+            result.expiresAt === undefined
+        );
+    }
+
+    if (result.disposition === "transition-requested") {
+        // The arm is established and the page transition started; the Cast call
+        // has not happened yet, so there is no dispatch timestamp.
+        return (
+            result.receiverRequested === false &&
+            result.receiverDispatchStartedAt === undefined &&
+            typeof result.armedAt === "number" &&
+            typeof result.expiresAt === "number" &&
+            result.expiresAt > result.armedAt
+        );
+    }
+
+    return false;
+}
+
+/** Arms the receiver watchdog from a page-reported dispatch timestamp. */
+function markReceiverRequestedFromPage(
+    device: ReceiverDevice,
+    command: PlaybackCommand,
+    dispatchStartedAt: number | undefined,
+    hostClockNow: number
+) {
+    if (dispatchStartedAt === undefined) {
+        logger.error("Page reported a receiver request without a timestamp", {
+            deviceId: device.id,
+            commandId: command.commandId
+        });
+        return;
+    }
+    // The page and the background share one browser process clock, so a page
+    // timestamp is directly comparable with pollStartedAt. A wildly future or
+    // past value is a protocol bug, not a reason to fake a window.
+    if (
+        !Number.isFinite(dispatchStartedAt) ||
+        Math.abs(hostClockNow - dispatchStartedAt) > 60_000
+    ) {
+        logger.error("Rejecting implausible page dispatch timestamp", {
+            deviceId: device.id,
+            commandId: command.commandId,
+            dispatchStartedAt,
+            hostClockNow
+        });
+        return;
+    }
+    command.receiverPhase = "requested";
+    command.receiverDispatchStartedAt = dispatchStartedAt;
+    // Synchronous switch: the dispatch watchdog is replaced by the receiver
+    // one with no async gap in between, so an active command is never without
+    // a watchdog.
+    armWatchdog(device, command);
+}
+
+/**
+ * Applies a page route result. Returns true when the command reached a
+ * terminal state, i.e. the device route must not be tried.
+ */
+function applyPageRouteResult(
+    device: ReceiverDevice,
+    command: PlaybackCommand,
+    result: PagePlaybackDispatchResult
+): boolean {
+    command.routeAttempts.page = result.accepted ? "accepted" : "rejected";
+    if (!result.accepted) {
+        command.pagePhase = "failed";
+        command.error = result.error;
+        return false;
+    }
+
+    assignPlaybackOwner(command, "page-sender");
+    command.pagePhase =
+        result.disposition === "already-target"
+            ? "already-target"
+            : "transition-requested";
+    if (result.receiverRequested) {
+        markReceiverRequestedFromPage(
+            device,
+            command,
+            result.receiverDispatchStartedAt,
+            Date.now()
+        );
+    }
+    logger.info("Playback command handed to the page sender", {
+        deviceId: device.id,
+        commandId: command.commandId,
+        intent: command.intent,
+        disposition: result.disposition,
+        receiverRequested: result.receiverRequested === true
+    });
+    publish(device, command);
+    return false;
+}
+
+/**
  * Handles a play/pause command from the popup. Latest wins: a new command
  * supersedes the device's active one, whose UI overlay is dropped immediately.
  *
@@ -443,39 +599,49 @@ export async function dispatchPlaybackCommand(
     if (pageRouteAttempt) {
         command.routeAttempts.page = "trying";
         command.pagePhase = "requesting";
-        let accepted = false;
+        let raw: unknown;
         try {
-            accepted = await pageRouteAttempt(device.id, intent);
+            raw = await pageRouteAttempt(device.id, command);
         } catch (err) {
             logger.error("Page playback route threw", err);
-            accepted = false;
+            raw = undefined;
         }
         if (command.lifecycle !== "active") {
             // Superseded or terminated while the page route was in flight.
             return viewFor(command);
         }
-        if (accepted) {
-            command.routeAttempts.page = "accepted";
-            command.owner = "page-sender";
-            // The bare boolean protocol proves only that the page accepted the
-            // control flow: not that the page transition happened, and not
-            // that the receiver API was called. receiverPhase therefore stays
-            // "not-started" until structured page acknowledgements exist.
-            logger.info("Playback command handed to the page sender", {
-                deviceId: device.id,
-                commandId: command.commandId,
-                intent
-            });
-            publish(device, command);
-            return viewFor(command);
+        const pageResult = isValidPagePlaybackDispatchResult(raw)
+            ? raw
+            : undefined;
+        if (!pageResult) {
+            // Entry point missing, an illegal shape, or a throw: the page never
+            // reported executing anything, so the bridge may take over.
+            command.routeAttempts.page = "rejected";
+            command.pagePhase = "failed";
+            logger.info(
+                "Page playback route unavailable; falling back to bridge",
+                {
+                    deviceId: device.id,
+                    commandId: command.commandId,
+                    intent,
+                    rawResult: raw === undefined ? "undefined" : typeof raw
+                }
+            );
+        } else {
+            const finished = applyPageRouteResult(device, command, pageResult);
+            if (finished || command.owner === "page-sender") {
+                return viewFor(command);
+            }
+            logger.info(
+                "Page playback route declined; falling back to bridge",
+                {
+                    deviceId: device.id,
+                    commandId: command.commandId,
+                    intent,
+                    error: pageResult.error
+                }
+            );
         }
-        command.routeAttempts.page = "rejected";
-        command.pagePhase = "failed";
-        logger.info("Page playback route declined; falling back to bridge", {
-            deviceId: device.id,
-            commandId: command.commandId,
-            intent
-        });
     }
 
     command.routeAttempts.device = "trying";
@@ -503,7 +669,10 @@ export async function dispatchPlaybackCommand(
         return viewFor(command);
     }
     command.routeAttempts.device = "accepted";
-    command.owner = "device-remote";
+    if (!assignPlaybackOwner(command, "device-remote")) {
+        terminate(device, command, "dispatch-failed");
+        return viewFor(command);
+    }
     command.receiverPhase = "requested";
     command.receiverDispatchStartedAt = dispatchStartedAt;
     // The confirmation window starts at the real dispatch boundary, not at

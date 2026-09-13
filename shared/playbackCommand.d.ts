@@ -92,7 +92,16 @@ export type PlaybackCommandTerminalReason =
  * happened, nor that the receiver API was called. See
  * PagePlaybackDispatchResult in a later step.
  */
-export type PagePlaybackPhase = "not-started" | "requesting" | "failed";
+export type PagePlaybackPhase =
+    | "not-started"
+    /** executeScript is in flight. */
+    | "requesting"
+    /** Page was already in the target state; it drove the receiver directly. */
+    | "already-target"
+    /** The page transition is in flight and an armed window exists. */
+    | "transition-requested"
+    /** The page sub-flow failed (the device route may still take over). */
+    | "failed";
 
 /**
  * Receiver-side progress.
@@ -120,6 +129,49 @@ export type ReceiverPlaybackPhase =
      * confirmation deadline.
      */
     | "failed";
+
+/**
+ * A play/pause command handed to the page sender.
+ *
+ * Carried from the background coordinator through executeScript into the page,
+ * so the asynchronous page facts (arm consumption, receiver dispatch, timeout)
+ * can be attributed back to the exact command that asked for them.
+ */
+export interface PlaybackPageCommand {
+    commandId: number;
+    mediaIdentity: RokuMediaIdentity;
+    intent: PlaybackIntent;
+}
+
+/** Sync outcome of a page-route attempt. Only these two values exist. */
+export type PageDispatchDisposition = "already-target" | "transition-requested";
+
+/**
+ * What the page sender reports synchronously, i.e. before any await.
+ *
+ * The dispatch timestamp is sampled BY THE PAGE, immediately before it calls
+ * the Cast receiver API, and never by the background after executeScript
+ * returns: the page calls that API during controlPlayback(), so the bridge can
+ * be polling a post-command state while the result is still travelling back.
+ * Stamping the return time would put receiverDispatchStartedAt after that
+ * poll's pollStartedAt and the strict gate would silently discard a
+ * legitimately post-command sample.
+ */
+export interface PagePlaybackDispatchResult {
+    accepted: boolean;
+    disposition?: PageDispatchDisposition;
+    /** True iff the page called the Cast receiver API on this call. */
+    receiverRequested?: boolean;
+    /**
+     * Page clock, sampled immediately before Cast Media.play/pause.
+     * Required iff receiverRequested === true.
+     */
+    receiverDispatchStartedAt?: number;
+    /** Page clock, sampled before the HTMLMediaElement transition. */
+    armedAt?: number;
+    expiresAt?: number;
+    error?: string;
+}
 
 /** How an observation compared to the command's intent. */
 export type PlaybackObservationClassification =
@@ -151,6 +203,13 @@ export interface ReceiverPlaybackView {
     terminalReason?: PlaybackCommandTerminalReason;
     owner?: PlaybackExecutionOwner;
     receiverPending: boolean;
+    /**
+     * When the extension (device route) or the page (page route) started
+     * submitting the receiver command. The strict observation gate compares
+     * pollStartedAt against this, so it is also the value a diagnosis needs
+     * when a command ends as "observation-unavailable".
+     */
+    receiverDispatchStartedAt?: number;
     pagePhase: PagePlaybackPhase;
     receiverPhase: ReceiverPlaybackPhase;
     /**

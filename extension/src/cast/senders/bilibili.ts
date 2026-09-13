@@ -1,5 +1,9 @@
 import { Logger } from "../../lib/logger";
 import MediaSender, { type MediaSenderOpts } from "./media";
+import type {
+    PagePlaybackDispatchResult,
+    PlaybackPageCommand
+} from "../../../../shared/playbackCommand";
 
 declare global {
     interface Window {
@@ -25,7 +29,15 @@ declare global {
              * running so the background does not also send a native PLAY/PAUSE
              * (which would pause Roku first and the page later).
              */
-            controlPlayback: (action: "play" | "pause") => boolean;
+            /**
+             * Popup-initiated play/pause. Returns a structured result so the
+             * background can tell already-target from a page transition and
+             * take the receiver-dispatch timestamp from the page (the only
+             * place that knows when the Cast API was called).
+             */
+            controlPlayback: (
+                command: PlaybackPageCommand
+            ) => PagePlaybackDispatchResult | false;
             controlFromBleRemote: (
                 action: "seek_backward" | "seek_forward" | "pause" | "play",
                 seekBackwardSeconds: number,
@@ -533,12 +545,13 @@ function initBilibiliSender() {
             sender.seekDashRemux(time);
             return true;
         },
-        controlPlayback: (action: "play" | "pause") => {
-            if (!sender || (action !== "play" && action !== "pause")) {
+        controlPlayback: (command: PlaybackPageCommand) => {
+            const intent = command?.intent;
+            if (!sender || (intent !== "PLAY" && intent !== "PAUSE")) {
                 return false;
             }
-            debug("popup playback routed to page sender", { action });
-            return sender.controlPlayback(action);
+            debug("popup playback routed to page sender", { intent });
+            return sender.controlPlayback(command);
         },
         controlFromBleRemote: (
             action,

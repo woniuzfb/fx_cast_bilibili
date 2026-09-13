@@ -1,3 +1,7 @@
+import type {
+    PagePlaybackDispatchResult,
+    PlaybackPageCommand
+} from "../../../../shared/playbackCommand";
 import { Logger } from "../../lib/logger";
 import defaultOptions, { type Options } from "../../defaultOptions";
 
@@ -101,6 +105,13 @@ export interface MediaSenderOpts {
     debug?: (message: string, data?: unknown) => void;
 }
 
+/**
+ * How long the page treats a page-route transition as "mine". Mirrors the
+ * closure's BLE_EVENT_WINDOW_MS; kept here so a structured caller can report
+ * the same window it armed.
+ */
+const PAGE_EVENT_WINDOW_MS = 2000;
+
 export default class MediaSender {
     private port?: CastPort;
 
@@ -124,6 +135,16 @@ export default class MediaSender {
     private gestureGatedControls = false;
     private autoRecoverOnIdle = false;
     private preserveSourcePlayback = false;
+    /**
+     * What the closure's most recent play/pause dispatch did, and when. Written
+     * by onBleRemoteAction (which owns the decision) and read by
+     * controlPlayback (which must report it without duplicating that logic).
+     */
+    private lastPlaybackDispatch: {
+        outcome: "no-media" | "receiver-only" | "transition";
+        at: number;
+        armedAt?: number;
+    } | null = null;
     private rokuMediaResolver?: MediaSenderOpts["rokuMediaResolver"];
     private onReceiverSelected?: (isRoku: boolean) => void;
     private onStopped?: () => void;
@@ -511,7 +532,18 @@ export default class MediaSender {
      * receiver stay in lockstep. The page event then forwards to the
      * receiver (same path as a user gesture / BLE remote).
      */
-    controlPlayback(action: "play" | "pause") {
+    /**
+     * Popup play/pause, page route. Returns a structured result so the
+     * background can (a) tell already-target from a page transition and (b)
+     * take the receiver-dispatch timestamp from the page, which is the only
+     * place that knows when the Cast API was actually called.
+     *
+     * A bare boolean was not enough: "the page accepted the control flow" does
+     * not say whether a page transition happened, nor whether the receiver was
+     * commanded, so a page-owned command could never reach a receiver verdict.
+     */
+    controlPlayback(command: PlaybackPageCommand): PagePlaybackDispatchResult {
+        const action = command.intent === "PLAY" ? "play" : "pause";
         if (!this.session || !this.onBleRemoteAction) {
             this.debug?.(
                 "popup playback ignored: sender controls are not ready",
@@ -519,10 +551,45 @@ export default class MediaSender {
                     action
                 }
             );
-            return false;
+            return { accepted: false, error: "sender controls not ready" };
         }
         this.debug?.("popup control routed through page", { action });
-        return this.onBleRemoteAction(action, 0, 0);
+        if (!this.onBleRemoteAction(action, 0, 0)) {
+            const failed = this.lastPlaybackDispatch;
+            return {
+                accepted: false,
+                error:
+                    failed?.outcome === "no-media"
+                        ? "No active cast media"
+                        : "Page playback route rejected"
+            };
+        }
+        const dispatch = this.lastPlaybackDispatch;
+        if (!dispatch || dispatch.outcome === "no-media") {
+            // Defensive: a truthy return with no recorded dispatch would mean
+            // the closure and this method disagree about what happened.
+            return { accepted: false, error: "Page dispatch not recorded" };
+        }
+        if (dispatch.outcome === "transition") {
+            // The page transition is in flight; the Cast call happens later,
+            // when the page event consumes the arm.
+            const armedAt = dispatch.armedAt ?? dispatch.at;
+            return {
+                accepted: true,
+                disposition: "transition-requested",
+                receiverRequested: false,
+                armedAt,
+                expiresAt: armedAt + PAGE_EVENT_WINDOW_MS
+            };
+        }
+        return {
+            accepted: true,
+            disposition: "already-target",
+            receiverRequested: true,
+            // Sampled during onBleRemoteAction, immediately before the Cast
+            // Media.play/pause call.
+            receiverDispatchStartedAt: dispatch.at
+        };
     }
 
     /**
@@ -1344,11 +1411,12 @@ export default class MediaSender {
         let suppressPlay = 0;
         let suppressPause = 0;
         let suppressSeek = 0;
-        const BLE_EVENT_WINDOW_MS = 2000;
+        const BLE_EVENT_WINDOW_MS = PAGE_EVENT_WINDOW_MS;
         const BLE_SEEK_ARM_WINDOW_MS = 10000;
         let blePlayArmedUntil = 0;
         let blePauseArmedUntil = 0;
         let bleSeekArmedUntil = 0;
+
 
         const consumeBleArm = (kind: "play" | "pause" | "seek") => {
             const now = Date.now();
@@ -1546,35 +1614,57 @@ export default class MediaSender {
             seekForwardSeconds
         ) => {
             const now = Date.now();
-            if (action === "pause") {
-                if (mediaElement.paused) {
-                    this.debug?.("BLE remote pause already reflected on page");
-                    currentMedia()?.pause(
-                        undefined,
-                        undefined,
-                        sendError("BLE pause")
-                    );
+            // Shared by the BLE-remote path and the popup page route (see
+            // controlPlayback): the page transition and the receiver dispatch
+            // are the same two operations either way, so they must not drift.
+            if (action === "pause" || action === "play") {
+                const media = currentMedia();
+                if (!media) {
+                    this.debug?.("page play/pause ignored: no cast media");
+                    this.lastPlaybackDispatch = {
+                        outcome: "no-media",
+                        at: now
+                    };
+                    return false;
+                }
+                const alreadyAtTarget =
+                    action === "pause"
+                        ? mediaElement.paused
+                        : !mediaElement.paused;
+                if (alreadyAtTarget) {
+                    // No page transition, hence no arm and no page event: the
+                    // receiver is driven directly, and the dispatch timestamp
+                    // is the moment before that call.
+                    this.lastPlaybackDispatch = {
+                        outcome: "receiver-only",
+                        at: Date.now()
+                    };
+                    if (action === "pause") {
+                        media.pause(undefined, undefined, sendError("pause"));
+                    } else {
+                        media.play(undefined, undefined, sendError("play"));
+                    }
                     return true;
                 }
-                blePauseArmedUntil = now + BLE_EVENT_WINDOW_MS;
-                mediaElement.pause();
-                return true;
-            }
-            if (action === "play") {
-                if (!mediaElement.paused) {
-                    this.debug?.("BLE remote play already reflected on page");
-                    currentMedia()?.play(
-                        undefined,
-                        undefined,
-                        sendError("BLE play")
-                    );
-                    return true;
+                this.lastPlaybackDispatch = {
+                    outcome: "transition",
+                    at: now
+                };
+                this.lastPlaybackDispatch = {
+                    outcome: "transition",
+                    at: now,
+                    armedAt: now
+                };
+                if (action === "pause") {
+                    blePauseArmedUntil = now + BLE_EVENT_WINDOW_MS;
+                    mediaElement.pause();
+                } else {
+                    blePlayArmedUntil = now + BLE_EVENT_WINDOW_MS;
+                    void mediaElement.play().catch(error => {
+                        blePlayArmedUntil = 0;
+                        sendError("page play")(error);
+                    });
                 }
-                blePlayArmedUntil = now + BLE_EVENT_WINDOW_MS;
-                void mediaElement.play().catch(error => {
-                    blePlayArmedUntil = 0;
-                    sendError("BLE page play")(error);
-                });
                 return true;
             }
 
