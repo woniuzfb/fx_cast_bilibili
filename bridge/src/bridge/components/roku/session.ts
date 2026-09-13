@@ -190,12 +190,18 @@ export default class RokuSession {
      * opposite one) clears it. It is deliberately NOT the extension's command
      * lifecycle - the two state machines stay separate, so there is no
      * "not-confirmed" verdict here, only "back to what was observed".
+     *
+     * Neither the deadline nor the "is this still the current transport" check
+     * lives on this object: the deadline is the `pendingIntentTimer` below (its
+     * callback clears the overlay and pushes the observed state), and staleness
+     * is `playbackIntentToken` against the token captured when the keypress
+     * started. Storing an `expiresAt`/`token` pair here as well would be state
+     * nothing reads - and an `expiresAt` on the object invites the reader to
+     * think expiry is evaluated from it, which is not how this one works.
      */
     private pendingPlayerIntent?: {
         intent: "PLAY" | "PAUSE";
         requestedState: PlayerState;
-        expiresAt: number;
-        token: number;
     };
     /** Cancels a pending intent when a newer transport starts. */
     private playbackIntentToken = 0;
@@ -850,11 +856,7 @@ export default class RokuSession {
             this.pendingPlayerIntent = {
                 intent,
                 requestedState:
-                    intent === "PLAY"
-                        ? PlayerState.PLAYING
-                        : PlayerState.PAUSED,
-                expiresAt: Date.now() + SESSION_PLAYER_INTENT_WINDOW_MS,
-                token
+                    intent === "PLAY" ? PlayerState.PLAYING : PlayerState.PAUSED
             };
             this.pendingIntentTimer = setTimeout(() => {
                 this.pendingIntentTimer = undefined;
