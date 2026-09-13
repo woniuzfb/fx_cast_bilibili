@@ -180,6 +180,12 @@ function parseArgs(argv) {
         interleave: false,
         // Which checkpoint of createCastSession the injection fires at.
         failStage: "p0",
+        // Which caller drives the session start under test. "queued" is the
+        // provoked path the failure modes were built around (auto-cast replaces
+        // the requestSession selector, so loadSender owns the session);
+        // "selector" keeps the popup mounting early, so the click resolves the
+        // requestSession selector and the main:requestSession handler owns it.
+        requestSource: "queued",
         // Pre-fix expectation for the staged matrix: the failed call left an
         // idle native host behind. Without it the matrix expects the cleanup
         // (no idle host survives), which is the post-fix behaviour.
@@ -197,7 +203,16 @@ function parseArgs(argv) {
             args.generationAdvance = true;
         else if (argv[i] === "--auto-cast-gap") args.autoCastGap = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
-        else if (argv[i] === "--expect-residue") args.expectResidue = true;
+        else if (argv[i] === "--request-source") {
+            const value = argv[i + 1];
+            if (value === undefined || value.startsWith("--")) {
+                throw new Error(
+                    "sessionHarness: --request-source needs a value (selector or queued)"
+                );
+            }
+            args.requestSource = value;
+            i++;
+        } else if (argv[i] === "--expect-residue") args.expectResidue = true;
         else if (argv[i] === "--fail-stage") {
             const value = argv[i + 1];
             if (value === undefined || value.startsWith("--")) {
@@ -231,6 +246,11 @@ function parseArgs(argv) {
         // was created anyway" instead of naming the real mistake.
         throw new Error(
             `sessionHarness: --fail-stage must be p0, p1 or p2 (got ${args.failStage})`
+        );
+    }
+    if (!["selector", "queued"].includes(args.requestSource)) {
+        throw new Error(
+            `sessionHarness: --request-source must be selector or queued (got ${args.requestSource})`
         );
     }
 
@@ -513,8 +533,10 @@ async function main() {
      * selector. `--interleave-*` wants the former, `--auto-cast-*` and
      * `--create-failure-*` the latter.
      */
-    const provocation = gapMode || failureMode;
-    const suppressPopupInit = gapMode || args.createFailure;
+    const provocation =
+        (gapMode || failureMode) && args.requestSource === "queued";
+    const suppressPopupInit =
+        (gapMode || args.createFailure) && args.requestSource === "queued";
     const expectReleased = args.expectReleased;
     const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-s1-"));
     console.log("harness dir:", harnessDir);
@@ -908,6 +930,94 @@ async function main() {
                     "\ntry { void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ __fxHarnessSelectionAtRokuBranch: { runId: r && r.__fxHarnessDiagnosticRunId, deviceId: selection.device.id, deviceType: selection.device.deviceType, mediaType: selection.mediaType, at: Date.now() } })).catch(() => {}); } catch (e) {}\n"
             );
         }
+        // The page's own timeline says what IT saw; this says how many times the
+        // background told it "cancelled", and from where - which is how a double
+        // settlement (the replaced selector's cancel plus the failed start's) shows
+        // up as a number instead of a guess.
+        {
+            // Locate every `postMessage({ subject: "cast:sessionRequestCancelled" ... })`
+            // by brace matching instead of guessing each site's indentation, and
+            // append a counter after the statement. Wrapping only some sites would
+            // report a double settlement as a single one.
+            const cancelFile = path.join(
+                extensionDir,
+                "background/background.js"
+            );
+            const cancelText = fs.readFileSync(cancelFile, "utf8");
+            const needle = 'subject: "cast:sessionRequestCancelled"';
+            const counter =
+                "try { const __fxN = (globalThis.__fxHarnessCancelPosts = (globalThis.__fxHarnessCancelPosts || 0) + 1); void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ ['__fxHarnessCancelPost_' + __fxN]: { runId: r && r.__fxHarnessDiagnosticRunId, count: __fxN, at: Date.now() } })).catch(() => {}); } catch (e) {}";
+            let cancelPatched = "";
+            let cancelCursor = 0;
+            let cancelSites = 0;
+            for (;;) {
+                const subjectAt = cancelText.indexOf(needle, cancelCursor);
+                if (subjectAt === -1) break;
+                const callAt = cancelText.lastIndexOf(
+                    "postMessage({",
+                    subjectAt
+                );
+                if (callAt === -1) {
+                    throw new Error(
+                        "sessionHarness: cannot find the postMessage( of a sessionRequestCancelled"
+                    );
+                }
+                const objectAt = callAt + "postMessage(".length;
+                let depth = 0;
+                let endAt = -1;
+                for (let i = objectAt; i < cancelText.length; i++) {
+                    if (cancelText[i] === "{") depth++;
+                    else if (cancelText[i] === "}") {
+                        depth--;
+                        if (depth === 0) {
+                            endAt = i;
+                            break;
+                        }
+                    }
+                }
+                let statementEnd = endAt + 1;
+                const skipSpace = () => {
+                    while (
+                        statementEnd < cancelText.length &&
+                        /\s/.test(cancelText[statementEnd])
+                    ) {
+                        statementEnd++;
+                    }
+                };
+                skipSpace();
+                if (endAt === -1 || cancelText[statementEnd] !== ")") {
+                    throw new Error(
+                        "sessionHarness: unexpected sessionRequestCancelled post shape"
+                    );
+                }
+                statementEnd++;
+                skipSpace();
+                if (cancelText[statementEnd] !== ";") {
+                    throw new Error(
+                        "sessionHarness: unexpected sessionRequestCancelled post shape"
+                    );
+                }
+                statementEnd++;
+                cancelPatched +=
+                    cancelText.slice(cancelCursor, statementEnd) +
+                    " " +
+                    counter +
+                    "\n";
+                cancelCursor = statementEnd;
+                cancelSites++;
+            }
+            cancelPatched += cancelText.slice(cancelCursor);
+            if (!cancelSites) {
+                throw new Error(
+                    "sessionHarness: no sessionRequestCancelled posts found to count"
+                );
+            }
+            fs.writeFileSync(cancelFile, cancelPatched);
+            console.log(
+                `failure mode: counting ${cancelSites} sessionRequestCancelled post site(s)`
+            );
+        }
+
         patch(
             "background/background.js",
             "setRokuSessionMedia(deviceId, ownerId, media) {",
@@ -1651,7 +1761,12 @@ async function main() {
             "__fxHarnessCreateSessionReleased_1",
             "__fxHarnessCreateSessionReleased_2",
             "__fxHarnessCreateSessionFailed_1",
-            "__fxHarnessCreateSessionFailed_2"
+            "__fxHarnessCreateSessionFailed_2",
+            // Cancellations counted by this run (a double settlement shows up as
+            // count > 1).
+            "__fxHarnessCancelPost_1",
+            "__fxHarnessCancelPost_2",
+            "__fxHarnessCancelPost_3"
         ];
         await driver.switchTo().window(consoleTab);
         const prepared = await driver.executeAsyncScript(
@@ -3156,6 +3271,69 @@ async function main() {
                     announced: generationMarker && generationMarker.loadGeneration
                 })
             );
+
+            // --- page settlement: what the page SAW, and how often -----------
+            //
+            // Facts first (this is a measurement, not a fix): the SDK's own
+            // callback timeline, plus how many times the background posted
+            // `cast:sessionRequestCancelled`. "Did it fail" and "how many times was
+            // the page settled, and with what" are different questions, and the
+            // second is where a double settlement - the replaced selector's cancel
+            // plus the failed start's - shows up as a number.
+            {
+                await driver.switchTo().window(senderTab);
+                const pageSettlement = await driver.executeScript(
+                    "return window.__HARNESS_RESULT__ || null;"
+                );
+                const settle = pageSettlement || {};
+                const callbacks = Array.isArray(settle.sessionCallbacks)
+                    ? settle.sessionCallbacks
+                    : [];
+                await driver.switchTo().window(consoleTab);
+                const cancelMarkers = markerFor(
+                    await driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
+                         browser.storage.local
+                            .get(["__fxHarnessDiagnosticRunId", "__fxHarnessCancelPost_1", "__fxHarnessCancelPost_2", "__fxHarnessCancelPost_3"])
+                            .then(v => done(v), err => done({ error: String(err) }));`
+                    ),
+                    "__fxHarnessCancelPost_1"
+                );
+                console.log(
+                    `page settlement (${args.requestSource}/${args.failStage}):`,
+                    JSON.stringify({
+                        requestSessionCalls: settle.requestSessionCalls,
+                        successCount: settle.successCount,
+                        errorCount: settle.errorCount,
+                        settleCount: settle.settleCount,
+                        settleType: settle.settleType,
+                        sessionId: settle.sessionId,
+                        backgroundCancels: cancelMarkers
+                            ? cancelMarkers.count
+                            : 0,
+                        callbacks: callbacks.map(c => ({
+                            type: c.type,
+                            code: c.payload && c.payload.code
+                        }))
+                    })
+                );
+                check(
+                    `session-failure mode (${args.requestSource}/${args.failStage}): the page's requestSession was settled (not left hanging)`,
+                    callbacks.length >= 1,
+                    JSON.stringify({ callbacks })
+                );
+                if (args.failStage === "p0") {
+                    check(
+                        `session-failure mode (${args.requestSource}/p0): the page was settled exactly once and with an error`,
+                        callbacks.length === 1 && settle.errorCount === 1,
+                        JSON.stringify({
+                            successCount: settle.successCount,
+                            errorCount: settle.errorCount,
+                            callbacks
+                        })
+                    );
+                }
+            }
 
             // --- partial-session residue at this checkpoint ------------------
             //

@@ -48,6 +48,16 @@
                 sdkLoaded: false,
                 initialized: false,
                 requestSessionCalled: false,
+                // How the SDK settled requestSession, as EVENTS rather than
+                // booleans: "did it fail" and "how many times was a callback
+                // invoked, and with what" are different questions, and the second
+                // one is what a double settlement shows up in.
+                requestSessionCalls: 0,
+                sessionCallbacks: [],
+                settleCount: 0,
+                successCount: 0,
+                errorCount: 0,
+                settleType: undefined,
                 requestSessionSucceeded: false,
                 selectedReceiverLabel: undefined,
                 sessionId: undefined,
@@ -251,14 +261,32 @@
                 });
             };
 
+            const recordSessionCallback = (type, payload) => {
+                result.sessionCallbacks.push({
+                    at: Date.now(),
+                    type,
+                    payload
+                });
+                if (type === "success") result.successCount++;
+                else result.errorCount++;
+                if (result.settleType === undefined) {
+                    result.settleType = type;
+                }
+                if (result.settleType === type) result.settleCount++;
+            };
+
             window.__HARNESS_REQUEST_SESSION__ = function () {
                 return new Promise((resolve, reject) => {
                     result.requestSessionCalled = true;
+                    result.requestSessionCalls++;
                     status("requesting session");
                     try {
                         chrome.cast.requestSession(
                             session => {
                                 currentSession = session;
+                                recordSessionCallback("success", {
+                                    sessionId: session.sessionId
+                                });
                                 result.requestSessionSucceeded = true;
                                 result.sessionId = session.sessionId;
                                 // `receiver.label` is the FRIENDLY NAME, not the
@@ -278,6 +306,11 @@
                                 });
                             },
                             err => {
+                                recordSessionCallback("error", {
+                                    code: err && err.code,
+                                    description: err && err.description,
+                                    message: err && err.message
+                                });
                                 fail("requestSession", err);
                                 reject(err);
                             },
