@@ -476,10 +476,36 @@ async function main() {
             () =>
                 "\nconsole.info('[harness] setRokuLoadGenerationOnBridge', JSON.stringify({deviceId, loadGeneration, hasBridgePort: Boolean(this.bridgePort)}));"
         );
-        // What state was the selector in at the moment of the click?
-        patch("ui/popup/index.js", "onReceiverCast(device) {", () =>
-            "\nconsole.info('[harness] onReceiverCast', JSON.stringify({deviceId: device && device.id}));"
+        // POSITIVE CONTROL for the background console channel: this method is
+        // known to have run (the wire trace shows session-media-input), so if
+        // its marker appears the channel works and the silence of the other
+        // background markers becomes meaningful. Absent, no negative conclusion
+        // about production flow may be drawn at all.
+        patch(
+            "background/background.js",
+            "setRokuSessionMedia(deviceId, ownerId, media) {",
+            () =>
+                "\nconsole.info('[harness] channel-alive setRokuSessionMedia', String(deviceId));"
         );
+        // The popup's console is NOT mirrored, but its runtime-message channel
+        // is (popupLog -> popup:debugLog -> background logger). So the click's
+        // state snapshot goes through that channel, in the shape popupLog uses.
+        // The closure names are referenced inside a try/catch: if the bundle
+        // renamed them the marker is simply lost rather than breaking the click.
+        patch("ui/popup/index.js", "onReceiverCast(device) {", () => {
+            const payload = [
+                "hasSelectorContext",
+                "selectionRequiresRefresh",
+                "mediaType",
+                "availableMediaTypes",
+                "isAppMediaTypeAvailable"
+            ].join(", ");
+            return (
+                "\ntry { browser.runtime.sendMessage({ subject: 'popup:debugLog'," +
+                " data: { level: 'info', message: '[harness] onReceiverCast-state'," +
+                ` data: { ${payload}, deviceId: device && device.id } } }); } catch (e) {}`
+            );
+        });
         console.log("instrumented test copy:", extensionDir);
     }
     const profileDir = makeProfile(harnessDir, extensionDir);
