@@ -289,10 +289,17 @@ export default class RokuRemote {
                 // changed. Neither performs an ECP query, so neither may be
                 // used to confirm receiver state.
                 let source: RokuMediaStatusSource = "session-media-refresh";
-                // The synthesis only applies while nothing else has claimed the
-                // state: what it guards against is an idle OBSERVATION (see
-                // acceptObservedState, which is why the overlay survives an
-                // idle poll).
+                // The synthesis applies while the effective state is idle, and
+                // it survives only until the next successful poll - idle or
+                // not, acceptObservedState clears every overlay. So it affects
+                // this emission (and any read before that poll) but is not a
+                // standing claim about the device.
+                //
+                // Making it survive an idle poll would be a behaviour change
+                // (see acceptObservedState): it would alter when the idle media
+                // clear is emitted and would keep reporting a state change on
+                // every idle poll. That belongs in its own commit with its own
+                // invalidation rules, not here.
                 if (isHlsDvr && this.effectiveState().state === "idle") {
                     this.writeOverlay("startup", { state: "buffering" });
                     source = "startup-synthetic";
