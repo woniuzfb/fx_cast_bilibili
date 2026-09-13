@@ -140,6 +140,11 @@ export default class MediaSender {
      * by onBleRemoteAction (which owns the decision) and read by
      * controlPlayback (which must report it without duplicating that logic).
      */
+    /**
+     * The page-route command the closure should arm if it needs a page
+     * transition. Set only for the duration of one controlPlayback call.
+     */
+    private pendingPageCommand: PlaybackPageCommand | undefined;
     private lastPlaybackDispatch: {
         outcome: "no-media" | "receiver-only" | "transition";
         at: number;
@@ -554,7 +559,13 @@ export default class MediaSender {
             return { accepted: false, error: "sender controls not ready" };
         }
         this.debug?.("popup control routed through page", { action });
-        if (!this.onBleRemoteAction(action, 0, 0)) {
+        // The closure decides whether a page transition is needed; when one is,
+        // it arms this exact command so a later page event can be attributed to
+        // it (and reports a timeout if that event never comes).
+        this.pendingPageCommand = command;
+        const accepted = this.onBleRemoteAction(action, 0, 0);
+        this.pendingPageCommand = undefined;
+        if (!accepted) {
             const failed = this.lastPlaybackDispatch;
             return {
                 accepted: false,
@@ -1417,22 +1428,103 @@ export default class MediaSender {
         let blePauseArmedUntil = 0;
         let bleSeekArmedUntil = 0;
 
+        /**
+         * The page-route command currently owning the transition, if any. Only
+         * one can be outstanding: a newer command replaces the arm, which is
+         * what makes latest-wins hold on the page side too.
+         */
+        let pendingPageCommand: PlaybackPageCommand | undefined;
 
+        let pageArm:
+            | {
+                  command: PlaybackPageCommand;
+                  expiresAt: number;
+                  timeoutId: number;
+              }
+            | undefined;
+
+        const reportProgress = (
+            command: PlaybackPageCommand,
+            progress: Record<string, unknown>
+        ) => {
+            void browser.runtime
+                .sendMessage({
+                    subject: "main:bilibiliPlaybackProgress",
+                    data: {
+                        commandId: command.commandId,
+                        mediaIdentity: command.mediaIdentity,
+                        ...progress
+                    }
+                })
+                .catch(() => undefined);
+        };
+
+        const clearPageArm = () => {
+            if (pageArm) window.clearTimeout(pageArm.timeoutId);
+            pageArm = undefined;
+        };
+
+        /**
+         * Drives the Cast receiver and reports the exact boundary. Shared by the
+         * two page paths so the "already at target" and "page transition
+         * happened" cases cannot drift apart (they used to).
+         */
+        const dispatchToReceiver = (
+            command: PlaybackPageCommand,
+            media: Media,
+            action: "play" | "pause",
+            reportRequested: boolean
+        ) => {
+            if (reportRequested) {
+                reportProgress(command, {
+                    receiverPhase: "requested",
+                    // Sampled immediately BEFORE the Cast call: this is the
+                    // timestamp the strict observation gate compares against.
+                    receiverDispatchStartedAt: Date.now()
+                });
+            }
+            const onError = (err: unknown) => {
+                sendError(`${action} receiver`)(err);
+                reportProgress(command, {
+                    receiverPhase: "failed",
+                    error: err instanceof Error ? err.message : String(err)
+                });
+            };
+            if (action === "pause") {
+                media.pause(undefined, undefined, onError);
+            } else {
+                media.play(undefined, undefined, onError);
+            }
+        };
+
+        /**
+         * Consumes the armed window for an event kind. Returns whether a BLE
+         * (touch-remote) action armed it, plus the page-route command whose arm
+         * this event satisfies, if any - the page needs that identity to report
+         * "target-observed" for the right command.
+         */
         const consumeBleArm = (kind: "play" | "pause" | "seek") => {
             const now = Date.now();
+            let armed = false;
             if (kind === "play") {
-                const armed = now < blePlayArmedUntil;
+                armed = now < blePlayArmedUntil;
                 blePlayArmedUntil = 0;
-                return armed;
-            }
-            if (kind === "pause") {
-                const armed = now < blePauseArmedUntil;
+            } else if (kind === "pause") {
+                armed = now < blePauseArmedUntil;
                 blePauseArmedUntil = 0;
-                return armed;
+            } else {
+                armed = now < bleSeekArmedUntil;
+                bleSeekArmedUntil = 0;
             }
-            const armed = now < bleSeekArmedUntil;
-            bleSeekArmedUntil = 0;
-            return armed;
+            let page: PlaybackPageCommand | undefined;
+            if (pageArm && kind !== "seek") {
+                const wanted = kind === "play" ? "PLAY" : "PAUSE";
+                if (pageArm.command.intent === wanted) {
+                    page = pageArm.command;
+                    clearPageArm();
+                }
+            }
+            return { ble: armed, page };
         };
 
         // Gesture gating: when enabled, only forward page media events that
@@ -1482,7 +1574,8 @@ export default class MediaSender {
                 suppressPlay--;
                 return;
             }
-            const fromBleRemote = consumeBleArm("play");
+            const pagePlay = consumeBleArm("play");
+            const fromBleRemote = pagePlay.ble;
             if (!fromBleRemote && !fromGesture()) {
                 this.debug?.("ignored autonomous page play");
                 return;
@@ -1494,14 +1587,38 @@ export default class MediaSender {
             );
             // A trusted BLE or user-driven play/pause ends the settle window.
             this.dashTightenSync = false;
-            currentMedia()?.play(undefined, undefined, sendError("play"));
+            const media = currentMedia();
+            if (pagePlay.page) {
+                // The page transition this command asked for has happened.
+                reportProgress(pagePlay.page, {
+                    pagePhase: "target-observed"
+                });
+            }
+            if (!media) {
+                if (pagePlay.page) {
+                    // The page changed but the receiver cannot be driven: an
+                    // explicit failure of this owner's receiver leg, not an
+                    // unobserved state. Owner is already fixed, so no fallback.
+                    reportProgress(pagePlay.page, {
+                        receiverPhase: "failed",
+                        error: "No active cast media"
+                    });
+                }
+                return;
+            }
+            if (pagePlay.page) {
+                dispatchToReceiver(pagePlay.page, media, "play", true);
+                return;
+            }
+            media.play(undefined, undefined, sendError("play"));
         };
         const onPause = () => {
             if (suppressPause > 0) {
                 suppressPause--;
                 return;
             }
-            const fromBleRemote = consumeBleArm("pause");
+            const pagePause = consumeBleArm("pause");
+            const fromBleRemote = pagePause.ble;
             if (!fromBleRemote && !fromGesture()) {
                 this.debug?.("ignored autonomous page pause");
                 return;
@@ -1513,7 +1630,26 @@ export default class MediaSender {
             );
             // A trusted BLE or user-driven play/pause ends the settle window.
             this.dashTightenSync = false;
-            currentMedia()?.pause(undefined, undefined, sendError("pause"));
+            const media = currentMedia();
+            if (pagePause.page) {
+                reportProgress(pagePause.page, {
+                    pagePhase: "target-observed"
+                });
+            }
+            if (!media) {
+                if (pagePause.page) {
+                    reportProgress(pagePause.page, {
+                        receiverPhase: "failed",
+                        error: "No active cast media"
+                    });
+                }
+                return;
+            }
+            if (pagePause.page) {
+                dispatchToReceiver(pagePause.page, media, "pause", true);
+                return;
+            }
+            media.pause(undefined, undefined, sendError("pause"));
         };
         // While the bridge re-prepares the stream for a DASH seek, pause the
         // receiver immediately so playback holds at the old frame instead of
@@ -1664,6 +1800,37 @@ export default class MediaSender {
                         blePlayArmedUntil = 0;
                         sendError("page play")(error);
                     });
+                }
+                if (pendingPageCommand) {
+                    // The window's arm must be usable by ONE command: a second
+                    // command replaces it, and the replaced one is told why it
+                    // will never see its event.
+                    const replaced = pageArm?.command;
+                    const command = pendingPageCommand;
+                    pendingPageCommand = undefined;
+                    if (replaced) {
+                        reportProgress(replaced, {
+                            pagePhase: "timeout",
+                            pagePausedSnapshot: mediaElement.paused
+                        });
+                    }
+                    clearPageArm();
+                    pageArm = {
+                        command,
+                        expiresAt: now + BLE_EVENT_WINDOW_MS,
+                        timeoutId: window.setTimeout(() => {
+                            const expired = pageArm;
+                            if (!expired || expired.command !== command) return;
+                            pageArm = undefined;
+                            // The armed window closed with no consumable page
+                            // event: the receiver was never dispatched for this
+                            // command, and the page may or may not have changed.
+                            reportProgress(command, {
+                                pagePhase: "timeout",
+                                pagePausedSnapshot: mediaElement.paused
+                            });
+                        }, BLE_EVENT_WINDOW_MS)
+                    };
                 }
                 return true;
             }

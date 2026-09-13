@@ -30,6 +30,7 @@ import ReceiverSelector, {
 
 import deviceManager from "./deviceManager";
 import {
+    acceptPagePlaybackProgress,
     acceptReceiverObservation,
     configurePlaybackCommands,
     dispatchPlaybackCommand,
@@ -38,7 +39,10 @@ import {
     terminateActivePlaybackCommandForRelay
 } from "./playbackCommand";
 import type { MediaStatus } from "../cast/sdk/types";
-import type { PlaybackPageCommand } from "../../../shared/playbackCommand";
+import type {
+    PlaybackPageCommand,
+    RokuMediaIdentity
+} from "../../../shared/playbackCommand";
 import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
 import { ActionState, updateActionState } from "./action";
 import {
@@ -715,6 +719,25 @@ const castManager = new (class {
  * unobservable device ends as `observation-unavailable`. deviceMediaUpdated
  * therefore stays the UX/media channel, and this feed is the confirmation one.
  */
+function onBilibiliPlaybackProgress(
+    ev: CustomEvent<{
+        deviceId?: string;
+        commandId: number;
+        mediaIdentity?: RokuMediaIdentity;
+        pagePhase?: "transition-requested" | "target-observed" | "timeout";
+        receiverPhase?: "requested" | "failed";
+        receiverDispatchStartedAt?: number;
+        pagePausedSnapshot?: boolean;
+        error?: string;
+    }>
+) {
+    acceptPagePlaybackProgress(ev.detail);
+}
+deviceManager.addEventListener(
+    "bilibiliPlaybackProgress",
+    onBilibiliPlaybackProgress as EventListener
+);
+
 function onRokuPlaybackObservation(
     ev: CustomEvent<{
         deviceId: string;

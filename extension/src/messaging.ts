@@ -1,3 +1,4 @@
+import type { RokuMediaIdentity } from "../../shared/playbackCommand";
 import type { RokuMediaStatusProvenance } from "../../shared/rokuMediaStatusProvenance";
 import type { TypedPort } from "./lib/TypedPort";
 
@@ -452,6 +453,24 @@ type BridgeMessageDefinitions = {
     "bilibili:pageCaptureReady": {
         requestId: string;
     };
+    /**
+     * Asynchronous page-p sender facts for a play/pause command: arm consumed,
+     * receiver API called, arm expired. Reported by the page via
+     * browser.runtime.sendMessage (the same mechanism as
+     * bilibili:pageSeekStarted), because these happen after controlPlayback()
+     * has already returned.
+     */
+    "main:bilibiliPlaybackProgress": {
+        deviceId?: string;
+        commandId: number;
+        mediaIdentity?: RokuMediaIdentity;
+        pagePhase?: "transition-requested" | "target-observed" | "timeout";
+        receiverPhase?: "requested" | "failed";
+        receiverDispatchStartedAt?: number;
+        pagePausedSnapshot?: boolean;
+        error?: string;
+    };
+
     /**
      * One completed Roku ECP poll sample (see the bridge-side definition).
      * Emitted even for an idle poll, which the device media status feed cannot

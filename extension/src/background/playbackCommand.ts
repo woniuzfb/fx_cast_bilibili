@@ -50,6 +50,13 @@ interface PlaybackCommand {
     /** Last reported failure message, page or receiver side. */
     error?: string;
     /**
+     * Diagnosis only, reported with a page timeout: whether the page element
+     * was already paused when the armed window expired. Never used to advance a
+     * phase - "the page changed but the receiver was never dispatched" and
+     * "the page never changed either" are different failures.
+     */
+    pagePausedSnapshot?: boolean;
+    /**
      * When the extension STARTED submitting the receiver command to the
      * bridge - sampled before the port call, not after it. postMessage() is an
      * asynchronous submission boundary, so the bridge can begin its own
@@ -475,6 +482,139 @@ export function isValidPagePlaybackDispatchResult(
     }
 
     return false;
+}
+
+/** The page-side progress shape (see extension/messaging.ts). */
+export interface PagePlaybackProgress {
+    deviceId?: string;
+    commandId: number;
+    mediaIdentity?: RokuMediaIdentity;
+    pagePhase?: "transition-requested" | "target-observed" | "timeout";
+    receiverPhase?: "requested" | "failed";
+    receiverDispatchStartedAt?: number;
+    pagePausedSnapshot?: boolean;
+    error?: string;
+}
+
+/**
+ * Pure field application. Kept apart from the lifecycle advance below so a
+ * generic setter cannot silently carry terminal semantics.
+ */
+function applyPlaybackProgressFields(
+    command: PlaybackCommand,
+    progress: PagePlaybackProgress
+) {
+    if (progress.pagePhase !== undefined)
+        command.pagePhase = progress.pagePhase;
+    if (progress.receiverPhase !== undefined) {
+        command.receiverPhase = progress.receiverPhase;
+    }
+    if (progress.error !== undefined) command.error = progress.error;
+    if (progress.pagePausedSnapshot !== undefined) {
+        command.pagePausedSnapshot = progress.pagePausedSnapshot;
+    }
+}
+
+/**
+ * State-machine consequences of a progress delta. Returns true when the
+ * command reached a terminal state.
+ */
+function advancePlaybackLifecycleFromProgress(
+    device: ReceiverDevice,
+    command: PlaybackCommand,
+    progress: PagePlaybackProgress
+): boolean {
+    if (progress.receiverPhase === "requested") {
+        markReceiverRequestedFromPage(
+            device,
+            command,
+            progress.receiverDispatchStartedAt,
+            Date.now()
+        );
+        return false;
+    }
+    if (progress.receiverPhase === "failed") {
+        // The fixed execution owner reported an explicit receiver failure. That
+        // is a terminal outcome of the receiver leg, NOT a command-level
+        // dispatch failure: no fallback (the page already owns this command)
+        // and no waiting out the confirmation deadline.
+        command.receiverPhase = "failed";
+        terminate(device, command, "completed");
+        return true;
+    }
+    if (progress.pagePhase === "target-observed") {
+        // The page transition happened; the receiver leg reports separately.
+        publish(device, command);
+    }
+    return false;
+}
+
+/**
+ * Accepts an asynchronous page fact for the current command, doing everything
+ * possible to reject anything that does not belong to it.
+ */
+export function acceptPagePlaybackProgress(progress: PagePlaybackProgress) {
+    if (!progress || typeof progress.commandId !== "number") return;
+
+    // Route by explicit deviceId when present; otherwise the only command that
+    // can own a page fact is a single active page-owned one.
+    const candidates: Array<[string, PlaybackCommand]> = progress.deviceId
+        ? ([[progress.deviceId, commands.get(progress.deviceId)]] as Array<
+              [string, PlaybackCommand]
+          >)
+        : [...commands.entries()];
+
+    for (const [deviceId, command] of candidates) {
+        if (!command || command.lifecycle !== "active") continue;
+        // Only a page-owned command has a page leg. Accepting progress for a
+        // device-owned one would let a late page fact (e.g. "failed", or a
+        // receiver dispatch the page did make before it was replaced) rewrite
+        // the state of an execution owner that never asked for it - and the two
+        // routes have separate receiver dispatch boundaries.
+        if (command.owner !== "page-sender") {
+            logger.info("Page progress for a non-page-owned command ignored", {
+                deviceId,
+                commandId: progress.commandId,
+                owner: command.owner ?? "unresolved"
+            });
+            continue;
+        }
+        if (command.commandId !== progress.commandId) {
+            logger.info("Stale page progress ignored", {
+                deviceId,
+                commandId: progress.commandId,
+                currentCommandId: command.commandId
+            });
+            continue;
+        }
+        if (
+            progress.mediaIdentity !== undefined &&
+            !sameMediaIdentity(command.mediaIdentity, progress.mediaIdentity)
+        ) {
+            logger.info(
+                "Page progress for a different media identity ignored",
+                {
+                    deviceId,
+                    commandId: command.commandId
+                }
+            );
+            continue;
+        }
+        const device = deviceLookup?.(deviceId);
+        if (!device) continue;
+        logger.info("Page playback progress", {
+            deviceId,
+            commandId: command.commandId,
+            pagePhase: progress.pagePhase,
+            receiverPhase: progress.receiverPhase
+        });
+        applyPlaybackProgressFields(command, progress);
+        if (advancePlaybackLifecycleFromProgress(device, command, progress)) {
+            return;
+        }
+        publish(device, command);
+        return;
+    }
 }
 
 /** Arms the receiver watchdog from a page-reported dispatch timestamp. */

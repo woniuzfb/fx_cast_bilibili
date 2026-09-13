@@ -16,6 +16,7 @@ import type { MediaInfo } from "../cast/sdk/media/classes";
 import { PlayerState, RepeatMode } from "../cast/sdk/media/enums";
 
 import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
+import type { RokuMediaIdentity } from "../../../shared/playbackCommand";
 
 import {
     nextRokuLoadGeneration,
@@ -56,6 +57,17 @@ interface EventMap {
      * deviceMediaUpdated, which the bridge suppresses for idle ("nothing to
      * report") - an observed idle must not look like a failed observation.
      */
+    /** Asynchronous play/pause facts reported by the page sender. */
+    bilibiliPlaybackProgress: {
+        deviceId?: string;
+        commandId: number;
+        mediaIdentity?: RokuMediaIdentity;
+        pagePhase?: "transition-requested" | "target-observed" | "timeout";
+        receiverPhase?: "requested" | "failed";
+        receiverDispatchStartedAt?: number;
+        pagePausedSnapshot?: boolean;
+        error?: string;
+    };
     rokuPlaybackObservation: {
         deviceId: string;
         status: MediaStatus;
@@ -646,6 +658,20 @@ export default new (class extends TypedEventTarget<EventMap> {
                     );
                 }
 
+                break;
+            }
+
+            case "main:bilibiliPlaybackProgress": {
+                // Page-reported asynchronous facts for a play/pause command
+                // (arm consumed, receiver called, arm expired). Routed here
+                // because the message carries a deviceId; the coordinator
+                // decides whether it belongs to the current command.
+                const detail = message.data;
+                this.dispatchEvent(
+                    new CustomEvent("bilibiliPlaybackProgress", {
+                        detail
+                    })
+                );
                 break;
             }
 

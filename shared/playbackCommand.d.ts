@@ -100,6 +100,10 @@ export type PagePlaybackPhase =
     | "already-target"
     /** The page transition is in flight and an armed window exists. */
     | "transition-requested"
+    /** The page's own play/pause event consumed the arm. */
+    | "target-observed"
+    /** The armed window expired without a consumable page event. */
+    | "timeout"
     /** The page sub-flow failed (the device route may still take over). */
     | "failed";
 
