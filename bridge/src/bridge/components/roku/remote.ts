@@ -46,6 +46,16 @@ import type {
 const NS_MEDIA = "urn:x-cast:com.google.cast.media";
 
 const POLL_INTERVAL_MS = 3000;
+/**
+ * How long (ms) the HLS DVR startup synthesis may outlive an idle ECP report.
+ *
+ * Same order as the receiver-side confirmation window (10s), and for the same
+ * reason: that is how long this bridge is willing to wait for a Roku to reach
+ * the state it was asked for before it believes the observation instead. A DVR
+ * channel that has not started by then is not starting, and a synthesised
+ * BUFFERING must not stand in for it any longer.
+ */
+const STARTUP_OVERLAY_MAX_MS = 10_000;
 
 const SUPPORTED_MEDIA_COMMANDS = 1 | 2 | 4 | 8; // PAUSE|SEEK|VOLUME|MUTE
 
@@ -238,6 +248,15 @@ export default class RokuRemote {
     /** Orders the overlays so composition matches the old write order. */
     private overlayRevision = 0;
     /**
+     * When the startup synthesis stops being justified, as an absolute time.
+     *
+     * The synthesis exists because ECP can keep reporting idle while an HLS DVR
+     * channel is still coming up, so it deliberately outlives idle samples -
+     * which means something else has to bound it. This is that bound: past it,
+     * an idle report is the truth and the synthesis is dropped.
+     */
+    private startupOverlayExpiresAt: number | undefined;
+    /**
      * Monotonic counter for ECP poll samples. Together with pollStartedAt it
      * is what lets a consumer tell an observation that STARTED after a command
      * from one that merely arrived after it.
@@ -279,7 +298,7 @@ export default class RokuRemote {
                     // justified, so it is dropped before the status is
                     // rebuilt. The status itself stays whatever the
                     // observation says; no IDLE is fabricated here.
-                    this.startupOverlay = undefined;
+                    this.clearStartupOverlay();
                     this.emitReceiverStatus();
                     this.emitMediaStatus({ source: "session-media-refresh" });
                     return;
@@ -301,19 +320,27 @@ export default class RokuRemote {
                 // used to confirm receiver state.
                 let source: RokuMediaStatusSource = "session-media-refresh";
                 // The synthesis applies while the effective state is idle, and
-                // it survives only until the next successful poll - idle or
-                // not, acceptObservedState clears every overlay. So it affects
-                // this emission (and any read before that poll) but is not a
-                // standing claim about the device.
-                //
-                // Making it survive an idle poll would be a behaviour change
-                // (see acceptObservedState): it would alter when the idle media
-                // clear is emitted and would keep reporting a state change on
-                // every idle poll. That belongs in its own commit with its own
-                // invalidation rules, not here.
-                if (isHlsDvr && this.effectiveState().state === "idle") {
+                // it deliberately OUTLIVES idle observations: ECP reporting
+                // idle while a DVR channel comes up is the case it exists for,
+                // so dropping it on the next idle poll would make it useless.
+                // Every way it can end is listed on acceptObservedState; this
+                // site writes one, arms the time bound, or clears one.
+                // The test is on the OBSERVATION, not on the composed state:
+                // once a synthesis is up the composed state reads "buffering",
+                // so testing it here would drop the very overlay that a
+                // re-registration is meant to refresh.
+                if (isHlsDvr && this.observedState.state === "idle") {
                     this.writeOverlay("startup", { state: "buffering" });
+                    this.startupOverlayExpiresAt =
+                        Date.now() + STARTUP_OVERLAY_MAX_MS;
                     source = "startup-synthetic";
+                } else {
+                    // The callback owns the synthesis: it either writes one or
+                    // clears one. Otherwise a synthesis justified by a previous
+                    // HLS DVR media would keep standing after that media was
+                    // replaced by something that does not need it (rule 2, the
+                    // "replaced" half; the "cleared" half is the null branch).
+                    this.clearStartupOverlay();
                 }
 
                 this.emitReceiverStatus();
@@ -348,6 +375,16 @@ export default class RokuRemote {
 
     /** Records the extension's current LOAD generation for this device. */
     setLoadGeneration(loadGeneration: number) {
+        // Rule 1: a different LOAD supersedes whatever was synthesised for the
+        // previous one. Only an actual change - the constructor applies the
+        // cached generation once, and that must not drop a synthesis the
+        // observer's replay just wrote.
+        if (
+            this.loadGeneration !== undefined &&
+            this.loadGeneration !== loadGeneration
+        ) {
+            this.clearStartupOverlay();
+        }
         // The producer is a monotonic counter that starts at 1; anything else
         // has crossed a process boundary and is not trusted.
         if (!Number.isSafeInteger(loadGeneration) || loadGeneration <= 0) {
@@ -405,6 +442,11 @@ export default class RokuRemote {
     sendReceiverMessage(message: SenderMessage) {
         switch (message.type) {
             case "STOP":
+                // Rule 3: the user ended playback, so a synthesised BUFFERING
+                // is no longer justified and must not survive the stop. Nothing
+                // is emitted here - the idle clear still comes from the next
+                // observation, as before.
+                this.clearStartupOverlay();
                 void keypress(this.host, "Home").catch(err =>
                     console.warn("[fx_cast_bilibili] Roku stop failed", {
                         host: this.host,
@@ -482,6 +524,8 @@ export default class RokuRemote {
                 break;
 
             case "STOP":
+                // Rule 3, the session-less path (see sendReceiverMessage).
+                this.clearStartupOverlay();
                 void keypress(this.host, "Home").catch(err =>
                     console.warn("[fx_cast_bilibili] Roku stop failed", {
                         host: this.host,
@@ -704,8 +748,20 @@ export default class RokuRemote {
         }
         if (this.destroyed) return;
 
+        // Change detection compares the composed state BEFORE the update with
+        // the composed state AFTER it - i.e. what the consumer was last shown
+        // against what it will be shown now - rather than the composed state
+        // against the raw sample.
+        //
+        // The two agree in every case where no overlay survives the update, so
+        // this is the old `previous = lastState; lastState = state` comparison.
+        // They differ exactly when the startup synthesis survives an idle
+        // sample: comparing against the raw idle sample would call that a
+        // change on every poll and re-broadcast an identical receiver status
+        // every 3s until the synthesis expired.
         const previous = this.effectiveState();
         this.acceptObservedState(state);
+        const current = this.effectiveState();
         this.lastActiveApp = activeApp;
 
         // Media title is only known to us when this remote loaded it;
@@ -714,9 +770,9 @@ export default class RokuRemote {
 
         const positionMoved =
             previous.position !== undefined &&
-            state.position !== undefined &&
-            Math.abs(state.position - previous.position) > 2;
-        const stateChanged = previous.state !== state.state;
+            current.position !== undefined &&
+            Math.abs(current.position - previous.position) > 2;
+        const stateChanged = previous.state !== current.state;
         const appChanged =
             (activeApp?.id ?? undefined) !==
             (this.lastActiveAppId ?? undefined);
@@ -1043,29 +1099,82 @@ export default class RokuRemote {
     }
 
     /**
-     * Folds in a completed poll. EVERY overlay expires here, because the old
-     * code did exactly that: `this.lastState = state` replaced the whole cache,
-     * so a local echo - including the startup synthesis - survived only until
-     * the next successful poll, idle or not.
+     * Folds in a completed poll. The command and seek echoes expire here
+     * unconditionally, because the old code did exactly that: `this.lastState =
+     * state` replaced the whole cache, so an echo survived only until the next
+     * successful poll, idle or not. Deliberately not conditional on the
+     * observation matching an echo's target: that would be a stricter rule than
+     * the old code had, and it would keep an echo alive indefinitely whenever
+     * the device never reached the requested state.
      *
-     * Deliberately not conditional on the observation matching an overlay's
-     * target: that would be a stricter rule than the old code had, and it would
-     * keep an echo alive indefinitely whenever the device never reached the
-     * requested state.
+     * The startup synthesis is the ONE deliberate exception. ECP reporting idle
+     * while an HLS DVR channel is still coming up is precisely the case it
+     * exists for, so an idle sample does not end it. Its invalidation rules are
+     * therefore explicit, and complete:
      *
-     * Keeping the startup overlay across an idle poll would not be a refactor
-     * but a behaviour change (it changes when the idle clear is emitted, and
-     * because pollSample compares the previous EFFECTIVE state against the raw
-     * sample it would also report a state change on every idle poll, re-emitting
-     * the receiver status). If that protection is wanted - bypassing an ECP
-     * idle report during an HLS DVR startup - it belongs in its own commit with
-     * its own invalidation rules, not here.
+     *   1. the LOAD generation changes (a new load supersedes the synthesis);
+     *   2. the session media is cleared (observer called with undefined);
+     *   3. a STOP is submitted from the popup;
+     *   4. a successful poll reports a NON-idle state (the device answered);
+     *   5. STARTUP_OVERLAY_MAX_MS elapses (bounded, so a DVR that never starts
+     *      cannot leave a synthesised BUFFERING standing). Evaluated HERE, when
+     *      a poll is folded in, because that is what publishes the transition:
+     *      dropping the overlay without comparing it against what the consumer
+     *      was last shown would leave the last broadcast claiming a playing
+     *      device. The cost is that a non-poll emission inside the one poll
+     *      interval after the bound can still report the synthesis; the next
+     *      completed poll ends it. (If no poll ever completes again, the
+     *      overlay lingers exactly as an unconsumed echo does today - the poll
+     *      loop is what retires local state, and that is unchanged.)
+     *   6. the remote is disconnected (destroyed; nothing is emitted after).
+     *
+     * The write site in the observer points back here; the list lives in one
+     * place on purpose, so it cannot drift.
      */
     private acceptObservedState(state: RokuPlaybackState) {
         this.observedState = state;
-        this.startupOverlay = undefined;
         this.commandOverlay = undefined;
         this.seekOverlay = undefined;
+        // Only an idle sample inside the window keeps the synthesis alive.
+        if (state.state !== "idle" || !this.startupSynthesisActive()) {
+            this.clearStartupOverlay();
+        }
+    }
+
+    /**
+     * Whether a synthesised startup BUFFERING is currently standing in for an
+     * idle observation, i.e. whether the reported state is synthetic rather
+     * than observed. Invalidation asks this.
+     */
+    private startupSynthesisActive(): boolean {
+        return (
+            this.startupOverlay !== undefined &&
+            this.startupOverlayExpiresAt !== undefined &&
+            Date.now() < this.startupOverlayExpiresAt
+        );
+    }
+
+    /**
+     * Whether the state a consumer would be shown RIGHT NOW is the synthesis.
+     *
+     * True only while the synthesis is active and no later overlay has set a
+     * state since: a PLAY/PAUSE echo written after it wins the composition, and
+     * then the reported state is the echo's, not the synthesis's.
+     */
+    private startupSynthesisIsReportedState(): boolean {
+        const startup = this.startupOverlay;
+        if (!this.startupSynthesisActive() || !startup) return false;
+        return ![this.commandOverlay, this.seekOverlay].some(
+            overlay =>
+                overlay !== undefined &&
+                overlay.state !== undefined &&
+                overlay.revision > startup.revision
+        );
+    }
+
+    private clearStartupOverlay() {
+        this.startupOverlay = undefined;
+        this.startupOverlayExpiresAt = undefined;
     }
 
     private emitMediaStatus(provenance: RokuMediaStatusProvenance) {
@@ -1102,9 +1211,26 @@ export default class RokuRemote {
             return;
         }
 
+        // `ecp-poll` claims a fresh /query/media-player sample PRODUCED this
+        // state. While the startup synthesis is what makes it non-idle, that
+        // claim is false: the sample reported the opposite and the synthesis
+        // replaced it. Such an emission is relabelled - and, because a
+        // synthetic source cannot carry poll timings, drops them.
+        //
+        // Deliberately narrow: only this one arm makes a state claim, and only
+        // when the synthesis is the state actually being reported (an echo
+        // written after it wins the composition and keeps its own label). The
+        // other sources describe why the emission happened, which stays true.
+        // The raw sample is still published as an ecp-poll OBSERVATION by
+        // pollSample, with its timings and its idle state, untouched.
+        const overrodeProvenance =
+            provenance.source === "ecp-poll" &&
+            this.startupSynthesisIsReportedState();
         this.options.onMediaStatusUpdate?.({
             status: this.buildMediaStatus(composed),
-            provenance
+            provenance: overrodeProvenance
+                ? { source: "startup-synthetic" }
+                : provenance
         });
     }
 
