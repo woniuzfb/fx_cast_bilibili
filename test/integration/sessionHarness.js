@@ -652,6 +652,14 @@ async function main() {
                     }
                     options.siteWhitelist = list;
                     options.siteWhitelistEnabled = true;
+                    // The popup logs "popup:init received ->
+                    // hasSelectorContext=true" only with this debug option on.
+                    // That line is the extension's OWN statement that the
+                    // requestSession-bound selector claimed the popup's port -
+                    // the signal the click must wait for, instead of inferring
+                    // readiness from device rows (which a generic popup renders
+                    // too) or, worse, retrying clicks until one happens to work.
+                    options.bilibiliDebugEnabled = true;
                     await browser.storage.sync.set({ options });
                     // Read back from storage, so "was it stored?" is answered
                     // rather than assumed.
@@ -832,7 +840,34 @@ async function main() {
             "window.__HARNESS_REQUEST_SESSION__().catch(() => {});"
         );
 
+        // --- ordering: wait for the extension to say the selector is bound ----
+        const markCount = () => {
+            if (!phaseBConsole || !fs.existsSync(phaseBConsole)) return 0;
+            const text = fs.readFileSync(phaseBConsole, "utf8");
+            return (
+                text.split("popup:init received -> hasSelectorContext=true")
+                    .length - 1
+            );
+        };
+        const marksBefore = markCount();
+        const requestAt = Date.now();
+        let boundAt;
+        const boundDeadline = Date.now() + 25000;
+        while (Date.now() < boundDeadline) {
+            if (markCount() > marksBefore) {
+                boundAt = Date.now();
+                break;
+            }
+            await sleep(250);
+        }
+        check(
+            "the selector bound to this tab before the click (popup:init received)",
+            Boolean(boundAt),
+            `popup:init marks before=${marksBefore} now=${markCount()}`
+        );
+
         const popupHandle = await findHandleByUrl(driver, "/ui/popup/", 20000);
+        let clickAt;
         let clicked;
         // Guard against a vacuous pass: the popup page renders every device as
         // soon as it mounts, so finding and clicking a row proves nothing about
@@ -874,6 +909,7 @@ async function main() {
                 selectorUrl.includes("/ui/popup/"),
                 selectorUrl
             );
+            clickAt = Date.now();
             clicked = await driver.executeAsyncScript(
                 `const done = arguments[arguments.length - 1];
                  const wanted = ${JSON.stringify(FAKE_DEVICE_NAME)};
@@ -944,6 +980,15 @@ async function main() {
             "the page has a non-empty session id",
             Boolean(pageResult && pageResult.sessionId),
             JSON.stringify(pageResult && pageResult.sessionId)
+        );
+        console.log(
+            "ordering (ms):",
+            JSON.stringify({
+                requestSession: 0,
+                selectorBound: boundAt ? boundAt - requestAt : null,
+                click: clickAt ? clickAt - requestAt : null,
+                pageCallback: Date.now() - requestAt
+            })
         );
         check(
             "the clicked selector row was the fake device",
