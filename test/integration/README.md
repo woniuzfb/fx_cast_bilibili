@@ -266,16 +266,50 @@ earlier version of this mode asserted on it and was wrong in both directions.
 
 What these modes do NOT cover, and must not be read as closed:
 
-- the trusted-sender bypass: no dynamic case constructs
-  `main:requestSession` with a `receiverDevice` yet, so its catch is only
-  source-reviewed;
-- how a failed `requestSession` is settled towards the page (error callback, error
-  type, exactly-once): the harness only reads the page result, it does not assert
-  the page's settlement;
+- the trusted-sender bypass: its Roku branch is **unreachable through the current
+  UI**, so it has no real-entry dynamic test. The wiring is statically correct -
+  `beginRokuSessionLoad()` plus `commit()`/`release()` and the partial-session
+  cleanup all apply to it - but nothing in the product can produce that message for
+  a Roku today: (1) the only caller that passes a `receiverDevice` to `ensureInit()`
+  is the mirroring sender (`cast/senders/mirroring.ts`), while the
+  media/bilibili/CCTV senders call `ensureInit()` without one; (2) the selector
+  refuses Screen/mirroring for Roku devices (`device.deviceType !== "roku"` in the
+  popup - "Roku devices have no mirroring channel"); and (3) a page that puts
+  `receiverDevice` into the message itself is rejected as untrusted. Re-open this
+  when a trusted sender starts passing a Roku receiver device, or when the UI lets
+  Roku into a direct-connect path: it then needs the full success /
+  session-start-failure / interleave ownership matrix - not a message constructed
+  from an extension page;
+- how a failed `requestSession` is settled towards the page beyond the counts
+  measured below: the harness now records the SDK callback timeline and the number
+  of background cancellations, but nothing asserts an exact settlement contract
+  (error code set, exactly-once as a requirement, promise rejection);
 - failures AFTER `createCastSession` has partly run (bridge connected,
   `instance.session` set, the `bridge:createCastSession` post throwing): the
   injection point is the top of `createCastSession`, so nothing past that is
   covered.
+
+### Page settlement: who settled the page, and how often
+
+`--request-source selector|queued` chooses which caller drives the session start.
+`queued` keeps the auto-cast provocation (a replacement selector owns the session,
+so `loadSender` does); `selector` keeps the popup mounting early so the click
+resolves the requestSession selector and the main handler owns it. Combined with
+`--fail-stage`, each caller can be asked at each checkpoint what the PAGE saw:
+
+- the SDK callback timeline (`sessionCallbacks`, with each callback's type and error
+  code) and `requestSessionCalls` / `successCount` / `errorCount` / `settleCount` /
+  `settleType`;
+- how many times the background posted `cast:sessionRequestCancelled`, counted at
+  every post site (located by brace matching, so a differently indented site cannot
+  slip past and make a double settlement look like a single one).
+
+Measured at p0 and p2, identical for both callers: one `requestSession` call, zero
+successes, one error callback with code `cancel`, `settleCount` 1, no session id,
+exactly one background cancel - no double settlement and no hang. Worth knowing:
+the queued caller's page-visible cancel is the REPLACED selector's; the failed
+session start itself produces no page event on that path (loadSender only rethrows
+to triggerCast, which logs).
 
 ## Status
 
