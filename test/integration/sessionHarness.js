@@ -180,6 +180,10 @@ function parseArgs(argv) {
         interleave: false,
         // Which checkpoint of createCastSession the injection fires at.
         failStage: "p0",
+        // Pre-fix expectation for the staged matrix: the failed call left an
+        // idle native host behind. Without it the matrix expects the cleanup
+        // (no idle host survives), which is the post-fix behaviour.
+        expectResidue: false,
         expectReleased: false,
         instrument: false
     };
@@ -193,6 +197,7 @@ function parseArgs(argv) {
             args.generationAdvance = true;
         else if (argv[i] === "--auto-cast-gap") args.autoCastGap = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
+        else if (argv[i] === "--expect-residue") args.expectResidue = true;
         else if (argv[i] === "--fail-stage") {
             const value = argv[i + 1];
             if (value === undefined || value.startsWith("--")) {
@@ -3203,15 +3208,51 @@ async function main() {
                             hostsBefore: [...hostsBefore]
                         })
                     );
-                } else {
+                } else if (args.expectResidue) {
                     check(
-                        `session-failure mode (${args.failStage}): exactly one NEW IDLE native host, still alive (the port bridge.connect() created and nobody uses)`,
+                        `session-failure mode (${args.failStage}, pre-fix expectation): exactly one NEW IDLE native host, still alive (the port bridge.connect() created and nobody uses)`,
                         idleNewHosts.length === 1 &&
                             idleNewAlive.length === 1,
                         JSON.stringify({
                             newHosts: newHosts.map(h => h.pid),
                             idleNewHosts: idleNewHosts.map(h => h.pid),
                             idleNewAlive: idleNewAlive.map(h => h.pid),
+                            failStage: args.failStage
+                        })
+                    );
+                } else {
+                    // Closing the port makes the native host exit, which is
+                    // asynchronous, so wait for the residue to disappear instead
+                    // of reading once at an arbitrary moment.
+                    let leftover = idleNewAlive;
+                    const residueDeadline = Date.now() + 15000;
+                    while (leftover.length && Date.now() < residueDeadline) {
+                        await sleep(250);
+                        const connsAgain = readConnectionsNow();
+                        const stillNew = connsAgain.filter(
+                            c => !hostsBefore.has(c.pid)
+                        );
+                        leftover = stillNew
+                            .filter(
+                                c =>
+                                    c.inbound.length === 0 &&
+                                    c.outbound.length === 0
+                            )
+                            .filter(h => alive(h.pid));
+                    }
+                    // The pair matters: the half-created PORT must have existed
+                    // (otherwise "no residue" could be vacuous because nothing
+                    // was ever created), and it must not SURVIVE the failure. The
+                    // host needs a moment to exit after the port closes, so the
+                    // initial read seeing it is expected - what is asserted is
+                    // that it is gone by the end of the bounded wait.
+                    check(
+                        `session-failure mode (${args.failStage}): the half-created port existed and left no idle native host behind (closed, host exited)`,
+                        idleNewHosts.length === 1 && leftover.length === 0,
+                        JSON.stringify({
+                            newHosts: newHosts.map(h => h.pid),
+                            idleNewHosts: idleNewHosts.map(h => h.pid),
+                            leftover: leftover.map(h => h.pid),
                             failStage: args.failStage
                         })
                     );

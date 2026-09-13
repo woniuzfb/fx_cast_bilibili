@@ -124,30 +124,70 @@ async function createCastSession(opts: {
         autoJoinContexts: new Set()
     };
 
-    if (opts.instance.contentContext) {
-        session.autoJoinContexts.add(opts.instance.contentContext);
-    }
+    // From here on this call owns a native port, and may have attached it to the
+    // instance. Anything that throws below must not leave either behind: the port
+    // would keep a native host alive that the device was never told about, and
+    // the instance would reference a session that does not exist. Measured before
+    // this existed (harness --fail-stage p1/p2): exactly one idle native host
+    // stayed alive for the rest of the browser's life.
+    //
+    // Cleanup is identity-guarded, like the load-generation announcement: a late
+    // failure must not detach a NEWER session that has already replaced this one.
+    const onBridgeDisconnect = () => destroyCastInstance(opts.instance);
+    try {
+        if (opts.instance.contentContext) {
+            session.autoJoinContexts.add(opts.instance.contentContext);
+        }
 
-    opts.instance.session = session;
-    opts.instance.bridgeMessageListener = message => {
-        handleBridgeMessage(opts.instance, message);
-    };
+        opts.instance.session = session;
+        opts.instance.bridgeMessageListener = message => {
+            handleBridgeMessage(opts.instance, message);
+        };
 
-    session.bridgePort.onMessage.addListener(
-        opts.instance.bridgeMessageListener
-    );
-    session.bridgePort.onDisconnect.addListener(() =>
-        destroyCastInstance(opts.instance)
-    );
-
-    if (opts.instance.contentContext?.tabId !== undefined) {
-        updateActionState(
-            ActionState.Connecting,
-            opts.instance.contentContext?.tabId
+        session.bridgePort.onMessage.addListener(
+            opts.instance.bridgeMessageListener
         );
-    }
+        session.bridgePort.onDisconnect.addListener(onBridgeDisconnect);
 
-    return session;
+        if (opts.instance.contentContext?.tabId !== undefined) {
+            updateActionState(
+                ActionState.Connecting,
+                opts.instance.contentContext?.tabId
+            );
+        }
+
+        return session;
+    } catch (error) {
+        if (opts.instance.session === session) {
+            if (opts.instance.bridgeMessageListener) {
+                session.bridgePort.onMessage.removeListener(
+                    opts.instance.bridgeMessageListener
+                );
+            }
+            opts.instance.bridgeMessageListener = undefined;
+            opts.instance.session = undefined;
+            if (opts.instance.contentContext?.tabId !== undefined) {
+                updateActionState(
+                    ActionState.Default,
+                    opts.instance.contentContext.tabId
+                );
+            }
+        }
+        // Remove our own disconnect handler BEFORE closing the port: it calls
+        // destroyCastInstance(), which would tear down the whole instance (its
+        // content port included) for what is only a half-created session.
+        try {
+            session.bridgePort.onDisconnect.removeListener(onBridgeDisconnect);
+        } catch {
+            // Best effort: the port may already be gone.
+        }
+        try {
+            session.bridgePort.disconnect();
+        } catch {
+            // Already disconnected.
+        }
+        throw error;
+    }
 }
 
 function joinSession(instance: CastInstance, session: CastSession) {
