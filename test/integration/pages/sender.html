@@ -187,6 +187,65 @@
                 });
             };
 
+            /** The session the selector granted, so LOAD can target it. */
+            let currentSession;
+
+            window.__HARNESS_LOAD__ = function (overrides) {
+                return new Promise((resolve, reject) => {
+                    if (!currentSession) {
+                        result.errors.push("load: no session");
+                        reject(new Error("no session"));
+                        return;
+                    }
+                    result.loadCalled = true;
+                    const media = {
+                        contentId: (overrides && overrides.contentId) ||
+                            "harness-hls-dvr",
+                        contentType: "application/vnd.apple.mpegurl",
+                        streamType: "BUFFERED",
+                        duration: (overrides && overrides.duration) || 7200,
+                        metadata: {
+                            title: "Harness DVR",
+                            images: []
+                        },
+                        // The anchors the Roku startup synthesis exists for.
+                        customData: {
+                            hlsDvr: true,
+                            pageDuration: 7200,
+                            harnessMarker: "stage2"
+                        }
+                    };
+                    try {
+                        const request = new chrome.cast.media.LoadRequest(
+                            new chrome.cast.media.MediaInfo(
+                                media.contentId,
+                                media.contentType
+                            )
+                        );
+                        request.media.duration = media.duration;
+                        request.media.customData = media.customData;
+                        request.media.metadata = media.metadata;
+                        currentSession.loadMedia(
+                            request,
+                            () => {
+                                result.loadSucceeded = true;
+                                resolve(true);
+                            },
+                            err => {
+                                result.loadError = String(
+                                    (err && (err.description || err.code)) || err
+                                );
+                                result.errors.push("load: " + result.loadError);
+                                reject(err);
+                            }
+                        );
+                    } catch (err) {
+                        result.errors.push("load: " + String(err));
+                        reject(err);
+                    }
+                });
+            };
+
             window.__HARNESS_REQUEST_SESSION__ = function () {
                 return new Promise((resolve, reject) => {
                     result.requestSessionCalled = true;
@@ -194,6 +253,7 @@
                     try {
                         chrome.cast.requestSession(
                             session => {
+                                currentSession = session;
                                 result.requestSessionSucceeded = true;
                                 result.sessionId = session.sessionId;
                                 // `receiver.label` is the FRIENDLY NAME, not the

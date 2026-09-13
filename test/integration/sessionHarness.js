@@ -344,10 +344,17 @@ async function main() {
         { stdio: ["ignore", "pipe", "pipe"] }
     );
     let rokuReady = false;
+    let rokuControlPort;
     let rokuOut = "";
     roku.stdout.on("data", chunk => {
         rokuOut += chunk.toString();
-        if (rokuOut.includes('"ready":true')) rokuReady = true;
+        const line = rokuOut
+            .split("\n")
+            .find(candidate => candidate.includes('"ready":true'));
+        if (line) {
+            rokuReady = true;
+            rokuControlPort = JSON.parse(line).controlPort;
+        }
     });
     roku.stderr.on("data", chunk => process.stderr.write("[fake-roku] " + chunk));
     for (let i = 0; i < 60 && !rokuReady; i++) await sleep(100);
@@ -836,11 +843,6 @@ async function main() {
         );
 
         // --- requestSession, then drive the selector --------------------------
-        await driver.executeScript(
-            "window.__HARNESS_REQUEST_SESSION__().catch(() => {});"
-        );
-
-        // --- ordering: wait for the extension to say the selector is bound ----
         const markCount = () => {
             if (!phaseBConsole || !fs.existsSync(phaseBConsole)) return 0;
             const text = fs.readFileSync(phaseBConsole, "utf8");
@@ -849,8 +851,20 @@ async function main() {
                     .length - 1
             );
         };
-        const marksBefore = markCount();
-        const requestAt = Date.now();
+
+        // Baseline is taken BEFORE the call. Taken after, a fast binding would
+        // already be inside `marksBefore` and the wait below would hang on a
+        // mark that never arrives - a false timeout on the fast path.
+        const marksBeforeSession = markCount();
+        const requestAtSession = Date.now();
+        await driver.executeScript(
+            "window.__HARNESS_REQUEST_SESSION__().catch(() => {});"
+        );
+
+        // --- ordering: wait for the extension to say the selector is bound ----
+        // (markCount is defined above, next to where the baseline is taken.)
+        const marksBefore = marksBeforeSession;
+        const requestAt = requestAtSession;
         let boundAt;
         const boundDeadline = Date.now() + 25000;
         while (Date.now() < boundDeadline) {
@@ -1155,6 +1169,167 @@ async function main() {
             "the fake Roku received ECP traffic",
             readNdjson(path.join(rokuDir, "fake-roku-requests.ndjson")).length >
                 0
+        );
+        // ================= Stage 2, round 1 =========================
+        //
+        // One core chain only: a real HLS DVR LOAD through the session the
+        // selector just created, then every hop asserted separately, because the
+        // point is the extension's relay - the boundary that until now was only
+        // supported by reading code.
+        const post = async (path, body) => {
+            const response = await fetch(
+                `http://127.0.0.1:${rokuControlPort}${path}`,
+                {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify(body)
+                }
+            );
+            return response.json();
+        };
+        // The startup synthesis only exists while ECP still reports idle, so the
+        // device is pinned there: a device that flips to buffer/play on its own
+        // would quietly bypass the boundary under test.
+        await post("/state", { playerState: "idle", position: undefined, duration: undefined });
+        console.log("fake roku pinned to idle for the LOAD");
+
+        await driver.switchTo().window(senderTab);
+        const loaded = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             window.__HARNESS_LOAD__().then(() => done(true), err => done(String(err)));`
+        );
+        check("the page loaded HLS DVR media into the session", loaded === true, String(loaded));
+        await sleep(6000);
+
+        const readConn = pid => ({
+            inbound: readNdjson(path.join(harnessDir, `conn-${pid}-in.ndjson`)),
+            outbound: readNdjson(path.join(harnessDir, `conn-${pid}-out.ndjson`))
+        });
+        const sessionConn = session ? readConn(session.pid) : { inbound: [], outbound: [] };
+        const discoveryConn = discovery ? readConn(discovery.pid) : { inbound: [], outbound: [] };
+
+        // Hop 1: the session host publishes the LOAD's media.
+        const sessionMedia = sessionConn.outbound.find(
+            m => m.subject === "main:rokuSessionMedia"
+        );
+        check(
+            "hop 1: the session host published main:rokuSessionMedia",
+            Boolean(sessionMedia),
+            JSON.stringify(sessionConn.outbound.map(m => m.subject).slice(0, 10))
+        );
+        const sessionMediaData = (sessionMedia && sessionMedia.message && sessionMedia.message.data) || {};
+        check(
+            "hop 1: it is for the fake device and carries the DVR anchors",
+            sessionMediaData.deviceId === FAKE_DEVICE_ID &&
+                sessionMediaData.media &&
+                sessionMediaData.media.customData &&
+                sessionMediaData.media.customData.hlsDvr === true &&
+                sessionMediaData.media.duration === 7200,
+            JSON.stringify({
+                deviceId: sessionMediaData.deviceId,
+                duration: sessionMediaData.media && sessionMediaData.media.duration,
+                customData: sessionMediaData.media && sessionMediaData.media.customData
+            })
+        );
+
+        // Hop 2: the extension relayed the generation and the media to discovery.
+        const relayedGeneration = discoveryConn.inbound.find(
+            m => m.subject === "bridge:rokuSetLoadGeneration"
+        );
+        const relayedMedia = discoveryConn.inbound.find(
+            m => m.subject === "bridge:rokuSetSessionMedia"
+        );
+        const generationData = (relayedGeneration && relayedGeneration.message.data) || {};
+        const relayedData = (relayedMedia && relayedMedia.message.data) || {};
+        check(
+            "hop 2: the extension sent generation and session media to discovery",
+            Boolean(relayedGeneration && relayedMedia),
+            JSON.stringify([
+                ...new Set(discoveryConn.inbound.map(m => m.subject))
+            ].slice(0, 12))
+        );
+        check(
+            "hop 2: both name the fake device and agree on the generation",
+            generationData.deviceId === FAKE_DEVICE_ID &&
+                relayedData.deviceId === FAKE_DEVICE_ID &&
+                generationData.loadGeneration === relayedData.loadGeneration,
+            JSON.stringify({
+                gen: generationData.loadGeneration,
+                mediaGen: relayedData.loadGeneration,
+                device: relayedData.deviceId
+            })
+        );
+        check(
+            "hop 2: the relayed media matches what the session published",
+            relayedData.media &&
+                relayedData.media.duration === 7200 &&
+                relayedData.media.customData &&
+                relayedData.media.customData.hlsDvr === true &&
+                relayedData.ownerId === sessionMediaData.ownerId,
+            JSON.stringify({
+                duration: relayedData.media && relayedData.media.duration,
+                ownerId: relayedData.ownerId,
+                sessionOwner: sessionMediaData.ownerId
+            })
+        );
+
+        // Hop 3: the UI channel synthesises BUFFERING, and says so.
+        const statusEmission = discoveryConn.outbound.find(
+            m =>
+                m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                m.message.data.deviceId === FAKE_DEVICE_ID &&
+                m.message.data.provenance &&
+                m.message.data.provenance.source === "startup-synthetic"
+        );
+        check(
+            "hop 3: the media status is startup-synthetic BUFFERING with the session metadata",
+            Boolean(
+                statusEmission &&
+                    statusEmission.message.data.status.playerState === "BUFFERING" &&
+                    statusEmission.message.data.status.media &&
+                    statusEmission.message.data.status.media.duration === 7200 &&
+                    statusEmission.message.data.status.media.customData.hlsDvr === true
+            ),
+            JSON.stringify(
+                statusEmission && {
+                    state: statusEmission.message.data.status.playerState,
+                    provenance: statusEmission.message.data.provenance.source,
+                    media: statusEmission.message.data.status.media
+                }
+            )
+        );
+
+        // Hop 4: the confirmation channel still sees the real, idle device.
+        const observation = discoveryConn.outbound.find(
+            m =>
+                m.subject === "main:rokuPlaybackObservation" &&
+                m.message.data.deviceId === FAKE_DEVICE_ID &&
+                m.message.data.provenance &&
+                m.message.data.provenance.source === "ecp-poll"
+        );
+        const observationProvenance =
+            (observation && observation.message.data.provenance) || {};
+        check(
+            "hop 4: a raw observation is still ecp-poll IDLE with poll timestamps",
+            Boolean(
+                observation &&
+                    observation.message.data.status.playerState === "IDLE" &&
+                    Number.isFinite(observationProvenance.pollStartedAt) &&
+                    Number.isFinite(observationProvenance.pollCompletedAt) &&
+                    observationProvenance.pollStartedAt <=
+                        observationProvenance.pollCompletedAt
+            ),
+            JSON.stringify(observation && observation.message.data)
+        );
+        console.log(
+            "stage 2 round 1 observed:",
+            JSON.stringify({
+                sessionMedia: Boolean(sessionMedia),
+                relayedGeneration: Boolean(relayedGeneration),
+                relayedMedia: Boolean(relayedMedia),
+                syntheticBuffering: Boolean(statusEmission),
+                rawIdleObservation: Boolean(observation)
+            })
         );
     } catch (err) {
         if (!(err && err.phaseAOnly)) throw err;
