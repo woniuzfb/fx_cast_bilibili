@@ -1,5 +1,6 @@
 import type {
     PagePlaybackDispatchResult,
+    PlaybackCommandProgress,
     PagePlaybackPhase,
     PlaybackPageCommand,
     PlaybackCommandLifecycle,
@@ -503,24 +504,11 @@ export function isValidPagePlaybackDispatchResult(
     return false;
 }
 
-/** The page-side progress shape (see extension/messaging.ts). */
-export interface PagePlaybackProgress {
-    commandId: number;
-    /**
-     * Required. A progress message crosses a process boundary, so its fields
-     * cannot be trusted to be present just because today's producer fills them:
-     * an older content script, a truncated clone or another sender could omit
-     * the identity, and without it the command match would rest on commandId
-     * alone. deviceId is taken from here rather than duplicated as a sibling
-     * field, so the two can never disagree.
-     */
-    mediaIdentity: RokuMediaIdentity;
-    pagePhase?: "transition-requested" | "target-observed" | "timeout";
-    receiverPhase?: "requested" | "failed";
-    receiverDispatchStartedAt?: number;
-    pagePausedSnapshot?: boolean;
-    error?: string;
-}
+/**
+ * The shared progress protocol (see shared/playbackCommand.d.ts). Re-exported
+ * so existing importers keep working while the definition stays in one place.
+ */
+export type PagePlaybackProgress = PlaybackCommandProgress;
 
 function isValidRokuMediaIdentity(value: unknown): value is RokuMediaIdentity {
     if (!value || typeof value !== "object") return false;
@@ -599,6 +587,29 @@ export function isValidPagePlaybackProgress(
 }
 
 /**
+ * Whether a page-reported dispatch timestamp can be trusted.
+ *
+ * The page and the background share one browser process clock, so their
+ * Date.now() values are directly comparable - and the strict observation gate
+ * compares a bridge poll's pollStartedAt against exactly this value, so an
+ * implausible timestamp must never be stored. Checked BEFORE any field is
+ * written, for both the synchronous result and the asynchronous progress: an
+ * unusable clock is a protocol failure, not a reason to leave half a state.
+ */
+const MAX_PAGE_CLOCK_SKEW_MS = 60_000;
+
+function isPlausiblePageDispatchTimestamp(
+    timestamp: unknown,
+    now: number
+): timestamp is number {
+    return (
+        typeof timestamp === "number" &&
+        Number.isFinite(timestamp) &&
+        Math.abs(now - timestamp) <= MAX_PAGE_CLOCK_SKEW_MS
+    );
+}
+
+/**
  * Whether a progress delta proves the page actually started executing the
  * command. This is what forbids a device fallback later: falling back after the
  * page has already driven (or is driving) the receiver would create a second
@@ -625,27 +636,15 @@ function provesPageExecution(progress: PagePlaybackProgress): boolean {
 function requestReceiverFromPage(
     device: ReceiverDevice,
     command: PlaybackCommand,
-    dispatchStartedAt: number,
-    hostClockNow: number
-): boolean {
-    // The page and the background share one browser process clock, so a page
-    // timestamp is directly comparable with pollStartedAt; a wildly future or
-    // past value is a protocol bug, not a reason to fake a window.
-    if (Math.abs(hostClockNow - dispatchStartedAt) > 60_000) {
-        logger.error("Rejecting implausible page dispatch timestamp", {
-            deviceId: device.id,
-            commandId: command.commandId,
-            dispatchStartedAt,
-            hostClockNow
-        });
-        return false;
-    }
+    dispatchStartedAt: number
+) {
+    // The timestamp's plausibility was already established by the caller,
+    // before it wrote anything.
     command.receiverPhase = "requested";
     command.receiverDispatchStartedAt = dispatchStartedAt;
     // Synchronous switch: the dispatch watchdog is replaced by the receiver
     // one with no async gap, so an active command is never without a watchdog.
     armWatchdog(device, command);
-    return true;
 }
 
 /**
@@ -707,6 +706,25 @@ export function acceptPagePlaybackProgress(value: unknown) {
     const device = deviceLookup?.(deviceId);
     if (!device) return;
 
+    const hostClockNow = Date.now();
+    if (
+        progress.receiverPhase === "requested" &&
+        !isPlausiblePageDispatchTimestamp(
+            progress.receiverDispatchStartedAt,
+            hostClockNow
+        )
+    ) {
+        // Rejected whole: no field, diagnostic or otherwise, may be written for
+        // a payload whose only purpose was a receiver request we cannot date.
+        logger.error("Rejected implausible page dispatch timestamp", {
+            deviceId,
+            commandId: progress.commandId,
+            receiverDispatchStartedAt: progress.receiverDispatchStartedAt,
+            hostClockNow
+        });
+        return;
+    }
+
     logger.info("Page playback progress", {
         deviceId,
         commandId: command.commandId,
@@ -730,8 +748,7 @@ export function acceptPagePlaybackProgress(value: unknown) {
         requestReceiverFromPage(
             device,
             command,
-            progress.receiverDispatchStartedAt as number,
-            Date.now()
+            progress.receiverDispatchStartedAt as number
         );
     } else if (progress.receiverPhase === "failed") {
         // The fixed execution owner reported an explicit receiver failure. That
@@ -761,18 +778,39 @@ function applyPageRouteResult(
         return false;
     }
 
+    // A page route may only become the owner if its receiver clock is usable:
+    // the strict observation gate compares pollStartedAt against that value, so
+    // adopting the owner with an implausible one would strand the command in a
+    // state it can never confirm. Rejecting the route here leaves the command
+    // free to fall back to the bridge.
+    if (
+        result.receiverRequested &&
+        !isPlausiblePageDispatchTimestamp(
+            result.receiverDispatchStartedAt,
+            Date.now()
+        )
+    ) {
+        command.routeAttempts.page = "rejected";
+        command.pagePhase = "failed";
+        command.error = "implausible receiver dispatch timestamp";
+        logger.error("Rejected page result with an implausible timestamp", {
+            deviceId: device.id,
+            commandId: command.commandId,
+            receiverDispatchStartedAt: result.receiverDispatchStartedAt
+        });
+        return false;
+    }
+
     assignPlaybackOwner(command, "page-sender");
     command.pagePhase =
         result.disposition === "already-target"
             ? "already-target"
             : "transition-requested";
     if (result.receiverRequested) {
-        // The validator guarantees a finite timestamp on this arm.
         requestReceiverFromPage(
             device,
             command,
-            result.receiverDispatchStartedAt as number,
-            Date.now()
+            result.receiverDispatchStartedAt as number
         );
     }
     logger.info("Playback command handed to the page sender", {

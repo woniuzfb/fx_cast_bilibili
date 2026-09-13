@@ -85,6 +85,42 @@ export type PlaybackCommandTerminalReason =
     | "dispatch-failed"
     | "observation-unavailable";
 
+/** Asynchronous page facts. Only these can appear in progress. */
+export type PageAsyncPhase =
+    | "transition-requested"
+    | "target-observed"
+    | "timeout";
+
+/**
+ * Asynchronous page facts for a play/pause command, reported by the page over
+ * main:bilibiliPlaybackProgress (a runtime message, i.e. a process boundary).
+ *
+ * This is the single source for that protocol: the coordinator's intake type
+ * and the message definition both reference it, so the transport, the producer
+ * and the consumer cannot drift apart.
+ *
+ * The identity is REQUIRED. A message crossing a process boundary cannot be
+ * trusted to carry a field just because today's producer fills it - an older
+ * content script, a truncated clone or another sender could omit it, and
+ * without it the match would rest on commandId alone. The device is taken from
+ * mediaIdentity.deviceId rather than duplicated as a sibling field, so the two
+ * can never disagree.
+ */
+export interface PlaybackCommandProgress {
+    commandId: number;
+    mediaIdentity: RokuMediaIdentity;
+    pagePhase?: PageAsyncPhase;
+    receiverPhase?: "requested" | "failed";
+    /**
+     * Page clock, sampled immediately before the Cast receiver call. Required
+     * when receiverPhase is "requested", and forbidden otherwise.
+     */
+    receiverDispatchStartedAt?: number;
+    /** Diagnosis only, reported with a page timeout. */
+    pagePausedSnapshot?: boolean;
+    error?: string;
+}
+
 /**
  * Page-route progress. The page sender returns a structured result
  * (PagePlaybackDispatchResult) for the synchronous facts and reports the

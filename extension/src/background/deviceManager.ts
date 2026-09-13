@@ -16,7 +16,7 @@ import type { MediaInfo } from "../cast/sdk/media/classes";
 import { PlayerState, RepeatMode } from "../cast/sdk/media/enums";
 
 import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
-import type { RokuMediaIdentity } from "../../../shared/playbackCommand";
+import type { PlaybackCommandProgress } from "../../../shared/playbackCommand";
 
 import {
     nextRokuLoadGeneration,
@@ -58,15 +58,7 @@ interface EventMap {
      * report") - an observed idle must not look like a failed observation.
      */
     /** Asynchronous play/pause facts reported by the page sender. */
-    bilibiliPlaybackProgress: {
-        commandId: number;
-        mediaIdentity: RokuMediaIdentity;
-        pagePhase?: "transition-requested" | "target-observed" | "timeout";
-        receiverPhase?: "requested" | "failed";
-        receiverDispatchStartedAt?: number;
-        pagePausedSnapshot?: boolean;
-        error?: string;
-    };
+    bilibiliPlaybackProgress: PlaybackCommandProgress;
     rokuPlaybackObservation: {
         deviceId: string;
         status: MediaStatus;
@@ -320,9 +312,11 @@ export default new (class extends TypedEventTarget<EventMap> {
         this.traceRokuMedia(deviceId, "session-media-published", {
             inputOwnerId: ownerId,
             inputWasOptimistic:
-                (mergedMedia.customData as {
-                    optimisticRelayMedia?: unknown;
-                } | null)?.optimisticRelayMedia === true
+                (
+                    mergedMedia.customData as {
+                        optimisticRelayMedia?: unknown;
+                    } | null
+                )?.optimisticRelayMedia === true
         });
         this.logRokuMergedMedia(deviceId, status, "session-publish");
         this.dispatchEvent(

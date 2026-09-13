@@ -1,4 +1,4 @@
-import type { RokuMediaIdentity } from "../../shared/playbackCommand";
+import type { PlaybackCommandProgress } from "../../shared/playbackCommand";
 import type { RokuMediaStatusProvenance } from "../../shared/rokuMediaStatusProvenance";
 import type { TypedPort } from "./lib/TypedPort";
 
@@ -460,21 +460,7 @@ type BridgeMessageDefinitions = {
      * bilibili:pageSeekStarted), because these happen after controlPlayback()
      * has already returned.
      */
-    "main:bilibiliPlaybackProgress": {
-        commandId: number;
-        /**
-         * Required: a message crossing a process boundary cannot be trusted to
-         * carry it just because today's producer does, and without it the
-         * command match would rest on commandId alone. The device is taken from
-         * identity.deviceId rather than duplicated here.
-         */
-        mediaIdentity: RokuMediaIdentity;
-        pagePhase?: "transition-requested" | "target-observed" | "timeout";
-        receiverPhase?: "requested" | "failed";
-        receiverDispatchStartedAt?: number;
-        pagePausedSnapshot?: boolean;
-        error?: string;
-    };
+    "main:bilibiliPlaybackProgress": PlaybackCommandProgress;
 
     /**
      * One completed Roku ECP poll sample (see the bridge-side definition).
