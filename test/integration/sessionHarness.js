@@ -63,6 +63,8 @@ const firefox = require(path.join(
  */
 /** Servers the harness started itself; `driver.quit()` does not stop them. */
 const ownedGeckodrivers = [];
+/** Children the harness spawned (the fake Roku), reaped on any exit path. */
+const ownedChildren = [];
 
 const SELENIUM_CACHE = path.join(
     os.tmpdir(),
@@ -357,6 +359,7 @@ async function main() {
         [path.join(__dirname, "fakeRoku.js"), "--harness-dir", rokuDir],
         { stdio: ["ignore", "pipe", "pipe"] }
     );
+    ownedChildren.push(roku);
     let rokuReady = false;
     let rokuControlPort;
     let rokuOut = "";
@@ -1872,4 +1875,28 @@ async function main() {
 main().catch(err => {
     console.error("sessionHarness ERROR", err);
     process.exit(1);
+});
+
+/**
+ * Nothing may outlive the run: an abandoned fake Roku holds port 8060, which
+ * makes the NEXT run fail with "the fake Roku did not start (port 8060 busy?)"
+ * - i.e. a leftover of the previous run hides the real error of the next one,
+ * which is exactly what happened. Owning geckodriver is the harness's own doing
+ * (Selenium does not stop a server it did not start), so it reaps both.
+ */
+process.on("exit", () => {
+    for (const gecko of ownedGeckodrivers) {
+        try {
+            gecko.kill("SIGKILL");
+        } catch {
+            // Already gone.
+        }
+    }
+    for (const child of ownedChildren) {
+        try {
+            child.kill("SIGKILL");
+        } catch {
+            // Already gone.
+        }
+    }
 });
