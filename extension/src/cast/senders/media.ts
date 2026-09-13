@@ -525,9 +525,15 @@ export default class MediaSender {
      */
     private dashTightenDeadline = 0;
 
-    /** Page-clock-master mode: the page owns position; play/pause is
-     *  synchronized by routing popup/BLE through the page, never by writing
-     *  delayed receiver status back onto the source. */
+    /**
+     * Page-clock-master mode: the page owns POSITION (no receiver->page drift
+     * correction or snap, no Chromecast-style post-load tighten), because the
+     * page player is what produces the capture watermark this sender feeds from.
+     *
+     * It does NOT mean "the page ignores the receiver": play/pause still follows
+     * the receiver's state, since receiver state also changes outside commands
+     * that already passed through the page (Roku remote, Roku UI).
+     */
     setPreserveSourcePlayback(enabled: boolean) {
         this.preserveSourcePlayback = enabled;
     }
@@ -1922,15 +1928,83 @@ export default class MediaSender {
         const gated = this.gestureGatedControls;
         let lastSyncDebugAt = 0;
         let lastGetStatusPollAt = 0;
+
+        /**
+         * Receiver play/pause -> page, for EVERY sender.
+         *
+         * This is deliberately separate from position reconciliation: a page that
+         * supplies the source watermark (`preserveSourcePlayback`, i.e. Bilibili
+         * on a Roku) keeps the POSITION authority - the receiver must not drag the
+         * page's clock around - but its play/pause state still has to follow the
+         * receiver, because the receiver's state changes on its own (Roku remote,
+         * Roku UI, another controller) and not only through commands that already
+         * went through the page.
+         */
+        const reconcilePlaybackState = (
+            boundMedia: { playerState: string; mediaSessionId?: number }
+        ) => {
+            const localState = mediaElement.paused
+                ? cast.media.PlayerState.PAUSED
+                : cast.media.PlayerState.PLAYING;
+            if (localState === boundMedia.playerState) return;
+
+            /**
+             * Which senders must keep the page PLAYING through receiver
+             * startup/recovery states: the page player is what produces the
+             * source watermark they feed from (CCTV's HLS DVR live frontier,
+             * Bilibili's DASH capture frontier). Pausing it there starves the
+             * very relay that has to recover.
+             */
+            const needsSourceWatermark =
+                this.isHlsDvr ||
+                (this.isDashRemux && this.preserveSourcePlayback);
+
+            const resumePage = () => {
+                if (!mediaElement.paused) return;
+                if (!gated) suppressPlay++;
+                void mediaElement.play().catch(err => {
+                    if (!gated) suppressPlay = Math.max(0, suppressPlay - 1);
+                    logger.error(
+                        needsSourceWatermark
+                            ? "Failed to keep page playback alive for the source watermark"
+                            : "Failed to sync play state",
+                        err
+                    );
+                });
+            };
+
+            switch (boundMedia.playerState) {
+                case cast.media.PlayerState.PLAYING:
+                    resumePage();
+                    break;
+                case cast.media.PlayerState.PAUSED:
+                    if (!gated && !mediaElement.paused) suppressPause++;
+                    mediaElement.pause();
+                    break;
+                case cast.media.PlayerState.BUFFERING:
+                case cast.media.PlayerState.IDLE:
+                    if (needsSourceWatermark) {
+                        resumePage();
+                        break;
+                    }
+                    if (!gated && !mediaElement.paused) suppressPause++;
+                    mediaElement.pause();
+                    break;
+            }
+        };
         const syncFromReceiver = () => {
             if (this.preserveSourcePlayback) {
-                // Page-clock-master: never write receiver status back onto the
-                // page. Popup/BLE play-pause already went through the page
-                // (so both sides move together); a 2.5s Roku poll mirrored
-                // here would pause the page LATE and fight a just-issued
-                // play. Clear the DASH seek/load transaction flags (runDashSeek
-                // / loadMedia arm them; loadMedia's callback also clears the
-                // hold, but a failed/abandoned load still needs this).
+                // Page-clock-master: the page keeps POSITION authority, so no
+                // receiver status is written onto the page clock, no drift
+                // correction and no receiver-position snap. Clear the DASH
+                // seek/load transaction flags (runDashSeek / loadMedia arm them;
+                // loadMedia's callback also clears the hold, but a
+                // failed/abandoned load still needs this).
+                //
+                // Play/pause is NOT part of that authority: a receiver pauses on
+                // its own (Roku remote, Roku UI, another controller), so the page
+                // must follow the receiver's state here too. Skipping it left the
+                // Bilibili page playing while the Roku was paused.
                 this.dashSyncHold = false;
                 this.dashTightenSync = false;
                 const boundMedia = currentMedia();
@@ -1952,6 +2026,7 @@ export default class MediaSender {
                         currentTime: boundMedia.currentTime
                     });
                 }
+                if (boundMedia) reconcilePlaybackState(boundMedia);
                 return;
             }
             const boundMedia = currentMedia();
@@ -2257,49 +2332,7 @@ export default class MediaSender {
                 }
             }
 
-            const localState = mediaElement.paused
-                ? cast.media.PlayerState.PAUSED
-                : cast.media.PlayerState.PLAYING;
-            if (localState === boundMedia.playerState) return;
-            switch (boundMedia.playerState) {
-                case cast.media.PlayerState.PLAYING:
-                    if (!gated && mediaElement.paused) suppressPlay++;
-                    void mediaElement.play().catch(err => {
-                        if (!gated)
-                            suppressPlay = Math.max(0, suppressPlay - 1);
-                        logger.error("Failed to sync play state", err);
-                    });
-                    break;
-                case cast.media.PlayerState.PAUSED:
-                    if (!gated && !mediaElement.paused) suppressPause++;
-                    mediaElement.pause();
-                    break;
-                case cast.media.PlayerState.BUFFERING:
-                case cast.media.PlayerState.IDLE:
-                    if (this.isHlsDvr) {
-                        // The CCTV page player supplies the live watermark and
-                        // cdnFutureMode heartbeat. Receiver startup/recovery states
-                        // must not pause it or the relay can starve at the edge.
-                        if (mediaElement.paused) {
-                            if (!gated) suppressPlay++;
-                            void mediaElement.play().catch(err => {
-                                if (!gated)
-                                    suppressPlay = Math.max(
-                                        0,
-                                        suppressPlay - 1
-                                    );
-                                logger.error(
-                                    "Failed to keep CCTV page playback alive",
-                                    err
-                                );
-                            });
-                        }
-                        break;
-                    }
-                    if (!gated && !mediaElement.paused) suppressPause++;
-                    mediaElement.pause();
-                    break;
-            }
+            reconcilePlaybackState(boundMedia);
         };
         const onMediaUpdate = (isAlive: boolean) => {
             if (!isAlive) return;
