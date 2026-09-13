@@ -32,7 +32,22 @@ const logger = new Logger("fx_cast_bilibili [playback command]");
  * restart, and its expiry is reported as `observation-unavailable` (a
  * diagnostic outcome), never as a receiver failure.
  */
-export const PLAYBACK_COMMAND_DEADLINE_MS = 12_000;
+export const PAGE_ROUTE_DISPATCH_TIMEOUT_MS = 12_000;
+
+/**
+ * How long the receiver leg may stay unconfirmed.
+ *
+ * Kept separate from the dispatch timeout above because the two answer
+ * different questions: the dispatch timeout bounds "no execution owner could be
+ * established", this one bounds "the owner dispatched but no usable observation
+ * arrived". They also have different校准 rules - this one's lower bound is the
+ * period of the observation source (currently RokuRemote's 3s poll, so it must
+ * span several samples plus ECP and messaging latency), and it will be
+ * recalibrated when a command-triggered confirmation poll exists. Sharing the
+ * dispatch value would have made a slow page route silently eat the receiver's
+ * confirmation window.
+ */
+export const RECEIVER_CONFIRM_WINDOW_MS = 10_000;
 
 /** Internal per-command state. Never exposed to the popup. */
 interface PlaybackCommand {
@@ -409,11 +424,18 @@ function ensureCommandHasWatchdog(
     command: PlaybackCommand
 ) {
     if (command.lifecycle !== "active") return;
+    // Existence only. Shortening or lengthening an already armed watchdog is the
+    // business of whoever changes the phase it bounds (requestReceiverFromPage),
+    // not of a "make sure something bounds this" helper.
     if (command.watchdogTimer !== undefined) return;
-    armWatchdog(device, command);
+    armWatchdog(device, command, "dispatch");
 }
 
-function armWatchdog(device: ReceiverDevice, command: PlaybackCommand) {
+function armWatchdog(
+    device: ReceiverDevice,
+    command: PlaybackCommand,
+    kind: WatchdogKind
+) {
     clearWatchdog(command);
     command.watchdogTimer = setTimeout(() => {
         command.watchdogTimer = undefined;
@@ -443,12 +465,25 @@ function armWatchdog(device: ReceiverDevice, command: PlaybackCommand) {
             terminate(device, command, "completed");
             return;
         }
-        // Page-owned command: the bare boolean protocol cannot report whether
-        // the receiver API was ever called, so no receiver verdict is possible.
+        // The owner never reached the receiver (page-owned without a
+        // page-reported dispatch boundary), so no receiver verdict is possible.
         terminate(device, command, "observation-unavailable");
-    }, PLAYBACK_COMMAND_DEADLINE_MS);
+    }, WATCHDOG_WINDOW_MS[kind]);
     command.watchdogTimer.unref?.();
 }
+
+/**
+ * Which question this watchdog bounds. Passed explicitly rather than derived
+ * from the command's phase: the caller knows which phase it is entering, and
+ * deriving it at arm time is exactly the kind of ordering assumption that
+ * silently gives the receiver leg the dispatch window.
+ */
+type WatchdogKind = "dispatch" | "receiver";
+
+const WATCHDOG_WINDOW_MS: Record<WatchdogKind, number> = {
+    dispatch: PAGE_ROUTE_DISPATCH_TIMEOUT_MS,
+    receiver: RECEIVER_CONFIRM_WINDOW_MS
+};
 
 /**
  * Runtime validation of the page sender's structured reply.
@@ -642,9 +677,10 @@ function requestReceiverFromPage(
     // before it wrote anything.
     command.receiverPhase = "requested";
     command.receiverDispatchStartedAt = dispatchStartedAt;
-    // Synchronous switch: the dispatch watchdog is replaced by the receiver
-    // one with no async gap, so an active command is never without a watchdog.
-    armWatchdog(device, command);
+    // The receiver phase now bounds itself by the confirmation window, and the
+    // swap happens synchronously so an active command is never left without a
+    // watchdog.
+    armWatchdog(device, command, "receiver");
 }
 
 /**
@@ -841,7 +877,7 @@ export async function dispatchPlaybackCommand(
     };
     commands.set(device.id, command);
     publish(device, command);
-    armWatchdog(device, command);
+    armWatchdog(device, command, "dispatch");
 
     // Page first: it owns the page and the receiver together, so the bridge
     // must not also be driven when the page sender accepts. Only a rejected
@@ -893,15 +929,12 @@ export async function dispatchPlaybackCommand(
             // arrived, the page DID run and claiming otherwise would hand the
             // command to a second owner.
             if (command.pageProgressObserved) {
-                logger.warn(
-                    "Page result missing or malformed after page progress",
-                    {
-                        deviceId: device.id,
-                        commandId: command.commandId,
-                        intent,
-                        rawResult: raw === undefined ? "undefined" : typeof raw
-                    }
-                );
+                logger.warn("Page result unusable after page progress", {
+                    deviceId: device.id,
+                    commandId: command.commandId,
+                    intent,
+                    rawResult: raw === undefined ? "undefined" : typeof raw
+                });
                 assignPlaybackOwner(command, "page-sender");
                 command.routeAttempts.page = "accepted";
                 ensureCommandHasWatchdog(device, command);
@@ -989,8 +1022,9 @@ export async function dispatchPlaybackCommand(
     command.receiverDispatchStartedAt = dispatchStartedAt;
     // The confirmation window starts at the real dispatch boundary, not at
     // command creation: a slow page-route attempt must not eat into the window
-    // the receiver observation needs.
-    armWatchdog(device, command);
+    // the receiver observation needs. This replaces the dispatch watchdog with
+    // the receiver one in the same synchronous step.
+    armWatchdog(device, command, "receiver");
     logger.info("Playback command handed to the bridge", {
         deviceId: device.id,
         commandId: command.commandId,
