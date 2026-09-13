@@ -711,8 +711,22 @@ async function main() {
                     options.siteWhitelist = list;
                     options.siteWhitelistEnabled = true;
                     await browser.storage.sync.set({ options });
-                    await new Promise(r => setTimeout(r, 1500));
-                    const registered = await browser.scripting.getRegisteredContentScripts();
+                    // Poll the registry: the extension re-registers from the
+                    // storage change, and a single read after a fixed wait made
+                    // this check flake (the only unrelated red in a case-2 run).
+                    let registered = [];
+                    const deadline = Date.now() + 15000;
+                    while (Date.now() < deadline) {
+                        registered = await browser.scripting.getRegisteredContentScripts();
+                        if (
+                            registered.some(script =>
+                                /whitelist-content/.test(script.id)
+                            )
+                        ) {
+                            break;
+                        }
+                        await new Promise(r => setTimeout(r, 250));
+                    }
                     done({
                         ok: true,
                         count: list.length,
@@ -2122,6 +2136,43 @@ async function main() {
                     (!mediaOnWire ||
                         m.message.data.loadGeneration ===
                             mediaOnWire.message.data.loadGeneration)
+            );
+            // C: the point of the hold. Without this, an implementation that
+            // receives the generation and still never applies the pending media
+            // would satisfy every other case-2 assertion.
+            await sleep(2500);
+            const afterReleaseOut = discoveryConnectionsNow.flatMap(conn =>
+                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
+            );
+            const applied = afterReleaseOut.find(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.status &&
+                    m.message.data.status.media &&
+                    markerOf(m.message.data.status.media) === HARNESS_MARKER &&
+                    (!generationAfterRelease ||
+                        m.at >= generationAfterRelease.at)
+            );
+            check(
+                "stage3-2 C: the pending media became visible only after its generation arrived",
+                Boolean(applied),
+                JSON.stringify({
+                    mediaStatusesAfterRelease: afterReleaseOut
+                        .filter(
+                            m =>
+                                m.subject ===
+                                "main:receiverDeviceMediaStatusUpdated"
+                        )
+                        .map(m => ({
+                            at: m.at,
+                            marker: markerOf(m.message.data.status.media),
+                            state: m.message.data.status.playerState,
+                            provenance: m.message.data.provenance.source
+                        }))
+                        .slice(-4),
+                    generationAt: generationAfterRelease && generationAfterRelease.at
+                })
             );
             check(
                 "stage3-2 D: the released generation arrived, after the media",
