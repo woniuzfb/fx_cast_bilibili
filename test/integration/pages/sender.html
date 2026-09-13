@@ -52,6 +52,7 @@
                 selectedDeviceId: undefined,
                 sessionId: undefined,
                 resources: [],
+                contentInitialRan: undefined,
                 errors: []
             };
             const result = window.__HARNESS_RESULT__;
@@ -91,6 +92,22 @@
 
             /** Resource timing is diagnostic evidence, never a pass criterion:
              *  a cross-scheme redirect may not be observable here at all. */
+            /** Evidence for the contentInitial bisect: did the content script
+             *  run at all, separately from whether its src rewrite took effect?
+             *  The mark is only ever set by an instrumented test build. */
+            window.__HARNESS_CONTENT_INITIAL_MARK__ = function () {
+                return {
+                    wrappedJSObject:
+                        Boolean(window.__FX_CAST_CONTENT_INITIAL_RAN__),
+                    head: document.documentElement.getAttribute(
+                        "data-fx-harness-ci-head"
+                    ),
+                    tail: document.documentElement.getAttribute(
+                        "data-fx-harness-ci-tail"
+                    )
+                };
+            };
+
             window.__HARNESS_COLLECT_RESOURCES__ = function () {
                 result.resources = performance
                     .getEntriesByType("resource")
@@ -101,6 +118,13 @@
                             name.includes("/cast/content")
                     );
                 return result.resources;
+            };
+
+            window.__HARNESS_SNAPSHOT__ = function () {
+                result.contentInitialRan = window.__HARNESS_CONTENT_INITIAL_MARK__();
+                result.effectiveSrc = script.src;
+                window.__HARNESS_COLLECT_RESOURCES__();
+                return result;
             };
 
             window.__HARNESS_WAIT_FOR_SDK__ = function (timeoutMs) {

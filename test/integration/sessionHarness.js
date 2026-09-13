@@ -114,12 +114,15 @@ function parseArgs(argv) {
     const args = {
         keepProfile: false,
         extensionDir: path.join(repoRoot, "dist/extension"),
-        phaseAOnly: false
+        phaseAOnly: false,
+        instrument: false
     };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--keep-profile") args.keepProfile = true;
         else if (argv[i] === "--phase-a-only") args.phaseAOnly = true;
         else if (argv[i] === "--extension-dir") args.extensionDir = argv[++i];
+        else if (argv[i] === "--instrument-content-initial")
+            args.instrument = true;
         else throw new Error(`sessionHarness: unknown argument ${argv[i]}`);
     }
     return args;
@@ -359,7 +362,38 @@ async function main() {
     const { server, origin } = await startSenderServer();
     console.log("sender origin:", origin);
 
-    const profileDir = makeProfile(harnessDir, args.extensionDir);
+    // 判定2: a test-only build that marks contentInitial's own execution. It is
+    // made in the harness directory, never in dist/, and the mark is not part of
+    // any production behaviour.
+    let extensionDir = args.extensionDir;
+    if (args.instrument) {
+        extensionDir = path.join(harnessDir, "extension-instrumented");
+        fs.cpSync(args.extensionDir, extensionDir, { recursive: true });
+        const target = path.join(extensionDir, "cast/contentInitial.js");
+        // HEAD and TAIL markers, because "never injected" and "injected and
+        // threw" look identical from the page if the only marker sits at the
+        // end of the file (the first attempt made exactly that mistake):
+        //   head only        -> the script ran and threw before finishing
+        //   head and tail    -> the script completed, so the patch itself is
+        //                       what failed to affect the page
+        //   neither          -> the script was not injected at all
+        const original = fs.readFileSync(target, "utf8");
+        const marker = name =>
+            `try { document.documentElement.setAttribute(${JSON.stringify(
+                name
+            )}, "1"); } catch (e) {}\n`;
+        fs.writeFileSync(
+            target,
+            "// HARNESS ONLY instrumentation\n" +
+                'console.log("[harness] contentInitial.js entered");\n' +
+                marker("data-fx-harness-ci-head") +
+                original +
+                "\n" +
+                marker("data-fx-harness-ci-tail")
+        );
+        console.log("instrumented contentInitial:", target);
+    }
+    const profileDir = makeProfile(harnessDir, extensionDir);
     const firefoxPath = [
         "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
         "/Applications/Firefox.app/Contents/MacOS/firefox"
@@ -415,7 +449,15 @@ async function main() {
                     // content script before re-registering, so one invalid
                     // pattern leaves it with NO content script at all - which is
                     // exactly what made arm A fail while arm B worked.
-                    const candidates = ["http://127.0.0.1/*", "http://localhost/*"];
+                    // 判定1: a WIDE pattern, in the integration profile only.
+                    // If arm A starts working with it while the narrow portless
+                    // pattern did not, the problem is host-pattern coverage for
+                    // a non-default port, not contentInitial or its setter.
+                    const candidates = [
+                        "http://127.0.0.1/*",
+                        "http://localhost/*",
+                        "http://*/*"
+                    ];
                     for (const pattern of candidates) {
                         if (!list.some(entry => entry.pattern === pattern)) {
                             list.push({ pattern, isEnabled: true });
@@ -605,6 +647,22 @@ async function main() {
                  );`
             );
         const sdk = await waitForSdk(20000);
+        // The evidence that separates the two remaining suspects, printed
+        // whether or not the arm passes.
+        const armASnapshot = await driver.executeScript(
+            "return window.__HARNESS_SNAPSHOT__();"
+        );
+        console.log(
+            "arm A evidence:",
+            JSON.stringify({
+                contentInitialRan: armASnapshot.contentInitialRan,
+                assignedSrc: armASnapshot.assignedSrc,
+                effectiveSrc: armASnapshot.effectiveSrc,
+                scriptLoaded: armASnapshot.sdkScriptLoaded,
+                resources: armASnapshot.resources,
+                errors: armASnapshot.errors
+            })
+        );
         check(
             "arm A: the page got chrome.cast through the production chain",
             sdk === true,
