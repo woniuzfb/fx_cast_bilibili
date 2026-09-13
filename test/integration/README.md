@@ -66,6 +66,37 @@ Roku on the LAN being found instead does not count: the harness must control the
 device it asserts about. Devices discovered are printed, so the difference is
 visible.
 
+## The two Stage 2 gates
+
+```sh
+node test/integration/sessionHarness.js                    # fast (default), ~45s
+node test/integration/sessionHarness.js --startup-synthesis # slow, ~2min
+```
+
+**Fast (default).** The fake device starts idle, the page LOADs HLS DVR media, and
+the harness then advances the device to `buffer` so the post-launch ECP evidence
+releases the deferred-consume gate within a poll - no 60s fallback wait. It
+asserts: the SDK chain and session creation (Stage 1 gate), the LOAD reaching the
+session host, `main:rokuSessionMedia`, the extension relaying both
+`bridge:rokuSetLoadGeneration` and `bridge:rokuSetSessionMedia` to a discovery
+connection with agreeing device/generation/owner/media, the page's `loadMedia`
+settling, and a post-LOAD raw `ecp-poll` observation. Measured: 38/38 in ~45s.
+
+**`--startup-synthesis`.** The device stays pinned at IDLE, so only
+`DEFERRED_CONSUME_FALLBACK_MS` (60s) can release the gate; this mode asserts the
+startup synthesis itself (`startup-synthetic` BUFFERING carrying the session
+metadata) together with the raw `ecp-poll` IDLE observation. Run it when touching
+the synthesis, deferred consume, session-metadata composition or observation
+isolation - not on every iteration.
+
+**Two hard gates, because a click can take a path that creates the session without
+creating a load generation.** Gate A asserts the click-time selector state
+(`hasSelectorContext`, `selectionRequiresRefresh`, `mediaType`, target device) from
+the popup's own debug channel; Gate B asserts that `beginRokuMediaLoad` created a
+generation for the device. If either fails, the harness reports that the click used
+the generic path and skips the Stage 2 assertions - otherwise a missing generation
+looks exactly like a relay failure, which is how it was mis-read twice.
+
 ## Status
 
 Validated end to end (real processes, real sockets):
