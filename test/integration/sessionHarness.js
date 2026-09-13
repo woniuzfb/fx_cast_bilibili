@@ -1194,11 +1194,33 @@ async function main() {
         console.log("fake roku pinned to idle for the LOAD");
 
         await driver.switchTo().window(senderTab);
-        const loaded = await driver.executeAsyncScript(
-            `const done = arguments[arguments.length - 1];
-             window.__HARNESS_LOAD__().then(() => done(true), err => done(String(err)));`
+        // A LOAD whose callbacks never settle is itself a finding, not a reason
+        // to abort the run: the relay hops below are read from the traces either
+        // way, so a timeout here is reported and the evidence is still collected.
+        let loaded;
+        try {
+            loaded = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 const timer = setTimeout(() => done("timeout: no load callback"), 20000);
+                 window.__HARNESS_LOAD__().then(
+                    () => { clearTimeout(timer); done(true); },
+                    err => { clearTimeout(timer); done(String(err)); }
+                 );`
+            );
+        } catch (err) {
+            loaded = `webdriver: ${err.message}`;
+        }
+        check(
+            "the page loaded HLS DVR media into the session",
+            loaded === true,
+            String(loaded)
         );
-        check("the page loaded HLS DVR media into the session", loaded === true, String(loaded));
+        if (loaded !== true) {
+            const pageState = await driver.executeScript(
+                "return window.__HARNESS_RESULT__;"
+            );
+            console.log("load did not settle; page state:", JSON.stringify(pageState));
+        }
         await sleep(6000);
 
         const readConn = pid => ({
