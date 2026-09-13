@@ -597,7 +597,7 @@ async function main() {
                     "deviceId, loadGeneration"
                 )
         );
-        if (args.generationAdvance) {
+        {
             // A ONE-TIME storage.onChanged listener, installed on the first bridge
             // message and guarded by a flag. The previous version polled
             // storage.local on EVERY bridge message, which (a) does async work for
@@ -628,7 +628,18 @@ async function main() {
                     " try { self.bridgePort.postMessage({ subject: 'bridge:rokuSetSessionMedia', data: { deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, ownerId: rep.ownerId, media: rep.media } });" +
                     " void browser.storage.local.set({ __fxHarnessMediaPosted: { runId: runId, requestId: rep.requestId, deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, marker: rep.media && rep.media.customData && rep.media.customData.harnessMarker, at: Date.now() } }); }" +
                     " catch (e) { void browser.storage.local.set({ __fxHarnessMediaPostFailed: { runId: runId, requestId: rep.requestId, loadGeneration: rep.loadGeneration, error: String(e) } }); } }" +
-                    " }).catch(() => {}); }); } catch (e) {} }";
+                    " }).catch(() => {}); }); } catch (e) {} }" +
+                    // Harness-triggered probe: the harness sends this AFTER it has
+                    // written the run id, so the ack cannot be attributed to an
+                    // early lifecycle event, and the ack carries the run id and
+                    // probe id straight from the message. It proves, in this run,
+                    // that the background executed and could write storage - the
+                    // piece the popup-side control cannot prove.
+                    "\nif (!this.__fxHarnessProbeInstalled) { this.__fxHarnessProbeInstalled = true;" +
+                    " try { browser.runtime.onMessage.addListener((msg) => {" +
+                    " if (!msg || msg.subject !== 'harness:backgroundStorageProbe') return;" +
+                    " void browser.storage.local.set({ __fxHarnessBackgroundStorageControl: { runId: msg.data && msg.data.runId, probeId: msg.data && msg.data.probeId, at: Date.now() } }).catch(() => {});" +
+                    " }); } catch (e) {} }";
                 return code;
             });
         }
@@ -1175,7 +1186,7 @@ async function main() {
                 try {
                     await browser.storage.local.remove(${JSON.stringify(
                         diagnosticKeys
-                    ).replace('"]', '", "__fxHarnessHeldGeneration", "__fxHarnessReleaseHeldGeneration", "__fxHarnessGenerationReleased", "__fxHarnessReleaseFailed"]')});
+                    ).replace('"]', '", "__fxHarnessHeldGeneration", "__fxHarnessReleaseHeldGeneration", "__fxHarnessGenerationReleased", "__fxHarnessReleaseFailed", "__fxHarnessBackgroundStorageControl"]')});
                     await browser.storage.local.set({
                         __fxHarnessDiagnosticRunId: ${JSON.stringify(
                             diagnosticRunId
@@ -1192,6 +1203,53 @@ async function main() {
             prepared === true,
             String(prepared)
         );
+        // Prove the background's own storage write path for THIS run before any
+        // negative reading is allowed anywhere else.
+        const backgroundProbeId = `bg-probe-${Date.now()}-${process.pid}`;
+        await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             browser.runtime
+                .sendMessage({
+                    subject: "harness:backgroundStorageProbe",
+                    data: {
+                        runId: ${JSON.stringify(diagnosticRunId)},
+                        probeId: ${JSON.stringify(backgroundProbeId)}
+                    }
+                })
+                .then(() => done(true), err => done(String(err)));`
+        );
+        let backgroundControl;
+        const probeDeadline = Date.now() + 15000;
+        while (Date.now() < probeDeadline) {
+            backgroundControl = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local
+                    .get("__fxHarnessBackgroundStorageControl")
+                    .then(v => done(v.__fxHarnessBackgroundStorageControl || null), err => done(null));`
+            );
+            if (
+                backgroundControl &&
+                backgroundControl.runId === diagnosticRunId &&
+                backgroundControl.probeId === backgroundProbeId
+            )
+                break;
+            backgroundControl = undefined;
+            await sleep(250);
+        }
+        check(
+            "Background storage control: this run's probe was answered by the background",
+            Boolean(
+                backgroundControl &&
+                    backgroundControl.runId === diagnosticRunId &&
+                    backgroundControl.probeId === backgroundProbeId
+            ),
+            JSON.stringify({
+                got: backgroundControl || null,
+                expectedRunId: diagnosticRunId,
+                expectedProbeId: backgroundProbeId
+            })
+        );
+
         await driver.switchTo().window(senderTab);
 
         const marksBeforeSession = markCount();
