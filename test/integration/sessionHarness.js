@@ -913,6 +913,16 @@ async function main() {
             pageResult && pageResult.requestSessionSucceeded === true,
             JSON.stringify(pageResult)
         );
+        check(
+            "the page has a non-empty session id",
+            Boolean(pageResult && pageResult.sessionId),
+            JSON.stringify(pageResult && pageResult.sessionId)
+        );
+        check(
+            "the clicked selector row was the fake device",
+            Boolean(clicked && clicked.ok && /Harness Roku/.test(clicked.text || "")),
+            JSON.stringify(clicked && clicked.text)
+        );
 
         await sleep(4000);
 

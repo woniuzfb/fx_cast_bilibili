@@ -49,7 +49,7 @@
                 initialized: false,
                 requestSessionCalled: false,
                 requestSessionSucceeded: false,
-                selectedDeviceId: undefined,
+                selectedReceiverLabel: undefined,
                 sessionId: undefined,
                 resources: [],
                 contentInitialRan: undefined,
@@ -196,7 +196,12 @@
                             session => {
                                 result.requestSessionSucceeded = true;
                                 result.sessionId = session.sessionId;
-                                result.selectedDeviceId = session.receiver
+                                // `receiver.label` is the FRIENDLY NAME, not the
+                                // deviceId: naming it selectedDeviceId invited
+                                // reading a friendly-name mismatch as a failed
+                                // selection. The authoritative device id comes
+                                // from the native trace.
+                                result.selectedReceiverLabel = session.receiver
                                     ? session.receiver.label
                                     : undefined;
                                 status("session: " + session.sessionId);
