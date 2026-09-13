@@ -1244,7 +1244,31 @@ async function main() {
             );
             console.log("load did not settle; page state:", JSON.stringify(pageState));
         }
-        await sleep(6000);
+        // HLS DVR LOADs deliberately do not publish session media at launch:
+        // handleLoad() takes the deferred-consume path (deferUntilFreshPlayer)
+        // and registers/publishes only when a consume signal arrives OR the
+        // 60s fallback fires (DEFERRED_CONSUME_FALLBACK_MS). This device is
+        // pinned at IDLE and never requests the relay, so neither of the two
+        // evidence paths can fire - the fallback is what must release it.
+        const readConnPre = pid => ({
+            outbound: readNdjson(path.join(harnessDir, `conn-${pid}-out.ndjson`))
+        });
+        await sleep(25000);
+        const midSession = session ? readConnPre(session.pid) : { outbound: [] };
+        check(
+            "before the fallback: no session media was published",
+            !midSession.outbound.some(
+                m =>
+                    m.subject === "main:rokuSessionMedia" &&
+                    afterLoad(m) &&
+                    markerOf(m.message.data.media) === HARNESS_MARKER
+            ),
+            JSON.stringify(midSession.outbound.map(m => m.subject).slice(0, 8))
+        );
+        console.log(
+            "waiting out the 60s deferred-consume fallback (no consume signal: device pinned at IDLE)"
+        );
+        await sleep(60000);
 
         const readConn = pid => ({
             inbound: readNdjson(path.join(harnessDir, `conn-${pid}-in.ndjson`)),
@@ -1374,6 +1398,30 @@ async function main() {
             })
         );
 
+        if (session) {
+            const debugEvents = readNdjson(
+                path.join(harnessDir, `conn-${session.pid}-out.ndjson`)
+            )
+                .filter(
+                    m =>
+                        m.subject === "main:rokuSessionMediaDebug" && afterLoad(m)
+                )
+                .map(m => m.message.data);
+            console.log(
+                "session media debug events:",
+                JSON.stringify(debugEvents.slice(-4))
+            );
+            check(
+                "the publication came from the deferred-consume fallback",
+                debugEvents.some(
+                    event =>
+                        JSON.stringify(event).includes("sessionMediaRegistered") &&
+                        JSON.stringify(event).includes("true")
+                ),
+                JSON.stringify(debugEvents.slice(-4))
+            );
+        }
+
         // Hop 2: the extension relayed the generation and the media to discovery.
         const relayedGeneration = discoveryConn.inbound.find(
             m =>
@@ -1473,6 +1521,18 @@ async function main() {
                         observationProvenance.pollCompletedAt
             ),
             JSON.stringify(observation && observation.message.data)
+        );
+        const latePageState = await driver.executeScript(
+            "return window.__HARNESS_RESULT__;"
+        );
+        check(
+            "the page's loadMedia settled once the media was published",
+            Boolean(latePageState && latePageState.loadSucceeded),
+            JSON.stringify({
+                loadCalled: latePageState && latePageState.loadCalled,
+                loadSucceeded: latePageState && latePageState.loadSucceeded,
+                loadError: latePageState && latePageState.loadError
+            })
         );
         console.log(
             "stage 2 round 1 observed:",
