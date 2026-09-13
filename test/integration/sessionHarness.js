@@ -500,6 +500,43 @@ async function main() {
             `${key}: { runId: r && r.__fxHarnessDiagnosticRunId, ${fields}, at: Date.now() } })).catch(() => {}); } catch (e) {}`;
         patch(
             "background/background.js",
+            "this.bridgePort = await bridge_default.connect();",
+            () =>
+                "\ntry { this.__fxHarnessBridgeGeneration = (this.__fxHarnessBridgeGeneration || 0) + 1; } catch (e) {}" +
+                storageMarker(
+                    "__fxHarnessBridgeConnected",
+                    "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null"
+                )
+        );
+        patch(
+            "background/background.js",
+            "onBridgeDisconnect = () => {",
+            () =>
+                storageMarker(
+                    "__fxHarnessBridgeDisconnected",
+                    "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null, bridgePortStillSet: Boolean(this.bridgePort), portError: this.bridgePort && this.bridgePort.error ? String(this.bridgePort.error.message || this.bridgePort.error) : null"
+                )
+        );
+        patch(
+            "background/background.js",
+            "async refresh() {",
+            () =>
+                storageMarker(
+                    "__fxHarnessBridgeRefresh",
+                    "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null"
+                )
+        );
+        patch(
+            "background/background.js",
+            "replayRokuLoadGenerations() {",
+            () =>
+                storageMarker(
+                    "__fxHarnessBridgeReplay",
+                    "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null, identityCount: currentRokuMediaIdentities().length"
+                )
+        );
+        patch(
+            "background/background.js",
             "setRokuSessionMedia(deviceId, ownerId, media) {",
             () =>
                 storageMarker(
@@ -1776,7 +1813,11 @@ async function main() {
                     "__fxHarnessDiagnosticRunId",
                     "__fxHarnessBgControl",
                     "__fxHarnessSyncMediaEnter",
-                    "__fxHarnessSyncMediaIdentity"
+                    "__fxHarnessSyncMediaIdentity",
+                    "__fxHarnessBridgeConnected",
+                    "__fxHarnessBridgeDisconnected",
+                    "__fxHarnessBridgeRefresh",
+                    "__fxHarnessBridgeReplay"
                 ])})
                 .then(v => done(v), err => done({ error: String(err) }));
              `
