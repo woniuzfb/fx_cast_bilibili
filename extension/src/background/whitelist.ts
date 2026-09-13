@@ -1,5 +1,6 @@
 import logger from "../lib/logger";
 import options from "../lib/options";
+import defaultOptions from "../defaultOptions";
 
 import { cacheUaInfo, getChromeUserAgentString } from "../lib/userAgents";
 import { RemoteMatchPattern } from "../lib/matchPattern";
@@ -23,6 +24,53 @@ export interface WhitelistItemData {
     isEnabled: boolean;
     isUserAgentDisabled?: boolean;
     customUserAgent?: string;
+}
+
+/**
+ * Dynamic content script ids used for atomic replacement.
+ *
+ * Registration is a replacement, but ids are unique, so the new configuration
+ * is registered under the spare id first and the previous one is removed only
+ * after that succeeded. Registering under one fixed id would require removing
+ * the live script first, and a failed register would then leave NO content
+ * script at all.
+ */
+const WHITELIST_SCRIPT_IDS = ["whitelist-content-a", "whitelist-content-b"];
+/** Id older versions used; removed once a replacement is in place. */
+const LEGACY_WHITELIST_SCRIPT_ID = "whitelist-content";
+/**
+ * What is registered when the user's patterns are all rejected. A configuration
+ * mistake must not disable the extension's own defaults.
+ */
+const FALLBACK_WHITELIST_PATTERNS = defaultOptions.siteWhitelist.map(
+    item => item.pattern
+);
+
+/**
+ * Splits configured patterns into the ones this browser accepts and the ones it
+ * does not, WITHOUT registering anything.
+ *
+ * The validation has to happen before the live registration is touched, and
+ * per pattern: one bad entry must cost only that entry. `RemoteMatchPattern` is
+ * the same parser the request-time matching uses, so a pattern accepted here is
+ * one the rest of the file can use.
+ */
+export function partitionWhitelistPatterns(patterns: string[]): {
+    valid: string[];
+    rejected: string[];
+} {
+    const valid: string[] = [];
+    const rejected: string[] = [];
+    for (const pattern of patterns) {
+        if (valid.includes(pattern)) continue;
+        try {
+            new RemoteMatchPattern(pattern);
+            valid.push(pattern);
+        } catch {
+            rejected.push(pattern);
+        }
+    }
+    return { valid, rejected };
 }
 
 let matchPatterns: RemoteMatchPattern[] = [];
@@ -69,8 +117,12 @@ export async function initWhitelist() {
             ev.detail.includes("siteWhitelist") ||
             ev.detail.includes("siteWhitelistEnabled")
         ) {
-            unregisterSiteWhitelist();
-            registerSiteWhitelist();
+            // No unregister first: the registration replaces itself
+            // atomically, and removing the live script up front is what turned
+            // one invalid pattern into "no content script at all".
+            void registerSiteWhitelist().catch(err =>
+                logger.error("Failed to register the site whitelist", err)
+            );
         }
     });
 }
@@ -207,10 +259,19 @@ async function registerSiteWhitelist() {
     siteWhitelist = opts.siteWhitelist;
     siteWhitelistEnabled = opts.siteWhitelistEnabled;
 
-    // Parse match patterns once
-    matchPatterns = siteWhitelist.map(
-        item => new RemoteMatchPattern(item.pattern)
+    // Validate BEFORE anything is registered or removed. Parsing used to throw
+    // here, and the change listener had already removed the live registration,
+    // so one bad pattern left every site - including the defaults - without
+    // contentInitial.
+    const { valid, rejected } = partitionWhitelistPatterns(
+        siteWhitelist.map(item => item.pattern)
     );
+    for (const pattern of rejected) {
+        // Name the offender: the browser's own error only says "Invalid match
+        // pattern", which tells the user nothing about WHICH entry is wrong.
+        logger.warn("Rejected invalid whitelist match pattern", { pattern });
+    }
+    matchPatterns = valid.map(pattern => new RemoteMatchPattern(pattern));
 
     browser.webRequest.onBeforeRequest.addListener(
         onBeforeCastSDKRequest,
@@ -218,8 +279,14 @@ async function registerSiteWhitelist() {
         ["blocking"]
     );
 
-    // Skip whitelist request listeners if disabled or empty
+    // Skip whitelist request listeners if disabled or empty. The formerly
+    // registered script is removed as well: with the redirect disabled, a
+    // leftover contentInitial would rewrite the SDK URL to the eureka loader
+    // and the page would then be served Google's loader instead of the
+    // extension's - i.e. the stale registration breaks the sites it used to
+    // help.
     if (!siteWhitelistEnabled || !siteWhitelist.length) {
+        await removeWhitelistContentScripts();
         return;
     }
 
@@ -242,37 +309,59 @@ async function registerSiteWhitelist() {
         ["blocking", "requestHeaders"]
     );
 
-    try {
-        await browser.scripting.unregisterContentScripts({
-            ids: ["whitelist-content"]
-        });
-    } catch {
-        /* not registered yet */
+    // A configuration mistake must not disable the extension's own defaults.
+    const matches = valid.length ? valid : FALLBACK_WHITELIST_PATTERNS;
+    if (!valid.length) {
+        logger.warn(
+            "Every whitelist pattern was rejected; registering the defaults",
+            { patterns: siteWhitelist.map(item => item.pattern) }
+        );
     }
+
+    const registeredIds = new Set(
+        (await browser.scripting.getRegisteredContentScripts()).map(
+            script => script.id
+        )
+    );
+    const nextId =
+        WHITELIST_SCRIPT_IDS.find(id => !registeredIds.has(id)) ??
+        WHITELIST_SCRIPT_IDS[0];
+    const staleIds = [
+        LEGACY_WHITELIST_SCRIPT_ID,
+        ...WHITELIST_SCRIPT_IDS
+    ].filter(id => id !== nextId && registeredIds.has(id));
+
+    // Register first, remove afterwards: at every instant at least one
+    // configuration is live, and a failure here leaves the previous one in
+    // place instead of leaving nothing.
     await browser.scripting.registerContentScripts([
         {
-            id: "whitelist-content",
-            matches: siteWhitelist.map(item => item.pattern),
+            id: nextId,
+            matches,
             js: ["cast/contentInitial.js"],
             runAt: "document_start",
             allFrames: true
         }
     ]);
+
+    if (staleIds.length) {
+        try {
+            await browser.scripting.unregisterContentScripts({
+                ids: staleIds
+            });
+        } catch (err) {
+            logger.error("Failed to remove the previous whitelist script", err);
+        }
+    }
 }
 
-async function unregisterSiteWhitelist() {
-    browser.webRequest.onBeforeSendHeaders.removeListener(
-        onWhitelistedBeforeSendHeaders
-    );
-    browser.webRequest.onBeforeSendHeaders.removeListener(
-        onWhitelistedChildBeforeSendHeaders
-    );
-    browser.webRequest.onBeforeRequest.removeListener(onBeforeCastSDKRequest);
+/** Removes every id this module has ever registered. */
+async function removeWhitelistContentScripts() {
     try {
         await browser.scripting.unregisterContentScripts({
-            ids: ["whitelist-content"]
+            ids: [LEGACY_WHITELIST_SCRIPT_ID, ...WHITELIST_SCRIPT_IDS]
         });
     } catch {
-        /* not registered yet */
+        /* none of them registered */
     }
 }
