@@ -769,6 +769,14 @@ export default class RokuSession {
             this.playerState =
                 intent === "PLAY" ? PlayerState.PLAYING : PlayerState.PAUSED;
             this.sendMediaStatus(requestId);
+            // The transport has landed on the device. The dense observation
+            // window belongs to the discovery process (which owns the polling
+            // loop and emits every observation), and this session runs in a
+            // different one, so the request goes through the extension.
+            this.messaging.sendMessage({
+                subject: "main:rokuSessionPlaybackTransport",
+                data: { deviceId: this.receiverDevice.id }
+            });
         } catch (err) {
             console.error("[fx_cast_bilibili] Roku keypress failed", {
                 host: this.receiverDevice.host,

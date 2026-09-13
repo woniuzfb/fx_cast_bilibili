@@ -46,7 +46,6 @@ import type {
 const NS_MEDIA = "urn:x-cast:com.google.cast.media";
 
 const POLL_INTERVAL_MS = 3000;
-const POLL_BUSY_TIMEOUT_MS = 3500;
 
 const SUPPORTED_MEDIA_COMMANDS = 1 | 2 | 4 | 8; // PAUSE|SEEK|VOLUME|MUTE
 
@@ -170,7 +169,24 @@ interface RokuPlaybackState {
 
 export default class RokuRemote {
     private pollTimer?: NodeJS.Timeout;
-    private pollBusy = false;
+    /**
+     * The in-flight poll sample, if any. Single-flight: a periodic tick, a
+     * one-shot nudge and a command-triggered confirmation poll all share this
+     * one promise instead of overlapping (two overlapping samples could
+     * complete out of order and let an older one win).
+     */
+    private pollInFlight?: Promise<void>;
+    /**
+     * Which confirmation sequence currently owns the dense sampling.
+     *
+     * This is a BRIDGE-local playback-transport generation, not the extension's
+     * command lifecycle: the bridge has no commandId (the device route is a
+     * fire-and-forget control message), so it cannot know when the extension
+     * considers a command confirmed, superseded or stopped. Every new
+     * play/pause transport and every disconnect bumps this, which is enough to
+     * stop a stale sequence from consuming ECP samples.
+     */
+    private playbackPollToken = 0;
     private destroyed = false;
 
     private lastState: RokuPlaybackState = { state: "idle" };
@@ -200,7 +216,7 @@ export default class RokuRemote {
         private options: RokuRemoteOptions = {}
     ) {
         this.pollTimer = setInterval(() => {
-            void this.pollOnce();
+            void this.poll();
         }, POLL_INTERVAL_MS);
         // Push Roku session media metadata as soon as the emulated session
         // registers it. This avoids a race with the popup opening before the
@@ -239,11 +255,13 @@ export default class RokuRemote {
             }
         );
         // First update right away so the popup has data on open.
-        void this.pollOnce();
+        void this.poll();
     }
 
     disconnect() {
         this.destroyed = true;
+        // Cancels any in-flight confirmation sequence.
+        this.playbackPollToken++;
         this.detachSessionMediaObserver?.();
         this.detachSessionMediaObserver = undefined;
         if (this.pollTimer) clearInterval(this.pollTimer);
@@ -252,7 +270,45 @@ export default class RokuRemote {
 
     /** Nudges an immediate refresh (used before casting starts). */
     ensureConnected() {
-        void this.pollOnce();
+        void this.poll();
+    }
+
+    /**
+     * Starts a short, dense sampling window for a play/pause transport that was
+     * just submitted to this device - the extension asks for it after either
+     * route completed (the bridge-side keypress, or a page-owned Cast call whose
+     * session response the extension sees).
+     *
+     * Called AFTER the transport completes on purpose: the extension's
+     * receiverDispatchStartedAt marks when it began submitting, not when the
+     * device acted, so sampling before the keypress lands could read a
+     * pre-command state whose pollStartedAt still passes the strict gate.
+     *
+     * The samples it produces are ordinary observations: they still have to pass
+     * the extension's ecp-poll whitelist and the strict poll-start gate.
+     */
+    requestPlaybackConfirmationPoll() {
+        const token = ++this.playbackPollToken;
+        void this.runPlaybackConfirmationPolls(token);
+    }
+
+    /** Dense window: immediately, then the gaps between successive samples. */
+    private static readonly FAST_POLL_DELAYS_MS = [0, 150, 350, 750, 1500];
+
+    private async runPlaybackConfirmationPolls(token: number) {
+        for (const delay of RokuRemote.FAST_POLL_DELAYS_MS) {
+            if (this.destroyed || token !== this.playbackPollToken) return;
+            if (delay > 0) {
+                await new Promise<void>(resolve => setTimeout(resolve, delay));
+            }
+            if (this.destroyed || token !== this.playbackPollToken) return;
+            // Reusing an in-flight sample does NOT mean this command has been
+            // observed: it may have started before the transport landed. The
+            // loop therefore always continues to the next round rather than
+            // treating a resolved await as confirmation.
+            await this.poll();
+            if (this.destroyed || token !== this.playbackPollToken) return;
+        }
     }
 
     get host() {
@@ -409,6 +465,9 @@ export default class RokuRemote {
         // deliberately kept mechanical and unchanged.
         const key = intent === "PLAY" ? "Play" : "Pause";
 
+        // A new play/pause transport also cancels any dense window the previous
+        // one opened (latest wins at the bridge's own granularity).
+        this.playbackPollToken++;
         void keypress(this.host, key)
             .then(() => {
                 this.lastState = {
@@ -416,6 +475,10 @@ export default class RokuRemote {
                     state: intent === "PLAY" ? "play" : "pausing"
                 };
                 this.emitMediaStatus({ source: "command-echo" });
+                // The transport has landed: this is the moment from which a
+                // sample can observe the command's effect. Started only on
+                // success, so a failed keypress does not consume ECP samples.
+                this.requestPlaybackConfirmationPoll();
             })
             .catch(err =>
                 console.warn("[fx_cast_bilibili] Roku keypress failed", {
@@ -501,14 +564,43 @@ export default class RokuRemote {
     // Polling + status synthesis
     // ------------------------------------------------------------------
 
-    private async pollOnce() {
-        if (this.pollBusy || this.destroyed) return;
-        this.pollBusy = true;
+    /**
+     * Single-flight entry point for every poll request: the interval tick, the
+     * pre-cast nudge and the confirmation window all come through here, so at
+     * most one sample is ever in flight. A second request while a sample is
+     * running simply joins it.
+     */
+    private poll(): Promise<void> {
+        if (this.pollInFlight) return this.pollInFlight;
 
-        // Guard against an ECP request hanging past the next tick.
-        const timeout = setTimeout(() => {
-            this.pollBusy = false;
-        }, POLL_BUSY_TIMEOUT_MS);
+        const tracked = this.pollSample()
+            .catch(err => {
+                // A sample must never reject into the void: it is fired from a
+                // timer, a nudge and a confirmation loop, none of which await
+                // it in a position to handle a failure.
+                console.warn(
+                    "[fx_cast_bilibili] Roku poll sample failed",
+                    err instanceof Error ? err.message : String(err)
+                );
+            })
+            .finally(() => {
+                // Identity check: a sample must never clear a promise that a later
+                // request has already installed.
+                if (this.pollInFlight === tracked)
+                    this.pollInFlight = undefined;
+            });
+        this.pollInFlight = tracked;
+        return tracked;
+    }
+
+    /**
+     * One complete sample: both ECP reads, the cache update and the emissions.
+     * Nothing may be split out of this function, or a periodic tick and a
+     * confirmation poll could interleave between the media-player read and the
+     * active-app read and leave the cache holding a mix of two sample moments.
+     */
+    private async pollSample(): Promise<void> {
+        if (this.destroyed) return;
 
         const pollStartedAt = Date.now();
         try {
@@ -585,9 +677,6 @@ export default class RokuRemote {
         } catch {
             // Leave lastState as-is; deviceBrowser health-checks decide when
             // the device is gone.
-        } finally {
-            clearTimeout(timeout);
-            this.pollBusy = false;
         }
     }
 

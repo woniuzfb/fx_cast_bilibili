@@ -992,6 +992,17 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             break;
         }
 
+        case "main:rokuSessionPlaybackTransport": {
+            // A page-owned command drove the receiver through the session's
+            // Cast media, in the session's own bridge process. Relay the request
+            // for a dense observation window to the discovery process, so both
+            // routes confirm with the same latency. No command id is involved:
+            // the samples are ordinary observations and still have to pass the
+            // ecp-poll whitelist and the strict poll-start gate.
+            deviceManager.requestRokuConfirmationPoll(message.data.deviceId);
+            break;
+        }
+
         case "main:rokuSessionMediaDebug": {
             // RokuSession sends over the SESSION bridge connection, so this
             // message arrives here in castManager — not on the deviceManager

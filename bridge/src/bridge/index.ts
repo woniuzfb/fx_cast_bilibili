@@ -281,6 +281,12 @@ export function run(messaging: Messenger) {
                 break;
             }
 
+            case "bridge:rokuRequestConfirmationPoll": {
+                const { deviceId } = message.data;
+                rokuRemotes.get(deviceId)?.requestPlaybackConfirmationPoll();
+                break;
+            }
+
             case "bridge:sendReceiverMessage": {
                 const { deviceId, message: receiverMessage } = message.data;
 

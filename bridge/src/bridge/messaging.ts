@@ -116,6 +116,35 @@ type MessageDefinitions = {
      * Sent to the bridge when non-session related receiver messages
      * need to be sent (e.g. volume control, application stop, etc...).
      */
+    /**
+     * A play/pause transport completed inside a cast SESSION process.
+     *
+     * The session lives in its own connectNative process and has no access to
+     * the discovery process's remotes, so it cannot start the dense sampling
+     * itself. It reports the transport instead and the extension relays
+     * main:rokuRequestConfirmationPoll to the right process.
+     */
+    "main:rokuSessionPlaybackTransport": {
+        deviceId: string;
+    };
+
+    /**
+     * Asks the device-discovery bridge to sample this Roku densely for a short
+     * window, because a play/pause transport was just submitted to it.
+     *
+     * Needed because the two paths that submit such a transport live in
+     * different processes: the discovery process issues its own keypress, while
+     * a page-owned command issues one inside the cast SESSION process (a
+     * different connectNative). The session process has no access to the
+     * discovery process's remotes, so the extension - which sees both - relays
+     * the request. It carries no command id: the bridge only learns "this
+     * device deserves denser sampling now", and every sample still has to pass
+     * the extension's ecp-poll whitelist and strict poll-start gate.
+     */
+    "bridge:rokuRequestConfirmationPoll": {
+        deviceId: string;
+    };
+
     "bridge:sendReceiverMessage": {
         deviceId: string;
         message: SenderMessage;

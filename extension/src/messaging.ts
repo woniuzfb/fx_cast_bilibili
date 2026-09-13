@@ -211,6 +211,22 @@ type BridgeMessageDefinitions = {
      * Sent to the bridge when non-session related receiver messages
      * need to be sent (e.g. volume control, application stop, etc...).
      */
+    /**
+     * A cast SESSION process completed a play/pause transport for this device
+     * (page-owned commands drive the receiver through the session's Cast
+     * media). The extension relays it to the discovery process, which owns the
+     * polling loop.
+     */
+    "main:rokuSessionPlaybackTransport": {
+        deviceId: string;
+    };
+
+    /** Ask the discovery bridge to sample a Roku densely for a short window
+     *  after a play/pause transport was submitted on either route. */
+    "bridge:rokuRequestConfirmationPoll": {
+        deviceId: string;
+    };
+
     "bridge:sendReceiverMessage": {
         deviceId: string;
         message: SenderMessage;

@@ -490,6 +490,25 @@ export default new (class extends TypedEventTarget<EventMap> {
         }
     }
 
+    /**
+     * Asks the device-discovery bridge to sample this Roku densely for a short
+     * window, because a play/pause transport was just submitted to it. The
+     * request must go to the discovery connection: that is the process that
+     * owns the polling loop and emits every observation.
+     */
+    requestRokuConfirmationPoll(deviceId: string) {
+        if (!this.bridgePort) return;
+        if (!this.receiverDevices.has(deviceId)) return;
+        try {
+            this.bridgePort.postMessage({
+                subject: "bridge:rokuRequestConfirmationPoll",
+                data: { deviceId }
+            });
+        } catch (err) {
+            logger.error("Failed to request a confirmation poll", err);
+        }
+    }
+
     /** Re-broadcasts a device's playback view to the receiver popups. */
     notifyPlaybackCommandChanged(deviceId: string) {
         if (!this.receiverDevices.has(deviceId)) return;
