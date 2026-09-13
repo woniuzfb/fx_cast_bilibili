@@ -35,6 +35,22 @@ interface PendingSessionMedia {
     media: MediaInformation | null;
 }
 
+/**
+ * Whether a generation arriving from the extension may be used at all.
+ *
+ * The producer is a monotonic counter that starts at 1, so anything else has
+ * crossed a process boundary as a malformed value. Mirrors the check in
+ * RokuRemote.setLoadGeneration: two consumers of the same message must not
+ * disagree about which values are real.
+ */
+function isUsableLoadGeneration(loadGeneration: unknown): boolean {
+    return (
+        typeof loadGeneration === "number" &&
+        Number.isSafeInteger(loadGeneration) &&
+        loadGeneration > 0
+    );
+}
+
 export class RokuSessionMediaSync {
     /** LOAD generation the extension considers current, per device. */
     private readonly loadGenerations = new Map<string, number>();
@@ -50,7 +66,32 @@ export class RokuSessionMediaSync {
         return this.loadGenerations.get(deviceId);
     }
 
+    /**
+     * Records the extension's current LOAD generation for a device.
+     *
+     * Validated BEFORE anything is written or retired, because this value is a
+     * cross-process input and the failure mode is not "the value is ignored"
+     * but "the value is used": a bad generation would retire the current load's
+     * media (the registry is keyed on the generation it was applied under) and
+     * leave this module disagreeing with the remote, which rejects the same
+     * message.
+     */
     setLoadGeneration(deviceId: string, loadGeneration: number) {
+        if (!deviceId || !isUsableLoadGeneration(loadGeneration)) return;
+
+        const current = this.loadGenerations.get(deviceId);
+        // Generations are monotonic per device, so a late message from an older
+        // load must not roll this back - and must not retire the newer load's
+        // media.
+        if (current !== undefined && loadGeneration < current) return;
+
+        if (current === loadGeneration) {
+            // A replay of the current generation is still meaningful: it may be
+            // exactly what session media already pending was waiting for.
+            this.apply(deviceId);
+            return;
+        }
+
         // Record first, then apply: session media that arrived before this
         // message was waiting for exactly this, and media registered under the
         // previous generation is retired by the same call.
@@ -59,6 +100,17 @@ export class RokuSessionMediaSync {
     }
 
     setSessionMedia(update: RokuSessionMediaMirrorUpdate) {
+        // Same rule as the generation: reject before the value can occupy
+        // `pending` and skew the straggler comparison below. An empty owner is
+        // rejected too - it would make an owner-aware clear match a
+        // registration whose owner was never named.
+        if (
+            !update.deviceId ||
+            !update.ownerId ||
+            !isUsableLoadGeneration(update.loadGeneration)
+        ) {
+            return;
+        }
         const pending = this.pending.get(update.deviceId);
         // Generations are monotonic per device, so a message for an older load
         // than the one already pending is a straggler (a delayed replay from a

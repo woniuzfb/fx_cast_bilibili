@@ -375,6 +375,26 @@ export default class RokuRemote {
 
     /** Records the extension's current LOAD generation for this device. */
     setLoadGeneration(loadGeneration: number) {
+        // Validation comes FIRST, before any state is written. Putting the
+        // overlay clearing above it (as this used to) let a NaN/0/negative
+        // generation - which is then rejected - drop the startup synthesis on
+        // its way out: an invalid value must have no effect at all, not a
+        // partial one.
+        //
+        // The producer is a monotonic counter that starts at 1; anything else
+        // has crossed a process boundary and is not trusted.
+        if (!Number.isSafeInteger(loadGeneration) || loadGeneration <= 0) {
+            return;
+        }
+        // Monotonic for the same reason, and it is the rule the rest of the
+        // chain relies on: a late message from an older load must not roll this
+        // back (a replay of the current one is fine and changes nothing).
+        if (
+            this.loadGeneration !== undefined &&
+            loadGeneration < this.loadGeneration
+        ) {
+            return;
+        }
         // Rule 1: a different LOAD supersedes whatever was synthesised for the
         // previous one. Only an actual change - the constructor applies the
         // cached generation once, and that must not drop a synthesis the
@@ -384,11 +404,6 @@ export default class RokuRemote {
             this.loadGeneration !== loadGeneration
         ) {
             this.clearStartupOverlay();
-        }
-        // The producer is a monotonic counter that starts at 1; anything else
-        // has crossed a process boundary and is not trusted.
-        if (!Number.isSafeInteger(loadGeneration) || loadGeneration <= 0) {
-            return;
         }
         this.loadGeneration = loadGeneration;
     }
