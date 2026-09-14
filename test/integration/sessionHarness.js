@@ -211,6 +211,11 @@ function parseArgs(argv) {
         // sense of "gap", and one mode must not mean two defects.
         requestSettlementGap: false,
         requestSettlementFixed: false,
+        // Proves the ORDER inside the SDK's cancel branch: the request fields are
+        // cleared BEFORE the user's error callback runs, so a callback that
+        // synchronously starts a new requestSession does not get its state wiped
+        // by the tail of the old handler.
+        requestSettlementReentrant: false,
         createFailure: false,
         interleave: false,
         // Which checkpoint of createCastSession the injection fires at.
@@ -264,6 +269,8 @@ function parseArgs(argv) {
             args.requestSettlementGap = true;
         else if (argv[i] === "--request-settlement-fixed")
             args.requestSettlementFixed = true;
+        else if (argv[i] === "--request-settlement-reentrant")
+            args.requestSettlementReentrant = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
         else if (argv[i] === "--request-source") {
             const value = argv[i + 1];
@@ -632,7 +639,9 @@ async function main() {
      * same facts so only the expectation flips.
      */
     const settlementMode =
-        args.requestSettlementGap || args.requestSettlementFixed;
+        args.requestSettlementGap ||
+        args.requestSettlementFixed ||
+        args.requestSettlementReentrant;
     const expectDoubleSettlement = args.requestSettlementGap;
     /**
      * The session-creation-failure modes.
@@ -2458,6 +2467,21 @@ async function main() {
         await driver.switchTo().window(senderTab);
 
         const marksBeforeSession = markCount();
+        if (args.requestSettlementReentrant) {
+            // Armed BEFORE the request is issued, because the cancel this probe
+            // reacts to is produced by the popup's auto-cast replacing the
+            // page's selector - which happens when the popup mounts, i.e. after
+            // the request and BEFORE the click. Arming at click time was too
+            // late: measured, the error callback had already run.
+            const armed = await driver.executeScript(
+                "window.__HARNESS_REISSUE_ON_CANCEL__ = true; return window.__HARNESS_REISSUE_ON_CANCEL__ === true;"
+            );
+            check(
+                "request-settlement-reentrant: the page is armed to start a second requestSession synchronously from the cancelled request's error callback",
+                armed === true,
+                String(armed)
+            );
+        }
         const requestAtSession = Date.now();
         await driver.executeScript(
             "window.__HARNESS_REQUEST_SESSION__().catch(() => {});"
@@ -2742,6 +2766,62 @@ async function main() {
         );
 
         await driver.switchTo().window(senderTab);
+        /**
+         * Who owns the session, and who settled the request - BY ROUTE.
+         *
+         * `requestSessionSucceeded` used to be the universal definition of "the
+         * cast worked", and that was only true because of the double-settlement
+         * defect: on the queued route the page's request was cancelled and then
+         * settled AGAIN by the session the extension created. Under the contract
+         * (one request settles exactly once; an extension-created session is
+         * delivered through `ApiConfig`'s sessionListener) the two routes differ:
+         *
+         *   selector: the page's own requestSession owns the session;
+         *   queued:   the request is cancelled and the sessionListener delivers
+         *             the extension-created session, which the page then adopts.
+         *
+         * Keeping this in one place is the point: "the page has a session" must
+         * not be re-derived per check from whichever field happened to be set by
+         * the behaviour of the day.
+         */
+        const pageSessionOwnership = (route, page) => {
+            const callbacks = (page && page.sessionCallbacks) || [];
+            const listeners = (page && page.listenerSessions) || [];
+            const listenerCalls = (page && page.sessionListenerCalls) || 0;
+            if (route === "selector") {
+                return {
+                    route,
+                    owner: "the page's own requestSession (success callback)",
+                    requestSettled:
+                        callbacks.length === 1 &&
+                        callbacks[0].type === "success",
+                    requestCallbackCount: callbacks.length,
+                    sessionAvailable: Boolean(page && page.sessionId),
+                    sessionId: (page && page.sessionId) || null,
+                    listenerCalls
+                };
+            }
+            return {
+                route,
+                owner: "the extension-created session, via sessionListener",
+                requestSettled:
+                    callbacks.length === 1 &&
+                    callbacks[0].type === "error" &&
+                    Boolean(callbacks[0].payload) &&
+                    callbacks[0].payload.code === "cancel",
+                requestCallbackCount: callbacks.length,
+                sessionAvailable:
+                    listeners.length === 1 &&
+                    Boolean(listeners[0] && listeners[0].sessionId),
+                sessionId: (listeners[0] && listeners[0].sessionId) || null,
+                listenerCalls
+            };
+        };
+        // Which route this run took: the queued route is the one where the
+        // popup's own cast replaces the page's selector (that is what
+        // `suppressPopupInit` reproduces).
+        const pageRoute = suppressPopupInit ? "queued" : "selector";
+
         // The failure modes deliberately never reach a session, so waiting for
         // the success callback would just burn the whole deadline.
         const pageResult = failureMode
@@ -2753,31 +2833,63 @@ async function main() {
              const deadline = Date.now() + 30000;
              const tick = () => {
                 const r = window.__HARNESS_RESULT__;
-                if (r && r.requestSessionSucceeded) { done(r); return; }
+                // Route-aware: on the queued route the page's own request is
+                // CANCELLED and the session arrives through the sessionListener,
+                // so waiting for requestSessionSucceeded would always burn the
+                // whole deadline. (No backticks in here: this whole script is a
+                // template literal in the harness.)
+                const ready =
+                    r &&
+                    (${JSON.stringify(
+                        pageRoute
+                    )} === "selector"
+                        ? (r.sessionCallbacks || []).length >= 1
+                        : (r.sessionListenerCalls || 0) >= 1);
+                if (ready) { done(r); return; }
                 if (Date.now() > deadline) { done(r); return; }
                 setTimeout(tick, 250);
              };
              tick();`
               );
-        check(
-            failureMode
-                ? "session-failure mode: the page's requestSession did NOT succeed (the injected failure is real)"
-                : "the page's requestSession success callback ran",
-            failureMode
-                ? Boolean(pageResult) &&
-                      pageResult.requestSessionSucceeded !== true
-                : pageResult && pageResult.requestSessionSucceeded === true,
-            JSON.stringify(pageResult)
-        );
-        check(
-            failureMode
-                ? "session-failure mode: the page has no session id"
-                : "the page has a non-empty session id",
-            failureMode
-                ? Boolean(pageResult) && !pageResult.sessionId
-                : Boolean(pageResult && pageResult.sessionId),
-            JSON.stringify(pageResult && pageResult.sessionId)
-        );
+        const pageOwnership = pageSessionOwnership(pageRoute, pageResult);
+        // `--request-settlement-reentrant` issues TWO requests on purpose (the
+        // second from inside the first one's error callback), so the
+        // single-request ownership model above does not describe it: its
+        // per-ATTEMPT assertions are the authority there, and they are strictly
+        // stronger (they say which request each callback belonged to). Enforcing
+        // the one-request model on top would only add reds that mean "this mode
+        // does what it says".
+        const useOwnershipModel =
+            !failureMode && !args.requestSettlementReentrant;
+        if (failureMode) {
+            check(
+                "session-failure mode: the page's requestSession did NOT succeed (the injected failure is real)",
+                Boolean(pageResult) &&
+                    pageResult.requestSessionSucceeded !== true,
+                JSON.stringify(pageResult)
+            );
+            check(
+                "session-failure mode: the page has no session id",
+                Boolean(pageResult) && !pageResult.sessionId,
+                JSON.stringify(pageResult && pageResult.sessionId)
+            );
+        } else if (useOwnershipModel) {
+            console.log(
+                `page session ownership (${pageOwnership.route}):`,
+                JSON.stringify(pageOwnership)
+            );
+            check(
+                `the page's requestSession settled exactly once, the way its route defines (owner: ${pageOwnership.owner})`,
+                pageOwnership.requestSettled,
+                JSON.stringify(pageOwnership)
+            );
+            check(
+                `the page has a usable session for LOAD, delivered by ${pageOwnership.owner}`,
+                pageOwnership.sessionAvailable,
+                JSON.stringify(pageOwnership)
+            );
+        }
+
         // The success routes are the CONTROL for the page contract: a session IS
         // established for the tab, so the page must see a success. Whether the
         // replaced selector ALSO posts a cancel, and whether that arrives before
@@ -2858,7 +2970,13 @@ async function main() {
                 listenerSessions
             };
             console.log(
-                `request settlement (${expectDoubleSettlement ? "gap" : "fixed"}):`,
+                `request settlement (${
+                    expectDoubleSettlement
+                        ? "gap"
+                        : args.requestSettlementReentrant
+                          ? "reentrant"
+                          : "fixed"
+                }):`,
                 JSON.stringify(facts)
             );
             // Both modes first require that the session really WAS created and
@@ -2914,6 +3032,88 @@ async function main() {
                     "request-settlement-gap: the extension-created session did NOT reach the page through sessionListener (it was misrouted into the stale request callback instead)",
                     listenerCalls === 0,
                     JSON.stringify({ sessionListenerCalls: listenerCalls })
+                );
+            } else if (args.requestSettlementReentrant) {
+                // --- the ORDER inside the cancel branch ----------------------
+                //
+                // Contract: one requestSession() call settles exactly once, and
+                // its fields are cleared BEFORE its error callback runs. The
+                // observable consequence is this: a callback that synchronously
+                // starts the NEXT request must find that next request still
+                // usable afterwards. If the SDK cleared its fields after calling
+                // the callback, the tail of the old handler would wipe the new
+                // request's slot and callbacks, and the new request would never
+                // settle - which is indistinguishable from "the session was
+                // swallowed" unless the per-request attribution below is read.
+                //
+                // NOT covered here (deliberately): the cancel message carries no
+                // request identity, so a LATE cancel belonging to the first
+                // request arriving after the second was created cannot be
+                // attributed. That is a separate protocol gap and outside this
+                // minimal fix.
+                const attempts = (pageResult && pageResult.requestAttempts) || [];
+                const first = attempts.find(a => a.label === "A");
+                const second = attempts.find(a => a.label === "B");
+                const settledTypes = a =>
+                    ((a && a.callbacks) || []).map(c => c.type);
+                const settleCodes = a =>
+                    ((a && a.callbacks) || []).map(
+                        c => c.payload && c.payload.code
+                    );
+                const reentrancy = {
+                    attempts: attempts.map(a => ({
+                        label: a.label,
+                        requestId: a.requestId,
+                        settleType: a.settleType,
+                        callbacks: settledTypes(a),
+                        codes: settleCodes(a),
+                        sessionIds: ((a && a.callbacks) || [])
+                            .map(c => c.payload && c.payload.sessionId)
+                            .filter(Boolean)
+                    })),
+                    firstStartedBeforeSecond: Boolean(
+                        first && second && first.startedAt <= second.startedAt
+                    ),
+                    sessionListenerCalls:
+                        (pageResult && pageResult.sessionListenerCalls) || 0
+                };
+                console.log(
+                    "request settlement (reentrant):",
+                    JSON.stringify(reentrancy)
+                );
+                check(
+                    "request-settlement-reentrant: the first request settled exactly once, with error(cancel)",
+                    Boolean(first) &&
+                        settledTypes(first).length === 1 &&
+                        settledTypes(first)[0] === "error" &&
+                        settleCodes(first)[0] === "cancel",
+                    JSON.stringify(reentrancy)
+                );
+                check(
+                    "request-settlement-reentrant: the error callback synchronously started a SECOND request",
+                    Boolean(second) &&
+                        attempts.length === 2 &&
+                        reentrancy.firstStartedBeforeSecond,
+                    JSON.stringify(reentrancy)
+                );
+                check(
+                    "request-settlement-reentrant: the second request was still alive after the first handler returned, and settled exactly once (its fields were NOT wiped by the old request's cleanup)",
+                    Boolean(second) &&
+                        settledTypes(second).length === 1 &&
+                        Boolean(second.settledAt) &&
+                        second.settledAt >= first.callbacks[0].at,
+                    JSON.stringify(reentrancy)
+                );
+                check(
+                    "request-settlement-reentrant: the session reached the SECOND request's success callback (a pending request owns the session, so the listener is not used here)",
+                    Boolean(second) &&
+                        settledTypes(second)[0] === "success" &&
+                        Boolean(
+                            second.callbacks[0].payload &&
+                                second.callbacks[0].payload.sessionId
+                        ) &&
+                        reentrancy.sessionListenerCalls === 0,
+                    JSON.stringify(reentrancy)
                 );
             } else {
                 // Post-fix target: one terminal state, and the session exposed
@@ -3424,11 +3624,16 @@ async function main() {
                 )
             );
             check(
-                "gap mode: the page's requestSession still succeeded",
-                Boolean(
-                    pageResult && pageResult.requestSessionSucceeded === true
-                ),
-                JSON.stringify(pageResult)
+                `auto-cast: the queued cast still delivered the extension-created session to the page (the page's own request was cancelled: owner is ${pageOwnership.owner})`,
+                pageOwnership.requestSettled &&
+                    pageOwnership.sessionAvailable &&
+                    pageOwnership.listenerCalls === 1,
+                JSON.stringify({
+                    ownership: pageOwnership,
+                    pageRequestSessionSucceeded: Boolean(
+                        pageResult && pageResult.requestSessionSucceeded
+                    )
+                })
             );
             // Negative half: nothing in the normal path ran, and no generation
             // exists for this device on ANY connection.
@@ -3453,9 +3658,8 @@ async function main() {
                 check(
                     "queued Roku App session was created without establishing a load generation",
                     Boolean(sessionCreated) &&
-                        Boolean(
-                            pageResult && pageResult.requestSessionSucceeded
-                        ) &&
+                        pageOwnership.requestSettled &&
+                        pageOwnership.sessionAvailable &&
                         Boolean(clickControl) &&
                         Boolean(backgroundControl) &&
                         !selectionMarker &&
@@ -3463,9 +3667,7 @@ async function main() {
                         generationRelays.length === 0,
                     JSON.stringify({
                         sessionCreated,
-                        pageRequestSessionSucceeded: Boolean(
-                            pageResult && pageResult.requestSessionSucceeded
-                        ),
+                        pageOwnership: pageOwnership,
                         backgroundStorageControl: Boolean(backgroundControl),
                         selectionMarker: selectionMarker || null,
                         loadGenerationBegan: generationMarker || null,

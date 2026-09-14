@@ -447,9 +447,48 @@ route) is therefore not a settlement of an already-cancelled request: the SDK
 documents that it belongs to `ApiConfig`'s `sessionListener`.
 
 ```sh
-node test/integration/sessionHarness.js --request-settlement-gap     # pre-fix facts
-node test/integration/sessionHarness.js --request-settlement-fixed   # post-fix expectation
+node test/integration/sessionHarness.js --request-settlement-gap        # pre-fix facts
+node test/integration/sessionHarness.js --request-settlement-fixed      # post-fix expectation
+node test/integration/sessionHarness.js --request-settlement-reentrant  # the clear-then-call order
 ```
+
+The route decides who owns the session, and the run derives that from ONE place
+(`pageSessionOwnership`), because "the cast succeeded" is not one fact:
+
+| route | who settles the request | who delivers the session |
+| --- | --- | --- |
+| `selector` (the page clicked its own selector) | one `success` callback | the page's own `requestSession` (the page holds `sessionId`) |
+| `queued` (the popup's auto-cast replaced the selector) | one `error` with code `cancel` | `ApiConfig`'s `sessionListener`, which the page adopts for LOAD |
+
+That distinction is not cosmetic. On the queued route the page's request really is
+cancelled, so `requestSessionSucceeded` is FALSE - and the earlier shared
+assertions that demanded it were green only because of the double settlement this
+contract exists to remove. The auto-cast modes therefore assert "the queued cast
+still delivered the extension-created session to the page" instead, while the
+load-generation expectations they carry keep flipping as before.
+
+`--request-settlement-reentrant` pins the ORDER inside the SDK's cancel branch,
+which is the difference between a working reissue and a rejected one. The page
+starts a second `requestSession` SYNCHRONOUSLY from the first one's error callback,
+and each attempt is tagged with its own `requestId` - without that attribution
+"error then success" cannot be told apart from a double settlement. Measured on the
+fixed build:
+
+| attempt | settlement |
+| --- | --- |
+| A (the cancelled one) | exactly one `error(cancel)`, no session |
+| B (started inside A's error callback) | exactly once, `success`, with a non-empty session id |
+
+and `sessionListenerCalls` is 0, because a request that is still pending owns the
+session. Counter-control (a build that calls the callback BEFORE clearing the
+fields): the reissued request comes back immediately as `invalid_parameter`
+("Session request already in progress") and the check goes red - so the order is a
+requirement the harness can demonstrate, not an implementation preference.
+
+Not covered, deliberately: `cast:sessionRequestCancelled` carries no request
+identity, so a LATE cancel belonging to an already-settled request cannot be
+attributed to it. Correlating cancels with requests is a separate protocol change
+and outside this fix.
 
 They are their own pair on purpose: `--auto-cast-*` already carries the
 load-generation sense of "gap", and one mode must not mean two defects. They are

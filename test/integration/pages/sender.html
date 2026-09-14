@@ -58,6 +58,13 @@
                 // for an error->success double settlement, which is exactly the
                 // case this instrumentation exists to expose.
                 sessionCallbacks: [],
+                // Which REQUEST each callback belonged to. Without this, "one
+                // error then one success" cannot distinguish "request A was
+                // cancelled and a LATER request B was settled" (correct) from
+                // "request A was settled twice" (the double-settlement defect) -
+                // the two shapes are identical in a flat callback list.
+                requestAttempts: [],
+                nextRequestId: 0,
                 successCount: 0,
                 errorCount: 0,
                 settleType: undefined,
@@ -191,6 +198,11 @@
                                 // and time, so the run can prove BOTH that the
                                 // stale request callback stayed silent AND that
                                 // the session still reached the page.
+                                //
+                                // Timeline FIRST, adoption SECOND: the evidence is
+                                // written before anything can throw or redirect,
+                                // so a future change to the adoption path cannot
+                                // invalidate the record of what arrived.
                                 result.sessionListenerCalls++;
                                 result.listenerSessions.push({
                                     at: Date.now(),
@@ -199,6 +211,12 @@
                                             ? String(session.sessionId)
                                             : null
                                 });
+                                // A real consumer adopts an extension-created
+                                // session here - without it the page has nothing
+                                // to load media into when its OWN request was
+                                // cancelled (the queued/auto-cast route).
+                                currentSession = session;
+                                result.sessionFromListener = true;
                             },
                             () => {}
                         );
@@ -285,12 +303,20 @@
                 });
             };
 
-            const recordSessionCallback = (type, payload) => {
+            const recordSessionCallback = (type, payload, attempt) => {
                 result.sessionCallbacks.push({
                     at: Date.now(),
                     type,
-                    payload
+                    payload,
+                    requestId: attempt ? attempt.requestId : null
                 });
+                if (attempt) {
+                    attempt.callbacks.push({ at: Date.now(), type, payload });
+                    if (attempt.settledAt === undefined) {
+                        attempt.settledAt = Date.now();
+                        attempt.settleType = type;
+                    }
+                }
                 if (type === "success") result.successCount++;
                 else result.errorCount++;
                 if (result.settleType === undefined) {
@@ -299,53 +325,90 @@
                 }
             };
 
-            window.__HARNESS_REQUEST_SESSION__ = function () {
-                return new Promise((resolve, reject) => {
-                    result.requestSessionCalled = true;
-                    result.requestSessionCalls++;
-                    status("requesting session");
-                    try {
-                        chrome.cast.requestSession(
-                            session => {
-                                currentSession = session;
-                                recordSessionCallback("success", {
-                                    sessionId: session.sessionId
-                                });
-                                result.requestSessionSucceeded = true;
-                                result.sessionId = session.sessionId;
-                                // `receiver.label` is the FRIENDLY NAME, not the
-                                // deviceId: naming it selectedDeviceId invited
-                                // reading a friendly-name mismatch as a failed
-                                // selection. The authoritative device id comes
-                                // from the native trace.
-                                result.selectedReceiverLabel = session.receiver
+            /**
+             * One instrumented `requestSession()` attempt. `requestId` is what
+             * makes the reentrancy fact readable: a cancel that synchronously
+             * starts a new request must leave the NEW request's callbacks alive,
+             * and only per-request attribution can show which request a callback
+             * belonged to.
+             */
+            const startRequest = (label, resolve, reject) => {
+                const attempt = {
+                    requestId: ++result.nextRequestId,
+                    label,
+                    startedAt: Date.now(),
+                    callbacks: [],
+                    settleType: undefined,
+                    settledAt: undefined
+                };
+                result.requestAttempts.push(attempt);
+                result.requestSessionCalled = true;
+                result.requestSessionCalls++;
+                status("requesting session " + label);
+                try {
+                    chrome.cast.requestSession(
+                        session => {
+                            currentSession = session;
+                            recordSessionCallback(
+                                "success",
+                                { sessionId: session.sessionId },
+                                attempt
+                            );
+                            result.requestSessionSucceeded = true;
+                            result.sessionId = session.sessionId;
+                            // `receiver.label` is the FRIENDLY NAME, not the
+                            // deviceId: naming it selectedDeviceId invited
+                            // reading a friendly-name mismatch as a failed
+                            // selection. The authoritative device id comes from
+                            // the native trace.
+                            result.selectedReceiverLabel = session.receiver
+                                ? session.receiver.label
+                                : undefined;
+                            status("session: " + session.sessionId);
+                            resolve({
+                                sessionId: session.sessionId,
+                                receiverLabel: session.receiver
                                     ? session.receiver.label
-                                    : undefined;
-                                status("session: " + session.sessionId);
-                                resolve({
-                                    sessionId: session.sessionId,
-                                    receiverLabel: session.receiver
-                                        ? session.receiver.label
-                                        : undefined
-                                });
-                            },
-                            err => {
-                                recordSessionCallback("error", {
+                                    : undefined
+                            });
+                        },
+                        err => {
+                            recordSessionCallback(
+                                "error",
+                                {
                                     code: err && err.code,
                                     description: err && err.description,
                                     message: err && err.message
-                                });
-                                fail("requestSession", err);
-                                reject(err);
-                            },
-                            new chrome.cast.SessionRequest(APP_ID)
-                        );
-                    } catch (err) {
-                        fail("requestSession", err);
-                        reject(err);
-                    }
+                                },
+                                attempt
+                            );
+                            // The reentrancy probe (armed by the harness for one
+                            // mode only): a user callback that SYNCHRONOUSLY
+                            // starts the next request. The SDK must clear the
+                            // cancelled request's fields BEFORE calling this, or
+                            // the tail of that handler would wipe the request
+                            // started right here.
+                            if (window.__HARNESS_REISSUE_ON_CANCEL__) {
+                                window.__HARNESS_REISSUE_ON_CANCEL__ = false;
+                                startRequest("B", () => {}, () => {});
+                            }
+                            fail("requestSession", err);
+                            reject(err);
+                        },
+                        new chrome.cast.SessionRequest(APP_ID)
+                    );
+                } catch (err) {
+                    fail("requestSession", err);
+                    reject(err);
+                }
+            };
+
+            window.__HARNESS_REQUEST_SESSION__ = function () {
+                return new Promise((resolve, reject) => {
+                    startRequest("A", resolve, reject);
                 });
             };
+
         </script>
     </body>
 </html>

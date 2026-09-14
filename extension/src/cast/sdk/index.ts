@@ -145,15 +145,37 @@ export default class {
                 break;
 
             // Popup closed before session established
-            case "cast:sessionRequestCancelled":
-                if (this.#sessionRequest) {
-                    this.#sessionRequest = undefined;
-
-                    this.#requestSessionErrorCallback?.(
-                        new CastError(ErrorCode.CANCEL)
-                    );
+            case "cast:sessionRequestCancelled": {
+                if (!this.#sessionRequest) {
+                    break;
                 }
+
+                /**
+                 * One `requestSession()` call settles exactly once, and this
+                 * message is that call's terminal state: the request has been
+                 * cancelled, so BOTH of its callbacks must stop being reachable.
+                 *
+                 * Clearing only `#sessionRequest` left the callbacks alive, and
+                 * `cast:sessionCreated` decides ownership by the presence of
+                 * `#requestSessionSuccessCallback` - so a session created by the
+                 * EXTENSION (the popup's own cast) settled a request that had
+                 * already been cancelled, instead of being published through
+                 * `apiConfig.sessionListener`.
+                 *
+                 * The clear happens BEFORE the callback runs, on purpose: a user
+                 * callback may synchronously start a new `requestSession`, and
+                 * clearing afterwards would wipe the new request's state.
+                 */
+                const errorCallback = this.#requestSessionErrorCallback;
+
+                this.#sessionRequest = undefined;
+                this.#requestSessionSuccessCallback = undefined;
+                this.#requestSessionErrorCallback = undefined;
+
+                errorCallback?.(new CastError(ErrorCode.CANCEL));
+
                 break;
+            }
 
             /**
              * Once the bridge detects a session creation, session info
