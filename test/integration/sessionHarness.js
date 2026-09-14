@@ -205,6 +205,12 @@ function parseArgs(argv) {
         generationAdvance: false,
         autoCastGap: false,
         autoCastFixed: false,
+        // The page's requestSession SETTLEMENT contract, on a route where the
+        // extension (not the page's request) creates the session. Deliberately
+        // its own pair: `--auto-cast-*` already carries the load-generation
+        // sense of "gap", and one mode must not mean two defects.
+        requestSettlementGap: false,
+        requestSettlementFixed: false,
         createFailure: false,
         interleave: false,
         // Which checkpoint of createCastSession the injection fires at.
@@ -254,6 +260,10 @@ function parseArgs(argv) {
         else if (argv[i] === "--generation-advance")
             args.generationAdvance = true;
         else if (argv[i] === "--auto-cast-gap") args.autoCastGap = true;
+        else if (argv[i] === "--request-settlement-gap")
+            args.requestSettlementGap = true;
+        else if (argv[i] === "--request-settlement-fixed")
+            args.requestSettlementFixed = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
         else if (argv[i] === "--request-source") {
             const value = argv[i + 1];
@@ -320,6 +330,15 @@ function parseArgs(argv) {
     ) {
         throw new Error(
             `sessionHarness: --cleanup-fault must be removeListener or actionState (got ${args.cleanupFault})`
+        );
+    }
+    if (args.requestSettlementGap && args.requestSettlementFixed) {
+        // The pair is a red/green EXPECTATION pair about the same production
+        // behaviour; accepting both would silently run the gap expectation and
+        // report "green" for the unfixed build, which is the opposite of what a
+        // reader of that command line would conclude.
+        throw new Error(
+            "sessionHarness: --request-settlement-gap and --request-settlement-fixed are mutually exclusive"
         );
     }
     if (args.cleanupFault !== undefined && args.failStage !== "p2") {
@@ -605,6 +624,17 @@ async function main() {
     const gapMode = args.autoCastGap || args.autoCastFixed;
     const expectGap = args.autoCastGap;
     /**
+     * The settlement modes drive the SAME queued route as `--auto-cast-*` (the
+     * popup's auto-cast owns the session, so the page's own request is the one
+     * that gets cancelled) but assert nothing about load generations: they exist
+     * to pin the page-callback contract. `gap` = the measured pre-fix behaviour,
+     * `fixed` = the behaviour the SDK fix must produce; both collect exactly the
+     * same facts so only the expectation flips.
+     */
+    const settlementMode =
+        args.requestSettlementGap || args.requestSettlementFixed;
+    const expectDoubleSettlement = args.requestSettlementGap;
+    /**
      * The session-creation-failure modes.
      *
      * `--create-failure-*`: the queued-selection session start announces its
@@ -650,9 +680,10 @@ async function main() {
      * runs labelled `selector` were in fact served by the popup's auto-cast, so
      * the label was a lie and the caller-identity check below could not catch it.
      */
-    const deferPopup = gapMode || failureMode;
+    const deferPopup = gapMode || failureMode || settlementMode;
     const suppressPopupInit =
-        (gapMode || args.createFailure) && args.requestSource === "queued";
+        (gapMode || args.createFailure || settlementMode) &&
+        args.requestSource === "queued";
     const expectReleased = args.expectReleased;
     const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-s1-"));
     console.log("harness dir:", harnessDir);
@@ -2781,9 +2812,132 @@ async function main() {
                             type: c.type,
                             code: c.payload && c.payload.code
                         })
-                    )
+                    ),
+                    sessionListenerCalls: pageResult && pageResult.sessionListenerCalls,
+                    listenerSessions: (pageResult && pageResult.listenerSessions) || []
                 })
             );
+        }
+
+        // --- the page's requestSession SETTLEMENT contract -------------------
+        //
+        // Contract (agreed): one `requestSession()` call settles EXACTLY ONCE -
+        // success(session) or error(CastError) - and after that terminal state
+        // neither of its callbacks may run again. A session the EXTENSION
+        // created (the queued/auto-cast route) is therefore NOT a settlement of
+        // a request that was already cancelled: it must be published through
+        // `ApiConfig`'s sessionListener instead.
+        //
+        // Both modes below collect the SAME facts (page callback timeline, the
+        // sessionListener timeline, and which background cancel site posted);
+        // only the expectation flips, so there is one reader to trust.
+        if (settlementMode) {
+            await driver.switchTo().window(consoleTab);
+            const cancelState = await readCancelState();
+            const callbacks = (pageResult && pageResult.sessionCallbacks) || [];
+            const types = callbacks.map(c => c.type);
+            const codes = callbacks.map(c => c.payload && c.payload.code);
+            const listenerSessions =
+                (pageResult && pageResult.listenerSessions) || [];
+            const listenerCalls =
+                (pageResult && pageResult.sessionListenerCalls) || 0;
+            const sessionId = (pageResult && pageResult.sessionId) || null;
+            const sites = cancelState.posts.map(p => p.site);
+            const facts = {
+                requestSessionCalls: pageResult && pageResult.requestSessionCalls,
+                successCount: pageResult && pageResult.successCount,
+                errorCount: pageResult && pageResult.errorCount,
+                settleType: pageResult && pageResult.settleType,
+                callbackTypes: types,
+                callbackCodes: codes,
+                sessionCallbacks: callbacks.length,
+                sessionId,
+                backgroundCancels: cancelState.maxCount,
+                cancelSites: cancelState.posts,
+                sessionListenerCalls: listenerCalls,
+                listenerSessions
+            };
+            console.log(
+                `request settlement (${expectDoubleSettlement ? "gap" : "fixed"}):`,
+                JSON.stringify(facts)
+            );
+            // Both modes first require that the session really WAS created and
+            // really REACHED the page - otherwise "the stale callback did not
+            // run" would be trivially true for a session that never existed.
+            //
+            // The two ownership channels are mutually exclusive by design, and
+            // the check accepts EITHER, because which one is legitimate depends on
+            // the build:
+            //
+            //   pre-fix: the stale request success callback exposes the session
+            //   (and sets the page's top-level `sessionId`);
+            //   fixed:   the sessionListener exposes it, and the page's own
+            //   `sessionId` STAYS EMPTY - the listener deliberately records the
+            //   session without adopting it (see pages/sender.html), so requiring
+            //   a non-empty `sessionId` here would raise a third, unrelated red
+            //   against a CORRECT fix.
+            const requestCallbackExposedSession =
+                Boolean(sessionId) && types.includes("success");
+            const listenerExposedSession = listenerSessions.some(entry =>
+                Boolean(entry && entry.sessionId)
+            );
+            check(
+                `request-settlement: the extension created a session for this tab and it reached the page (through the request success callback, or through the sessionListener when the request was already cancelled)`,
+                requestCallbackExposedSession || listenerExposedSession,
+                JSON.stringify({
+                    ...facts,
+                    requestCallbackExposedSession,
+                    listenerExposedSession
+                })
+            );
+            check(
+                `request-settlement: the ORIGINAL request was cancelled by the background (${
+                    expectDoubleSettlement ? "site 1" : "a background cancel"
+                } still posts)`,
+                sites.includes(1),
+                JSON.stringify({ cancelSites: cancelState.posts })
+            );
+            if (expectDoubleSettlement) {
+                // Pre-fix control: measured, not assumed.
+                check(
+                    "request-settlement-gap: the cancelled request was later settled again by the extension-created session",
+                    callbacks.length === 2 &&
+                        types[0] === "error" &&
+                        codes[0] === "cancel" &&
+                        types[1] === "success" &&
+                        (pageResult && pageResult.settleType) === "error" &&
+                        (pageResult && pageResult.successCount) === 1 &&
+                        (pageResult && pageResult.errorCount) === 1,
+                    JSON.stringify(facts)
+                );
+                check(
+                    "request-settlement-gap: the extension-created session did NOT reach the page through sessionListener (it was misrouted into the stale request callback instead)",
+                    listenerCalls === 0,
+                    JSON.stringify({ sessionListenerCalls: listenerCalls })
+                );
+            } else {
+                // Post-fix target: one terminal state, and the session exposed
+                // the way the SDK documents for extension-created sessions.
+                check(
+                    "request-settlement-fixed: the request settled exactly once, with error(cancel)",
+                    callbacks.length === 1 &&
+                        types[0] === "error" &&
+                        codes[0] === "cancel" &&
+                        (pageResult && pageResult.successCount) === 0 &&
+                        (pageResult && pageResult.errorCount) === 1,
+                    JSON.stringify(facts)
+                );
+                check(
+                    "request-settlement-fixed: the extension-created session reached the page through sessionListener, exactly once, with a session id",
+                    listenerCalls === 1 &&
+                        listenerSessions.length === 1 &&
+                        Boolean(listenerSessions[0] && listenerSessions[0].sessionId),
+                    JSON.stringify({
+                        sessionListenerCalls: listenerCalls,
+                        listenerSessions
+                    })
+                );
+            }
         }
         console.log(
             "ordering (ms):",

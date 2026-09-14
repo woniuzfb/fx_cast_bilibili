@@ -62,6 +62,13 @@
                 errorCount: 0,
                 settleType: undefined,
                 requestSessionSucceeded: false,
+                // Sessions the extension created on its own (the queued/auto-cast
+                // route) must arrive HERE, through ApiConfig's sessionListener -
+                // not by settling a requestSession that was already cancelled.
+                // A timeline, not a boolean: "the stale success callback did not
+                // run" must not be satisfiable by swallowing the session.
+                sessionListenerCalls: 0,
+                listenerSessions: [],
                 selectedReceiverLabel: undefined,
                 sessionId: undefined,
                 resources: [],
@@ -178,7 +185,21 @@
                     try {
                         const apiConfig = new chrome.cast.ApiConfig(
                             new chrome.cast.SessionRequest(APP_ID),
-                            () => {},
+                            session => {
+                                // Extension-created session (not this page's
+                                // requestSession): recorded with its session id
+                                // and time, so the run can prove BOTH that the
+                                // stale request callback stayed silent AND that
+                                // the session still reached the page.
+                                result.sessionListenerCalls++;
+                                result.listenerSessions.push({
+                                    at: Date.now(),
+                                    sessionId:
+                                        session && session.sessionId
+                                            ? String(session.sessionId)
+                                            : null
+                                });
+                            },
                             () => {}
                         );
                         chrome.cast.initialize(

@@ -438,6 +438,56 @@ must hold the ORIGINAL error, and the other route's handler must not hold it. Th
 queued route legitimately fills BOTH `loadSender` and `triggerCast` (the former
 rethrows into the latter), so `loadSender` is deliberately unconstrained.
 
+### The page settlement contract (`--request-settlement-gap` / `-fixed`)
+
+One `requestSession()` call settles **exactly once** - `success(session)` or
+`error(CastError)` - and once it has reached that terminal state neither of its
+callbacks may run again. A session the EXTENSION created (the queued/auto-cast
+route) is therefore not a settlement of an already-cancelled request: the SDK
+documents that it belongs to `ApiConfig`'s `sessionListener`.
+
+```sh
+node test/integration/sessionHarness.js --request-settlement-gap     # pre-fix facts
+node test/integration/sessionHarness.js --request-settlement-fixed   # post-fix expectation
+```
+
+They are their own pair on purpose: `--auto-cast-*` already carries the
+load-generation sense of "gap", and one mode must not mean two defects. They are
+also mutually exclusive at argument-parsing time: accepting both would silently run
+the gap expectation and report green for an unfixed build. They drive
+the same queued route (the popup's auto-cast owns the session, so the PAGE's own
+request is the one that gets cancelled) and assert nothing about load generations.
+Both collect exactly the same facts - the request callback timeline, the
+`sessionListener` timeline, and which background cancel site posted - so only the
+expectation flips and there is one reader to trust.
+
+Measured pre-fix (2/2 runs, plus 3/3 on `--auto-cast-fixed`):
+
+| fact | value |
+| --- | --- |
+| `requestSessionCalls` | 1 |
+| request callbacks | `[error(cancel), success]` - `sessionCallbacks.length` 2 |
+| `successCount` / `errorCount` / `settleType` | 1 / 1 / `error` |
+| background cancel | site 1 (`if (!selection)`, the replaced selector) |
+| `sessionListenerCalls` | **0** |
+| session id | non-empty (the session really was created) |
+
+Both modes also require that the session really reached the page, and they accept
+EITHER ownership channel, because which one is legitimate depends on the build: the
+stale request success callback (pre-fix, which also sets the page's top-level
+`sessionId`) or the `sessionListener` (fixed, where the page's `sessionId` stays
+empty on purpose - the listener records the session without adopting it). Requiring
+a non-empty `sessionId` would raise a third, unrelated red against a correct fix.
+
+So the page's request is cancelled **and then** settled again by the session the
+extension created, and that session never reaches the page through the listener it
+belongs to. The `sessionListener` timeline exists precisely so the fixed
+expectation cannot be satisfied by swallowing the session: "the stale success
+callback did not run" is only meaningful together with "the session still reached
+the page". On the unfixed build `--request-settlement-fixed` is therefore red on
+exactly those two checks and nothing else (`50/52`), which is what makes it a
+usable red/green pair.
+
 ### Page settlement: who settled the page, and how often
 
 `--request-source selector|queued` chooses which caller drives the session start.
@@ -456,7 +506,13 @@ handler owns the session. Combined with
   settlement;
 - how many times the background posted `cast:sessionRequestCancelled`, counted at
   every post site (located by brace matching, so a differently indented site cannot
-  slip past and make a double settlement look like a single one).
+  slip past and make a double settlement look like a single one) - and WHICH site
+  posted. Each marker carries the post ordinal, the site index, a snippet of that
+  site's own source context, and (where a `catch` binding is in scope) the error it
+  was handling, because a bare count cannot tell "the page was settled by its own
+  failed start" from "by the selector that replaced it". Measured: selector failures
+  settle through the `catch` site carrying the original error, queued failures
+  through `if (!selection)` with no error at all.
 
 Measured at p0 and p2, identical for both callers: one `requestSession` call, zero
 successes, one error callback with code `cancel` (`sessionCallbacks.length` 1), no
