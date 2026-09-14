@@ -219,6 +219,14 @@ function parseArgs(argv) {
         // Owner-aware session-media clear: a retired owner's LATE clear must not
         // drop the current owner's media, locally or across the bridge.
         ownerAwareClear: false,
+        // The discovery host is a separate native process whose caches start
+        // empty: after it is recreated, the extension INTENDS to replay the
+        // current load generation AND the current session media to it. Measured
+        // today only the generation arrives - the source table was cleared by the
+        // disconnect itself - so this is a red/green pair, not a single mode:
+        // `gap` asserts the measured loss, `fixed` the intended replay.
+        discoveryReconnectGap: false,
+        discoveryReconnectFixed: false,
         createFailure: false,
         interleave: false,
         // Which checkpoint of createCastSession the injection fires at.
@@ -275,6 +283,10 @@ function parseArgs(argv) {
         else if (argv[i] === "--request-settlement-reentrant")
             args.requestSettlementReentrant = true;
         else if (argv[i] === "--owner-aware-clear") args.ownerAwareClear = true;
+        else if (argv[i] === "--discovery-reconnect-gap")
+            args.discoveryReconnectGap = true;
+        else if (argv[i] === "--discovery-reconnect-fixed")
+            args.discoveryReconnectFixed = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
         else if (argv[i] === "--request-source") {
             const value = argv[i + 1];
@@ -642,6 +654,9 @@ async function main() {
      * `fixed` = the behaviour the SDK fix must produce; both collect exactly the
      * same facts so only the expectation flips.
      */
+    const discoveryReconnectMode =
+        args.discoveryReconnectGap || args.discoveryReconnectFixed;
+    const expectDiscoveryReplayRecovered = args.discoveryReconnectFixed;
     const settlementMode =
         args.requestSettlementGap ||
         args.requestSettlementFixed ||
@@ -1332,6 +1347,38 @@ async function main() {
                     "deviceId, hasIdentity: Boolean(identity), loadGeneration: identity ? identity.loadGeneration : null"
                 )
         );
+        // The REPLAY path's own view, recorded where it runs: how many
+        // identities and session-media entries the extension still holds when a
+        // fresh discovery process is told about them. Without this, "the new
+        // process was not told" cannot be told apart from "there was nothing to
+        // tell it at that moment".
+        {
+            const file = path.join(extensionDir, "background/background.js");
+            const text = fs.readFileSync(file, "utf8");
+            // esbuild strips the `private` modifier, and the method is called
+            // once and defined once - anchor on the definition text.
+            const anchor = "replayRokuLoadGenerations() {";
+            if (text.split(anchor).length - 1 !== 1) {
+                throw new Error(
+                    "sessionHarness: cannot instrument replayRokuLoadGenerations (anchor not found exactly once)"
+                );
+            }
+            fs.writeFileSync(
+                file,
+                text.replace(
+                    anchor,
+                    anchor +
+                        "\n        try {\n" +
+                        "          const __fxRepSeq = (globalThis.__fxHarnessReplays = (globalThis.__fxHarnessReplays || 0) + 1);\n" +
+                        "          const __fxIdentities = [...currentRokuMediaIdentities()].map(([deviceId, identity]) => ({ deviceId: String(deviceId), loadGeneration: identity && identity.loadGeneration }));\n" +
+                        "          const __fxEntries = [...this.rokuSessionMedia].map(([deviceId, entry]) => ({ deviceId: String(deviceId), ownerId: entry && entry.ownerId ? String(entry.ownerId) : null, marker: (entry && entry.media && entry.media.customData && entry.media.customData.harnessMarker) || null }));\n" +
+                        "          browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => {\n" +
+                        "            void browser.storage.local.set({ ['__fxHarnessReplay_' + __fxRepSeq]: { runId: r && r.__fxHarnessDiagnosticRunId, seq: __fxRepSeq, hasBridgePort: Boolean(this.bridgePort), identityCount: __fxIdentities.length, identities: __fxIdentities, mediaEntryCount: __fxEntries.length, mediaEntries: __fxEntries, at: Date.now() } }).catch(() => {});\n" +
+                        "          }).catch(() => {});\n" +
+                        "        } catch (e) {}\n"
+                )
+            );
+        }
         if (deferPopup) {
             // Run-bound proof that a receiver selector OPENED, which is the
             // order this mode has to establish: the popup must mount while the
@@ -2911,10 +2958,14 @@ async function main() {
                 listenerCalls
             };
         };
-        // Which route this run took: the queued route is the one where the
-        // popup's own cast replaces the page's selector (that is what
-        // `suppressPopupInit` reproduces).
-        const pageRoute = suppressPopupInit ? "queued" : "selector";
+        // Which route this run took. In the modes that MOUNT the popup
+        // deliberately (settlement, auto-cast, failure) the route is controlled
+        // and `suppressPopupInit` states it. In the plain success run it is a
+        // race the harness does not control (the popup mounts ~2.5s after the
+        // page's selector opens), so there the route is MEASURED - which channel
+        // actually delivered the session - and the ownership check asserts the
+        // consistency of that shape instead of a route the run never promised.
+        const controlledRoute = suppressPopupInit ? "queued" : null;
 
         // The failure modes deliberately never reach a session, so waiting for
         // the success callback would just burn the whole deadline.
@@ -2927,24 +2978,39 @@ async function main() {
              const deadline = Date.now() + 30000;
              const tick = () => {
                 const r = window.__HARNESS_RESULT__;
-                // Route-aware: on the queued route the page's own request is
-                // CANCELLED and the session arrives through the sessionListener,
-                // so waiting for requestSessionSucceeded would always burn the
-                // whole deadline. (No backticks in here: this whole script is a
-                // template literal in the harness.)
+                // Wait for a DELIVERED session, through either channel - not
+                // for "a request callback exists". A cancel is a request callback
+                // too, so the earlier version returned in the window between the
+                // cancel and the session, and then read an ownership shape that
+                // only looked broken (measured: one error callback, no listener,
+                // no session - on a run whose session did arrive moments later).
+                // (No backticks in here: this whole script is a template literal
+                // in the harness.)
                 const ready =
                     r &&
-                    (${JSON.stringify(
-                        pageRoute
-                    )} === "selector"
-                        ? (r.sessionCallbacks || []).length >= 1
-                        : (r.sessionListenerCalls || 0) >= 1);
+                    ((r.sessionCallbacks || []).some(
+                        c => c.type === "success"
+                    ) ||
+                        (r.sessionListenerCalls || 0) >= 1);
                 if (ready) { done(r); return; }
                 if (Date.now() > deadline) { done(r); return; }
                 setTimeout(tick, 250);
              };
              tick();`
               );
+        // The route is now derived from the captured page result, which is why
+        // this happens here and not next to the helper: reading it earlier threw
+        // `Cannot access 'pageResult' before initialization` on EVERY mode.
+        const pageFacts = pageResult || {};
+        const deliveredByListener =
+            !(pageFacts.sessionCallbacks || []).some(
+                c => c.type === "success"
+            ) && (pageFacts.sessionListenerCalls || 0) >= 1;
+        const pageRoute = controlledRoute
+            ? controlledRoute
+            : deliveredByListener
+              ? "queued"
+              : "selector";
         const pageOwnership = pageSessionOwnership(pageRoute, pageResult);
         // `--request-settlement-reentrant` issues TWO requests on purpose (the
         // second from inside the first one's error callback), so the
@@ -5792,6 +5858,356 @@ async function main() {
                         }))
                         .slice(-4)
                 )
+            );
+        }
+
+        // ---- discovery reconnect: the new process must be replayed to -------
+        //
+        // The discovery host owns the polling loop and caches what the extension
+        // told it (load generations and session media). Killing it therefore
+        // proves the REPLAY path rather than the cache: a NEW pid must receive
+        // the current generation and the current session media, and neither may
+        // drift. Independent case: no owner change, no generation advance, no
+        // startup deadline.
+        if (discoveryReconnectMode) {
+            const OWNER_R = "session:harness-replay";
+            const MARKER_R = "reconnect-replay";
+            /**
+             * The current state is ESTABLISHED by this case, not inferred from an
+             * earlier wire message: `relayedMedia` is an event from the LOAD, and
+             * by the time this phase runs the session may already have cleared
+             * its media - reading that event as "what is current now" is the
+             * snapshot-as-current-state mistake this harness keeps punishing
+             * (measured: the first version of this case asserted a media replay
+             * for a registry that was already empty).
+             */
+            const readReplayMarkers = async () => {
+                await driver.switchTo().window(consoleTab);
+                return driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local.get(null).then(all => {
+                        const runId = all && all.__fxHarnessDiagnosticRunId;
+                        const prefix = (p) =>
+                            Object.keys(all || {})
+                                .filter(k => k.indexOf(p) === 0)
+                                .map(k => all[k])
+                                .filter(m => m && m.runId === runId)
+                                .sort((a, b) => a.seq - b.seq);
+                        done({
+                            runId,
+                            installed: (all || {}).__fxHarnessOwnerClearHookInstalled || null,
+                            inputs: prefix("__fxHarnessSetMediaInput_"),
+                            mirrors: prefix("__fxHarnessMirror_"),
+                            replays: prefix("__fxHarnessReplay_"),
+                            syncIdentities: prefix("__fxHarnessSyncMediaIdentity"),
+                            consumed: prefix("__fxHarnessOwnerClearConsumed_"),
+                            generations: prefix("__fxHarnessLoadGenerationBegan")
+                        });
+                     }, err => done({ error: String(err) }));`
+                );
+            };
+            let markers = await readReplayMarkers();
+            const hookDeadline = Date.now() + 20000;
+            while (
+                (!markers.installed ||
+                    markers.installed.runId !== diagnosticRunId) &&
+                Date.now() < hookDeadline
+            ) {
+                await sleep(300);
+                markers = await readReplayMarkers();
+            }
+            const generationN = markers.inputs.length
+                ? markers.inputs[markers.inputs.length - 1].loadGeneration
+                : undefined;
+            const mediaTemplate =
+                (relayedMedia && relayedMedia.message.data.media) || null;
+            check(
+                "discovery reconnect: the injection hook is installed and the current generation is known",
+                Boolean(
+                    markers.installed &&
+                        markers.installed.runId === diagnosticRunId
+                ) && Number.isFinite(generationN),
+                JSON.stringify({
+                    installed: markers.installed || null,
+                    generationN,
+                    inputs: markers.inputs.length
+                })
+            );
+
+            // Establish the current session media for the CURRENT generation.
+            const mediaR = mediaTemplate
+                ? {
+                      ...mediaTemplate,
+                      customData: {
+                          ...(mediaTemplate.customData || {}),
+                          harnessMarker: MARKER_R
+                      },
+                      metadata: {
+                          ...(mediaTemplate.metadata || {}),
+                          title: "reconnect replay media"
+                      }
+                  }
+                : null;
+            const establishAt = Date.now();
+            await driver.switchTo().window(consoleTab);
+            await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local.set({
+                    __fxHarnessOwnerClearRequest: {
+                        runId: ${JSON.stringify(diagnosticRunId)},
+                        requestId: "reconnect-establish",
+                        deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
+                        ownerId: ${JSON.stringify(OWNER_R)},
+                        media: ${JSON.stringify(mediaR)}
+                    }
+                 }).then(() => done(true), err => done(String(err)));`
+            );
+            let established;
+            const establishDeadline = Date.now() + 20000;
+            for (;;) {
+                const m = await readReplayMarkers();
+                established = m.inputs.find(
+                    i => i.ownerId === OWNER_R && i.at >= establishAt
+                );
+                if (established || Date.now() > establishDeadline) break;
+                await sleep(300);
+            }
+            check(
+                "discovery reconnect: the current session media was established for generation N (owner and marker known by construction)",
+                Boolean(established) &&
+                    established.marker === MARKER_R &&
+                    established.loadGeneration === generationN,
+                JSON.stringify(established || null)
+            );
+            // Let the (pre-kill) discovery host receive it, so the KILLED process
+            // is the one that held it - otherwise the replay could be satisfied
+            // by the process that never had it.
+            await sleep(2500);
+            const readReplayConnections = () =>
+                readNdjson(path.join(harnessDir, "spawns.ndjson"))
+                    .filter(entry => entry.event === undefined)
+                    .map(entry => ({
+                        pid: entry.pid,
+                        inbound: readNdjson(
+                            path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
+                        )
+                    }))
+                    .filter(c =>
+                        c.inbound.some(m => m.subject === "bridge:startDiscovery")
+                    );
+            const holder = readReplayConnections().find(c =>
+                c.inbound.some(
+                    m =>
+                        m.subject === "bridge:rokuSetSessionMedia" &&
+                        m.message.data.ownerId === OWNER_R
+                )
+            );
+            const beforeKillConnections = readReplayConnections().map(c => ({
+                pid: c.pid,
+                subjects: [...new Set(c.inbound.map(m => m.subject))]
+            }));
+            console.log(
+                "discovery reconnect: current state before the kill:",
+                JSON.stringify({
+                    generation: generationN,
+                    owner: OWNER_R,
+                    marker: MARKER_R,
+                    holderPid: holder && holder.pid,
+                    connections: beforeKillConnections
+                })
+            );
+            check(
+                "discovery reconnect: the discovery host that HOLDS the current session media is identified before the kill",
+                Boolean(holder) &&
+                    holder.inbound.some(
+                        m =>
+                            m.subject === "bridge:rokuSetSessionMedia" &&
+                            m.message.data.ownerId === OWNER_R &&
+                            m.message.data.loadGeneration === generationN
+                    ),
+                JSON.stringify(beforeKillConnections)
+            );
+            const victim = holder;
+            const killAt = Date.now();
+            let killed = false;
+            try {
+                if (victim) process.kill(victim.pid, "SIGKILL");
+                killed = Boolean(victim);
+            } catch (err) {
+                killed = false;
+            }
+            check(
+                "discovery reconnect: the current discovery host was killed (its caches die with it)",
+                killed,
+                JSON.stringify({
+                    pid: victim && victim.pid,
+                    beforeKillConnections
+                })
+            );
+
+            let revived;
+            const reviveDeadline = Date.now() + 60000;
+            for (;;) {
+                revived = readReplayConnections().find(
+                    c =>
+                        c.pid !== (victim && victim.pid) &&
+                        c.inbound.some(
+                            m =>
+                                m.subject === "bridge:startDiscovery" &&
+                                m.at >= killAt
+                        )
+                );
+                if (revived || Date.now() > reviveDeadline) break;
+                await sleep(1000);
+            }
+            const revivedIn = revived ? revived.inbound : [];
+            const replayedGeneration = revivedIn.find(
+                m =>
+                    m.subject === "bridge:rokuSetLoadGeneration" &&
+                    m.at >= killAt &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID
+            );
+            const replayedMedia = revivedIn.find(
+                m =>
+                    m.subject === "bridge:rokuSetSessionMedia" &&
+                    m.at >= killAt &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID
+            );
+            const reconnectFacts = {
+                victim: victim && victim.pid,
+                revivedPid: revived && revived.pid,
+                revivedSubjects: [...new Set(revivedIn.map(m => m.subject))],
+                replayedGeneration: replayedGeneration
+                    ? {
+                          generation: replayedGeneration.message.data.loadGeneration,
+                          at: replayedGeneration.at
+                      }
+                    : null,
+                replayedMedia: replayedMedia
+                    ? {
+                          ownerId: replayedMedia.message.data.ownerId,
+                          generation:
+                              replayedMedia.message.data.loadGeneration,
+                          marker: markerOf(replayedMedia.message.data.media),
+                          at: replayedMedia.at
+                      }
+                    : null
+            };
+            console.log(
+                "discovery reconnect: what the NEW process was told:",
+                JSON.stringify(reconnectFacts)
+            );
+            check(
+                "discovery reconnect: a NEW discovery host pid connected AND ran startDiscovery after the kill",
+                Boolean(revived) &&
+                    revived.pid !== (victim && victim.pid),
+                JSON.stringify(reconnectFacts)
+            );
+            check(
+                "discovery reconnect: the new process was replayed the CURRENT load generation",
+                Boolean(replayedGeneration) &&
+                    replayedGeneration.message.data.loadGeneration ===
+                        generationN,
+                JSON.stringify(reconnectFacts)
+            );
+            const replayMarkers = (await readReplayMarkers()).replays.filter(
+                r => r.at >= killAt
+            );
+            console.log(
+                "discovery reconnect: what the replay loop itself saw:",
+                JSON.stringify(replayMarkers)
+            );
+            const replayLoop = replayMarkers[replayMarkers.length - 1];
+            check(
+                "discovery reconnect: the replay loop ran for the replacement process and still knew this device's load identity",
+                Boolean(replayLoop) &&
+                    replayLoop.hasBridgePort === true &&
+                    (replayLoop.identities || []).some(
+                        i =>
+                            i.deviceId === FAKE_DEVICE_ID &&
+                            i.loadGeneration === generationN
+                    ),
+                JSON.stringify(replayMarkers.slice(-2))
+            );
+            if (expectDiscoveryReplayRecovered) {
+                check(
+                    "discovery-reconnect-fixed: the replay loop still HELD the current session-media mirror (so there was something to replay)",
+                    Boolean(replayLoop) &&
+                        replayLoop.mediaEntryCount === 1 &&
+                        (replayLoop.mediaEntries || []).some(
+                            e =>
+                                e.ownerId === OWNER_R && e.marker === MARKER_R
+                        ),
+                    JSON.stringify(replayMarkers.slice(-2))
+                );
+                check(
+                    "discovery-reconnect-fixed: the new process was replayed the CURRENT session media, with no owner, generation or marker drift",
+                    Boolean(replayedMedia) &&
+                        replayedMedia.message.data.ownerId === OWNER_R &&
+                        replayedMedia.message.data.loadGeneration ===
+                            generationN &&
+                        markerOf(replayedMedia.message.data.media) === MARKER_R,
+                    JSON.stringify(reconnectFacts)
+                );
+            } else {
+                check(
+                    "discovery-reconnect-gap: the discovery replacement recovered the load generation but lost the current session-media mirror",
+                    Boolean(replayedGeneration) &&
+                        replayedGeneration.message.data.loadGeneration ===
+                            generationN &&
+                        !replayedMedia &&
+                        Boolean(replayLoop) &&
+                        replayLoop.mediaEntryCount === 0,
+                    JSON.stringify({
+                        reconnectFacts,
+                        replayMarkers: replayMarkers.slice(-2)
+                    })
+                );
+            }
+            // Drift check on the extension's OWN state: the replay must be a copy
+            // of the current identity, not a new one.
+            const identityAfter = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
+                 browser.storage.local.get(null).then(all => {
+                    const runId = all && all.__fxHarnessDiagnosticRunId;
+                    const inputs = Object.keys(all || {})
+                        .filter(k => k.indexOf("__fxHarnessSetMediaInput_") === 0)
+                        .map(k => all[k])
+                        .filter(m => m && m.runId === runId)
+                        .sort((a, b) => a.seq - b.seq);
+                    const last = inputs[inputs.length - 1] || null;
+                    done({
+                        last,
+                        count: inputs.length,
+                        inputsAfterKill: inputs.filter(
+                            m => m.at >= ${killAt}
+                        ).length
+                    });
+                 }, err => done({ error: String(err) }));`
+            );
+            const lastInput = identityAfter && identityAfter.last;
+            // The replay must be a COPY of the retained mirror: if a producer (or
+            // the harness) had re-published media through the real setter, the
+            // wire evidence would look identical while the mechanism would not be
+            // the one under test.
+            const inputsAfterKill = identityAfter
+                ? identityAfter.inputsAfterKill
+                : undefined;
+            check(
+                "discovery reconnect: the replay did NOT re-enter setRokuSessionMedia (no producer re-published the media)",
+                Number.isFinite(inputsAfterKill) && inputsAfterKill === 0,
+                JSON.stringify({
+                    inputsAfterKill,
+                    lastInput: lastInput || null
+                })
+            );
+            check(
+                "discovery reconnect: the extension-side identity is unchanged by the replay (same owner, marker and generation)",
+                Boolean(lastInput) &&
+                    lastInput.ownerId === OWNER_R &&
+                    lastInput.marker === MARKER_R &&
+                    lastInput.loadGeneration === generationN,
+                JSON.stringify({ lastInput: lastInput || null })
             );
         }
 

@@ -527,6 +527,46 @@ the page". On the unfixed build `--request-settlement-fixed` is therefore red on
 exactly those two checks and nothing else (`50/52`), which is what makes it a
 usable red/green pair.
 
+### Discovery reconnect replay (`--discovery-reconnect-gap` / `-fixed`)
+
+```sh
+node test/integration/sessionHarness.js --discovery-reconnect-gap     # measured pre-fix loss
+node test/integration/sessionHarness.js --discovery-reconnect-fixed   # the intended replay
+```
+
+The discovery host is a separate native process whose caches start empty, and
+`deviceManager` is supposed to refill them on connect (`replayRokuLoadGenerations`:
+every current load generation AND every entry of the extension's session-media
+mirror). This pair kills the process and asks what the replacement was told.
+
+The case establishes its own current state instead of trusting an earlier wire
+message: it reads the current generation, injects current session media through
+`deviceManager.setRokuSessionMedia()` (owner and marker known by construction),
+finds the discovery PID that actually HOLD the media, SIGKILLs that PID, and waits
+for a NEW PID whose `bridge:startDiscovery` arrives after the kill. Reading the
+LOAD-time media event as "what is current now" was the first version's mistake -
+that registry had already been emptied, and the assertion blamed the wrong thing.
+
+| mode | asserted |
+| --- | --- |
+| `-gap` | the replacement recovered the load generation, but LOST the session-media mirror: the replay loop saw `mediaEntryCount === 0` and the new PID received no `bridge:rokuSetSessionMedia` |
+| `-fixed` | the new PID receives BOTH, with owner, generation and marker unchanged, and the replay loop saw `mediaEntryCount === 1` |
+
+Both also assert that the replay did NOT re-enter `setRokuSessionMedia` (no producer
+re-published the media: the wire evidence would look the same while the mechanism
+under test would not be exercised), and that the extension-side identity keeps the
+same owner/marker/generation.
+
+Measured pre-fix (`-gap` green, `-fixed` red on those two checks): the disconnect
+handler empties the very table the replay path reads, so the second loop of
+`replayRokuLoadGenerations` never has anything to send. What the replacement
+process can still show until some later session-media publish or a new LOAD is ECP
+state only - the duration, customData and DVR anchors carried by session media are
+missing from it.
+
+Not covered: owner replacement, generation advance, startup deadlines, and the real
+Session Host producer (the case injects at `setRokuSessionMedia`).
+
 ### Owner-aware session-media clear (`--owner-aware-clear`)
 
 ```sh
