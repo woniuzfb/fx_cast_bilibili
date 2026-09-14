@@ -216,6 +216,9 @@ function parseArgs(argv) {
         // synchronously starts a new requestSession does not get its state wiped
         // by the tail of the old handler.
         requestSettlementReentrant: false,
+        // Owner-aware session-media clear: a retired owner's LATE clear must not
+        // drop the current owner's media, locally or across the bridge.
+        ownerAwareClear: false,
         createFailure: false,
         interleave: false,
         // Which checkpoint of createCastSession the injection fires at.
@@ -271,6 +274,7 @@ function parseArgs(argv) {
             args.requestSettlementFixed = true;
         else if (argv[i] === "--request-settlement-reentrant")
             args.requestSettlementReentrant = true;
+        else if (argv[i] === "--owner-aware-clear") args.ownerAwareClear = true;
         else if (argv[i] === "--auto-cast-fixed") args.autoCastFixed = true;
         else if (argv[i] === "--request-source") {
             const value = argv[i + 1];
@@ -1214,9 +1218,95 @@ async function main() {
             () =>
                 storageMarker(
                     "__fxHarnessBgControl",
-                    "deviceId: String(deviceId), isClear: media === null"
-                )
+                    // `ownerId` and the media's own marker are what the
+                    // owner-aware clear case reads: "which owner wrote this" is
+                    // the whole question there, and a bare deviceId/isClear pair
+                    // cannot tell owner A's write from owner B's.
+                    "deviceId: String(deviceId), isClear: media === null, ownerId: String(ownerId), mediaMarker: (media && media.customData && media.customData.harnessMarker) || null, mediaTitle: (media && media.metadata && media.metadata.title) || null, loadGeneration: (currentRokuMediaIdentity(deviceId) || {}).loadGeneration ?? null"
+                ) +
+                // A COUNTABLE family as well: the key above is a single slot, so
+                // it can prove "a write happened" but never "one more write
+                // happened since the baseline" - which is the only form an
+                // owner-aware delta assertion can use.
+                "\ntry { const __fxInSeq = (globalThis.__fxHarnessSetMediaInputs = (globalThis.__fxHarnessSetMediaInputs || 0) + 1); browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => { void browser.storage.local.set({ ['__fxHarnessSetMediaInput_' + __fxInSeq]: { runId: r && r.__fxHarnessDiagnosticRunId, seq: __fxInSeq, deviceId: String(deviceId), ownerId: String(ownerId), isClear: media === null, marker: (media && media.customData && media.customData.harnessMarker) || null, loadGeneration: (currentRokuMediaIdentity(deviceId) || {}).loadGeneration ?? null, at: Date.now() } }).catch(() => {}); }).catch(() => {}); } catch (e) {}" +
+                // One-time control listener for the owner-aware clear case: the
+                // harness writes a run-bound request and this calls the method
+                // UNDER TEST with it. Installed here because this method is
+                // guaranteed to run during any Roku load, and `this` is the
+                // deviceManager instance the real caller would reach.
+                "\n" +
+                "      if (!globalThis.__fxHarnessOwnerClearHook) {\n" +
+                "        globalThis.__fxHarnessOwnerClearHook = true;\n" +
+                "        const __fxOwnerSelf = this;\n" +
+                "        try {\n" +
+                "          browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => {\n" +
+                "            void browser.storage.local.set({ __fxHarnessOwnerClearHookInstalled: { runId: r && r.__fxHarnessDiagnosticRunId, at: Date.now() } }).catch(() => {});\n" +
+                "          }).catch(() => {});\n" +
+                "          browser.storage.onChanged.addListener((changes, area) => {\n" +
+                "            if (area !== 'local') return;\n" +
+                "            const req = changes.__fxHarnessOwnerClearRequest && changes.__fxHarnessOwnerClearRequest.newValue;\n" +
+                "            if (!req || !req.requestId) return;\n" +
+                "            if (globalThis.__fxHarnessOwnerClearConsumed === req.requestId) return;\n" +
+                "            browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => {\n" +
+                "              const runId = r && r.__fxHarnessDiagnosticRunId;\n" +
+                "              if (req.runId !== runId) return;\n" +
+                "              if (globalThis.__fxHarnessOwnerClearConsumed === req.requestId) return;\n" +
+                "              globalThis.__fxHarnessOwnerClearConsumed = req.requestId;\n" +
+                "              const media = req.media || null;\n" +
+                "              try {\n" +
+                "                __fxOwnerSelf.setRokuSessionMedia(req.deviceId, req.ownerId, media);\n" +
+                "                void browser.storage.local.set({ ['__fxHarnessOwnerClearConsumed_' + req.requestId]: { runId: runId, requestId: req.requestId, deviceId: req.deviceId, ownerId: req.ownerId, isClear: media === null, at: Date.now() } }).catch(() => {});\n" +
+                "              } catch (e) {\n" +
+                "                void browser.storage.local.set({ ['__fxHarnessOwnerClearError_' + req.requestId]: { runId: runId, requestId: req.requestId, error: String(e) } }).catch(() => {});\n" +
+                "              }\n" +
+                "            }).catch(() => {});\n" +
+                "          });\n" +
+                "        } catch (e) {}\n" +
+                "      }"
         );
+        // The owner-aware clear case needs to know WHICH outcome the guard took,
+        // not just that the method ran: an ignored clear and an applied clear
+        // look identical in the entry marker. One outcome marker family, written
+        // on the matching side of the guard, carrying both owners and the
+        // generation the decision was made under.
+        const clearOutcomeMarker = outcome =>
+            "\n" +
+            "        try {\n" +
+            "          const __fxSeq = (globalThis.__fxHarnessClearOutcomes = (globalThis.__fxHarnessClearOutcomes || 0) + 1);\n" +
+            "          browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => {\n" +
+            "            void browser.storage.local.set({ ['__fxHarnessClearOutcome_' + __fxSeq]: { runId: r && r.__fxHarnessDiagnosticRunId, seq: __fxSeq, outcome: " +
+            JSON.stringify(outcome) +
+            ", deviceId: String(deviceId), ownerId: String(ownerId), currentOwnerId: current && current.ownerId ? String(current.ownerId) : null, loadGeneration: (currentRokuMediaIdentity(deviceId) || {}).loadGeneration ?? null, at: Date.now() } }).catch(() => {});\n" +
+            "          }).catch(() => {});\n" +
+            "        } catch (e) {}";
+        patch(
+            "background/background.js",
+            "if (current?.ownerId === ownerId) {",
+            () => clearOutcomeMarker("applied")
+        );
+        // The ignored side is reached only when the guard does NOT match, so the
+        // patch turns the guard into `if/else` rather than appending after it.
+        {
+            const file = path.join(extensionDir, "background/background.js");
+            const text = fs.readFileSync(file, "utf8");
+            const anchor =
+                "        }\n        return;\n      }\n      this.rokuSessionMedia.set(deviceId, { ownerId, media });";
+            const occurrences = text.split(anchor).length - 1;
+            if (occurrences !== 1) {
+                throw new Error(
+                    `sessionHarness: the owner-aware clear branch was not found exactly once (found ${occurrences})`
+                );
+            }
+            fs.writeFileSync(
+                file,
+                text.replace(
+                    anchor,
+                    "        } else {" +
+                        clearOutcomeMarker("ignored") +
+                        "\n        }\n        return;\n      }\n      this.rokuSessionMedia.set(deviceId, { ownerId, media });"
+                )
+            );
+        }
         patch(
             "background/background.js",
             "syncRokuSessionMediaToBridge(deviceId, ownerId, media) {",
@@ -1224,7 +1314,11 @@ async function main() {
                 storageMarker(
                     "__fxHarnessSyncMediaEnter",
                     "deviceId, ownerId, isClear: media === null, hasBridgePort: Boolean(this.bridgePort), mediaPresent: media !== null"
-                )
+                ) +
+                // Countable: every crossing of the extension -> discovery
+                // boundary, so "the retired owner's clear did not cross" can be
+                // a delta of 0 rather than an absence in a single-slot key.
+                "\ntry { const __fxMSeq = (globalThis.__fxHarnessMirrors = (globalThis.__fxHarnessMirrors || 0) + 1); browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => { void browser.storage.local.set({ ['__fxHarnessMirror_' + __fxMSeq]: { runId: r && r.__fxHarnessDiagnosticRunId, seq: __fxMSeq, deviceId: String(deviceId), ownerId: String(ownerId), isClear: media === null, marker: (media && media.customData && media.customData.harnessMarker) || null, loadGeneration: (currentRokuMediaIdentity(deviceId) || {}).loadGeneration ?? null, at: Date.now() } }).catch(() => {}); }).catch(() => {}); } catch (e) {}"
         );
         // After the identity is read, report whether one was found. Anchored on
         // the assignment statement, which is bundle text that survives minifying
@@ -5698,6 +5792,363 @@ async function main() {
                         }))
                         .slice(-4)
                 )
+            );
+        }
+
+        // ---- owner-aware clear: who may remove the current session media ----
+        //
+        // Injected at `deviceManager.setRokuSessionMedia()`, which is where the
+        // whole owner-aware decision lives: the `main:rokuSessionMedia` handler
+        // only forwards deviceId/sessionId/media. Downstream is REAL -
+        // `syncRokuSessionMediaToBridge` -> discovery host -> RokuSessionMediaSync
+        // -> `main:receiverDeviceMediaStatusUpdated`. What this case does NOT
+        // cover is that handler's field forwarding, and it deliberately does not
+        // advance the generation, reconnect, or touch any startup deadline.
+        if (args.ownerAwareClear) {
+            const OWNER_A = "session:harness-A";
+            const OWNER_B = "session:harness-B";
+            const MARKER_A = "owner-clear-A";
+            const MARKER_B = "owner-clear-B";
+            const generationN =
+                relayedMedia && relayedMedia.message.data.loadGeneration;
+            const mediaTemplate = relayedMedia && relayedMedia.message.data.media;
+
+            const readOwnerMarkers = async () => {
+                await driver.switchTo().window(consoleTab);
+                return driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local.get(null).then(all => {
+                        const runId = all && all.__fxHarnessDiagnosticRunId;
+                        const prefix = (p) =>
+                            Object.keys(all || {})
+                                .filter(k => k.indexOf(p) === 0)
+                                .map(k => all[k])
+                                .filter(m => m && m.runId === runId);
+                        done({
+                            runId,
+                            installed: (all || {}).__fxHarnessOwnerClearHookInstalled || null,
+                            inputs: prefix("__fxHarnessSetMediaInput_"),
+                            mirrors: prefix("__fxHarnessMirror_"),
+                            outcomes: prefix("__fxHarnessClearOutcome_"),
+                            consumed: prefix("__fxHarnessOwnerClearConsumed_"),
+                            errors: prefix("__fxHarnessOwnerClearError_"),
+                            generationSet: prefix("__fxHarnessLoadGenerationBegan")
+                        });
+                     }, err => done({ error: String(err) }));`
+                );
+            };
+            const statusSamplesSince = at =>
+                discoveryConnectionsNow
+                    .flatMap(conn =>
+                        readNdjson(
+                            path.join(harnessDir, `conn-${conn.pid}-out.ndjson`)
+                        )
+                    )
+                    .filter(
+                        m =>
+                            m.subject ===
+                                "main:receiverDeviceMediaStatusUpdated" &&
+                            m.message.data.deviceId === FAKE_DEVICE_ID &&
+                            m.at >= at
+                    )
+                    .map(m => ({
+                        at: m.at,
+                        marker: markerOf(m.message.data.status.media),
+                        owner: m.message.data.status.media
+                            ? m.message.data.status.media.sessionId || null
+                            : null
+                    }));
+            const refreshDevice = async label => {
+                // A real refresh that cannot change the session-media OWNER: the
+                // device is re-driven over ECP, which makes the discovery host
+                // re-poll and publish a fresh status. Using only a pre-clear DOM
+                // read would let "nothing happened" look like "B is still here".
+                await post("/state", {
+                    playerState: "play",
+                    position: 35,
+                    duration: 600,
+                    title: `harness-owner-clear-${label}`
+                });
+                await sleep(3000);
+            };
+            const requestOwnerWrite = async (requestId, ownerId, marker) => {
+                const media = marker
+                    ? {
+                          ...(mediaTemplate || {}),
+                          customData: {
+                              ...((mediaTemplate && mediaTemplate.customData) ||
+                                  {}),
+                              harnessMarker: marker
+                          },
+                          metadata: {
+                              ...((mediaTemplate && mediaTemplate.metadata) ||
+                                  {}),
+                              title: `session media ${marker}`
+                          }
+                      }
+                    : null;
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local.set({
+                        __fxHarnessOwnerClearRequest: {
+                            runId: ${JSON.stringify(diagnosticRunId)},
+                            requestId: ${JSON.stringify(requestId)},
+                            deviceId: ${JSON.stringify(FAKE_DEVICE_ID)},
+                            ownerId: ${JSON.stringify(ownerId)},
+                            media: ${JSON.stringify(media)}
+                        }
+                     }).then(() => done(true), err => done(String(err)));`
+                );
+                return Date.now();
+            };
+            const waitForConsumed = async requestId => {
+                const deadline = Date.now() + 20000;
+                for (;;) {
+                    const markers = await readOwnerMarkers();
+                    const done = markers.consumed.find(
+                        c => c.requestId === requestId
+                    );
+                    if (done || Date.now() > deadline) return markers;
+                    await sleep(300);
+                }
+            };
+            const countOutcomes = (markers, outcome, at) =>
+                markers.outcomes.filter(
+                    o => o.outcome === outcome && (!at || o.at >= at)
+                );
+            const countMirrors = (markers, isClear, at) =>
+                markers.mirrors.filter(
+                    m => m.isClear === isClear && (!at || m.at >= at)
+                );
+            const wireClearsSince = at =>
+                discoveryConnectionsNow
+                    .flatMap(conn =>
+                        readNdjson(
+                            path.join(harnessDir, `conn-${conn.pid}-in.ndjson`)
+                        )
+                    )
+                    .filter(
+                        m =>
+                            m.subject === "bridge:rokuSetSessionMedia" &&
+                            m.at >= at &&
+                            m.message &&
+                            m.message.data &&
+                            m.message.data.media === null &&
+                            m.message.data.deviceId === FAKE_DEVICE_ID
+                    );
+
+            let markers = await readOwnerMarkers();
+            const hookDeadline = Date.now() + 20000;
+            while (
+                (!markers.installed || markers.installed.runId !== diagnosticRunId) &&
+                Date.now() < hookDeadline
+            ) {
+                await sleep(300);
+                markers = await readOwnerMarkers();
+            }
+            check(
+                "owner-aware clear: the injection hook is installed (a load ran, so setRokuSessionMedia was reached)",
+                Boolean(
+                    markers.installed && markers.installed.runId === diagnosticRunId
+                ),
+                JSON.stringify(markers.installed || null)
+            );
+            check(
+                "owner-aware clear: the case runs inside ONE load generation (the media template and its generation exist)",
+                Boolean(mediaTemplate) && Number.isFinite(generationN),
+                JSON.stringify({
+                    hasMedia: Boolean(mediaTemplate),
+                    generation: generationN
+                })
+            );
+
+            // --- A: owner A writes ------------------------------------------
+            const setAAt = await requestOwnerWrite("oc-set-A", OWNER_A, MARKER_A);
+            markers = await waitForConsumed("oc-set-A");
+            await refreshDevice("A");
+            const samplesA = statusSamplesSince(setAAt);
+            const inputA = markers.inputs.filter(
+                i => i.ownerId === OWNER_A && i.at >= setAAt
+            );
+            const mirrorA = countMirrors(markers, false, setAAt);
+            console.log(
+                "owner-aware clear A:",
+                JSON.stringify({
+                    inputs: inputA.map(i => ({
+                        ownerId: i.ownerId,
+                        marker: i.marker,
+                        generation: i.loadGeneration
+                    })),
+                    mirrorSets: mirrorA.length,
+                    statusMarkers: samplesA.map(s => s.marker)
+                })
+            );
+            check(
+                "owner-aware clear A: owner A's write was adopted locally and mirrored to discovery once, under generation N",
+                inputA.length === 1 &&
+                    inputA[0].marker === MARKER_A &&
+                    inputA[0].loadGeneration === generationN &&
+                    mirrorA.length === 1 &&
+                    mirrorA[0].ownerId === OWNER_A &&
+                    mirrorA[0].marker === MARKER_A,
+                JSON.stringify({ inputA, mirrorA })
+            );
+            check(
+                "owner-aware clear A: A's media is visible downstream (a fresh discovery status carries it)",
+                samplesA.some(s => s.marker === MARKER_A),
+                JSON.stringify(samplesA.slice(-4))
+            );
+
+            // --- B: owner B replaces A --------------------------------------
+            const setBAt = await requestOwnerWrite("oc-set-B", OWNER_B, MARKER_B);
+            markers = await waitForConsumed("oc-set-B");
+            await refreshDevice("B");
+            const samplesB = statusSamplesSince(setBAt);
+            const mirrorB = countMirrors(markers, false, setBAt);
+            const bVisibleAt =
+                (samplesB.find(s => s.marker === MARKER_B) || {}).at ||
+                setBAt;
+            console.log(
+                "owner-aware clear B:",
+                JSON.stringify({
+                    mirrorSets: mirrorB.length,
+                    statusMarkers: samplesB.map(s => s.marker),
+                    bVisibleAt
+                })
+            );
+            check(
+                "owner-aware clear B: owner B's write replaced A and was mirrored once",
+                mirrorB.length === 1 &&
+                    mirrorB[0].ownerId === OWNER_B &&
+                    mirrorB[0].marker === MARKER_B,
+                JSON.stringify(mirrorB)
+            );
+            check(
+                "owner-aware clear B: B's media is visible downstream (the new baseline for the stale clear)",
+                samplesB.some(s => s.marker === MARKER_B),
+                JSON.stringify(samplesB.slice(-4))
+            );
+
+            // --- C: owner A's LATE clear ------------------------------------
+            const staleClearAt = await requestOwnerWrite(
+                "oc-clear-A",
+                OWNER_A,
+                null
+            );
+            markers = await waitForConsumed("oc-clear-A");
+            await refreshDevice("stale");
+            const ignored = countOutcomes(markers, "ignored", staleClearAt);
+            const appliedAfterStale = countOutcomes(
+                markers,
+                "applied",
+                staleClearAt
+            );
+            const mirrorClearsAfterStale = countMirrors(
+                markers,
+                true,
+                staleClearAt
+            );
+            const wireClearsAfterStale = wireClearsSince(staleClearAt);
+            const samplesStale = statusSamplesSince(staleClearAt);
+            const staleFacts = {
+                ignored: ignored.map(i => ({
+                    ownerId: i.ownerId,
+                    currentOwnerId: i.currentOwnerId,
+                    generation: i.loadGeneration
+                })),
+                applied: appliedAfterStale.length,
+                mirrorClears: mirrorClearsAfterStale.length,
+                wireClears: wireClearsAfterStale.length,
+                statusMarkers: samplesStale.map(s => s.marker)
+            };
+            console.log(
+                "owner-aware clear C (stale):",
+                JSON.stringify(staleFacts)
+            );
+            check(
+                "the retired owner's late clear did not cross the local or wire boundary",
+                ignored.length === 1 &&
+                    ignored[0].ownerId === OWNER_A &&
+                    ignored[0].currentOwnerId === OWNER_B &&
+                    ignored[0].loadGeneration === generationN &&
+                    appliedAfterStale.length === 0 &&
+                    mirrorClearsAfterStale.length === 0 &&
+                    wireClearsAfterStale.length === 0,
+                JSON.stringify(staleFacts)
+            );
+            check(
+                "owner-aware clear C: B's media is STILL visible in a status published AFTER the stale clear",
+                samplesStale.some(s => s.marker === MARKER_B),
+                JSON.stringify(staleFacts.statusMarkers)
+            );
+
+            // --- D: the current owner clears --------------------------------
+            const appliedClearAt = await requestOwnerWrite(
+                "oc-clear-B",
+                OWNER_B,
+                null
+            );
+            markers = await waitForConsumed("oc-clear-B");
+            await refreshDevice("applied");
+            const applied = countOutcomes(markers, "applied", appliedClearAt);
+            const mirrorClearsApplied = countMirrors(
+                markers,
+                true,
+                appliedClearAt
+            );
+            const wireClearsApplied = wireClearsSince(appliedClearAt);
+            const samplesApplied = statusSamplesSince(appliedClearAt);
+            const appliedFacts = {
+                applied: applied.map(a => ({
+                    ownerId: a.ownerId,
+                    currentOwnerId: a.currentOwnerId,
+                    generation: a.loadGeneration
+                })),
+                mirrorClears: mirrorClearsApplied.map(m => ({
+                    ownerId: m.ownerId,
+                    generation: m.loadGeneration
+                })),
+                wireClears: wireClearsApplied.map(m => ({
+                    ownerId: m.message.data.ownerId,
+                    generation: m.message.data.loadGeneration,
+                    deviceId: m.message.data.deviceId
+                })),
+                statusMarkers: samplesApplied.map(s => s.marker)
+            };
+            console.log(
+                "owner-aware clear D (applied):",
+                JSON.stringify(appliedFacts)
+            );
+            check(
+                "owner-aware clear D: the CURRENT owner's clear was applied, mirrored once and crossed the wire under generation N",
+                applied.length === 1 &&
+                    applied[0].ownerId === OWNER_B &&
+                    applied[0].currentOwnerId === OWNER_B &&
+                    applied[0].loadGeneration === generationN &&
+                    mirrorClearsApplied.length === 1 &&
+                    mirrorClearsApplied[0].ownerId === OWNER_B &&
+                    mirrorClearsApplied[0].loadGeneration === generationN &&
+                    wireClearsApplied.length === 1 &&
+                    wireClearsApplied[0].message.data.ownerId === OWNER_B &&
+                    wireClearsApplied[0].message.data.loadGeneration ===
+                        generationN &&
+                    wireClearsApplied[0].message.data.deviceId === FAKE_DEVICE_ID,
+                JSON.stringify(appliedFacts)
+            );
+            check(
+                "owner-aware clear D: after the applied clear, no status sample still carries B's media",
+                !samplesApplied.some(s => s.marker === MARKER_B) &&
+                    samplesApplied.length >= 1,
+                JSON.stringify(appliedFacts.statusMarkers)
+            );
+            const generationSetAfter = (
+                await readOwnerMarkers()
+            ).generationSet.filter(g => g.at >= setAAt);
+            check(
+                "owner-aware clear sequence did not advance the LOAD generation",
+                generationSetAfter.length === 0,
+                JSON.stringify(generationSetAfter)
             );
         }
 

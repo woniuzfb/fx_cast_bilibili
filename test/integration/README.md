@@ -527,6 +527,58 @@ the page". On the unfixed build `--request-settlement-fixed` is therefore red on
 exactly those two checks and nothing else (`50/52`), which is what makes it a
 usable red/green pair.
 
+### Owner-aware session-media clear (`--owner-aware-clear`)
+
+```sh
+node test/integration/sessionHarness.js --owner-aware-clear
+```
+
+A session registers its LOAD media under an owner (the session id) for the current
+load generation, and a CLEAR from that owner removes it. A clear from an owner that
+has since been replaced must not: the extension keeps the current owner's media and
+does not mirror the clear to the discovery host, and the discovery host has its own
+guard on top of that.
+
+Injection boundary: this case enters at `deviceManager.setRokuSessionMedia()` - the
+function that holds the whole owner-aware decision - and the `main:rokuSessionMedia`
+handler only forwards `deviceId`/`sessionId`/`media` into it. Everything downstream
+is real (`syncRokuSessionMediaToBridge` -> discovery host -> `RokuSessionMediaSync`
+-> `main:receiverDeviceMediaStatusUpdated`). What it does NOT cover is that
+handler's field forwarding. It deliberately does not advance the generation,
+reconnect, or touch a startup deadline.
+
+Four phases, all inside ONE load generation (asserted: no new generation
+announcement for the whole sequence):
+
+| phase | action | asserted |
+| --- | --- | --- |
+| A | owner A publishes media (marker `owner-clear-A`) | adopted locally, mirrored once under generation N, and VISIBLE downstream in a fresh status |
+| B | owner B publishes media (marker `owner-clear-B`) | replaces A, mirrored once; B's visibility is the new baseline |
+| C | owner A sends a LATE clear | exactly one `ignored` outcome naming A as caller and B as current owner, zero `applied`, zero mirror clears, zero clear messages on the wire - and B's media still visible in a status published AFTER the clear |
+| D | the CURRENT owner (B) clears | exactly one `applied`, one mirror, one wire clear whose deviceId/ownerId/generation match, and no later status sample carrying B's media |
+
+Both C and D use a real refresh (`ECP /state`) before reading the downstream status,
+so "B is still visible" cannot be satisfied by a stale DOM reading taken before the
+clear, and "B is gone" cannot be satisfied by "nothing was published".
+
+The evidence is deliberately three-layered: local adoption (`__fxHarnessClearOutcome_*`),
+the extension -> discovery boundary (`__fxHarnessMirror_*` plus the real
+`bridge:rokuSetSessionMedia` messages on the wire), and downstream consumption
+(`main:receiverDeviceMediaStatusUpdated`).
+
+Counter-control (a build whose registry lookup is replaced by a stand-in whose
+`ownerId` IS the caller's, so the guard always matches - never committed): the
+headline check "the retired owner's late clear did not cross the local or wire
+boundary" goes red with `ignored: []`, `applied: 1`, `mirrorClears: 1`,
+`wireClears: 1`, and nothing else fails.
+
+Worth knowing, and measured rather than assumed: the downstream "B is still
+visible" check does NOT discriminate the extension-side guard, because the
+discovery host runs its OWN owner-aware guard and refused the stale clear even in
+the counter-control. The discriminating evidence for the extension side is the
+local outcome marker and the wire crossing - which is exactly what the headline
+check reads. Two layers, two guards, one of which can mask the other.
+
 ### Page settlement: who settled the page, and how often
 
 `--request-source selector|queued` chooses which caller drives the session start.
