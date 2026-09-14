@@ -11,6 +11,11 @@
         inline?: boolean;
         value?: any;
         checked?: boolean;
+        /**
+         * When set, renders a `<select>` instead of an `<input>`. `value` is
+         * bound to the selected choice's value.
+         */
+        choices?: Array<{ value: string; label: string }>;
     }
 
     export let id: string;
@@ -23,6 +28,8 @@
     // Bindables
     export let value: any = undefined;
     export let checked: boolean | undefined = undefined;
+    export let choices: Array<{ value: string; label: string }> | undefined =
+        undefined;
 
     let computedClassName: string;
     $: {
@@ -39,7 +46,15 @@
     -->
     {#if inline}
         <div class="option__control">
-            {#if $$restProps.type === "checkbox"}
+            {#if choices}
+                <div class="select-wrapper">
+                    <select {id} bind:value>
+                        {#each choices as choice (choice.value)}
+                            <option value={choice.value}>{choice.label}</option>
+                        {/each}
+                    </select>
+                </div>
+            {:else if $$restProps.type === "checkbox"}
                 <input {id} type="checkbox" bind:checked {...$$restProps} />
             {:else}
                 <input {id} bind:value {...$$restProps} />
@@ -71,7 +86,15 @@
             <slot name="label" />
         </label>
         <div class="option__control">
-            {#if $$restProps.type === "checkbox"}
+            {#if choices}
+                <div class="select-wrapper">
+                    <select {id} bind:value>
+                        {#each choices as choice (choice.value)}
+                            <option value={choice.value}>{choice.label}</option>
+                        {/each}
+                    </select>
+                </div>
+            {:else if $$restProps.type === "checkbox"}
                 <input {id} type="checkbox" bind:checked {...$$restProps} />
             {:else}
                 <input {id} bind:value {...$$restProps} />

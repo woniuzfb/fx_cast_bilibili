@@ -694,6 +694,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "顯示詳細的 CCTV 後台日誌。"
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "Bilibili 投放至 Roku 裝置時的影片轉碼方式。套用於新的 Roku 投放。"
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "影片轉碼："
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "為 Roku 重新編碼 Bilibili 影片時使用的 x264 預設。預設越慢，相同容量下畫質越好，但本機 CPU 使用率越高。選擇 copy 會完全略過重新編碼（速度最快、畫質無損），但許多舊款 Roku 裝置不支援 AV1 或 HEVC，這類影片選 copy 會黑屏。"
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy（不轉碼）"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "未能擷取 CCTV 直播串流網址。請確認頁面中的直播正在播放，然後再試。"
     },

@@ -830,6 +830,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "Показывать подробную диагностику реле CCTV в фоновой консоли расширения."
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "Как транскодируется видео Bilibili при трансляции на устройства Roku. Применяется к новым трансляциям на Roku."
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "Транскодирование видео:"
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "Пресет x264, которым видео Bilibili перекодируется для Roku. Более медленные пресеты дают лучшее качество при том же размере файла, но сильнее нагружают процессор этого компьютера. «copy» полностью пропускает перекодирование (быстрее всего, без потери качества), но многие старые устройства Roku не декодируют AV1 и HEVC, поэтому при выборе copy для такого потока экран остаётся чёрным."
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy (без перекодирования)"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "Не удалось получить URL прямого эфира CCTV. Убедитесь, что видео с прямым эфиром воспроизводится на странице, и повторите попытку."
     },

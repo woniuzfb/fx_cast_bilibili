@@ -626,6 +626,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "Vis detaljert CCTV-relédiagnostikk i utvidelsens bakgrunnskonsoll."
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "Hvordan Bilibili-caster til Roku-enheter transkodes. Gjelder nye Roku-caster."
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "Videotranskoding:"
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "x264-forhåndsinnstillingen som brukes til å kode Bilibili-videoen på nytt for Roku. Tregere innstillinger gir bedre kvalitet ved samme filstørrelse, men bruker mer CPU på denne maskinen. «copy» hopper helt over omkodingen (raskest, uten kvalitetstap), men mange eldre Roku-enheter kan ikke dekode AV1 eller HEVC, så copy på en slik strøm gir svart skjerm."
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy (ingen omkoding)"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "Kunne ikke hente nettadressen til CCTV-direktestrømmen. Pass på at direktevideoen spilles av på siden, og prøv igjen."
     },

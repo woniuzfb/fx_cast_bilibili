@@ -9,12 +9,25 @@
 
     import options, { type Options } from "../../lib/options";
     import defaultOptions from "../../defaultOptions";
+    import {
+        ROKU_TRANSCODE_PRESETS,
+        normalizeRokuTranscodePreset
+    } from "../../lib/rokuTranscodePresets";
 
     import { getChromeUserAgentString } from "../../lib/userAgents";
     import Option from "./Option.svelte";
     import OptionsCategory from "./OptionsCategory.svelte";
 
     const _ = browser.i18n.getMessage;
+
+    /**
+     * Preset names double as the ffmpeg argument they map to, so only the
+     * "copy" pseudo-preset gets a translated label.
+     */
+    const rokuTranscodePresetChoices = ROKU_TRANSCODE_PRESETS.map(preset => ({
+        value: preset,
+        label: preset === "copy" ? _("optionsRokuTranscodeCopy") : preset
+    }));
 
     let formElement: HTMLFormElement;
     let isFormValid = true;
@@ -23,6 +36,19 @@
     let defaultUserAgent: Optional<string>;
 
     let opts: Options | undefined;
+
+    /**
+     * Options stored before this setting existed (or hand-edited) would leave
+     * the select on its first entry — "copy", the one that can black-screen —
+     * and save that back. Clamp the loaded value onto the default instead.
+     */
+    $: if (opts) {
+        const preset = normalizeRokuTranscodePreset(opts.rokuTranscodePreset);
+        if (preset !== opts.rokuTranscodePreset) {
+            opts = { ...opts, rokuTranscodePreset: preset };
+        }
+    }
+
     onMount(async () => {
         const platform = (await browser.runtime.getPlatformInfo()).os;
         defaultUserAgent = await getChromeUserAgentString(platform);
@@ -139,6 +165,19 @@
                 min="1025"
                 max="65535"
                 bind:value={opts.localMediaServerPort}
+            />
+        </OptionsCategory>
+
+        <OptionsCategory
+            name={_("optionsRokuCategoryName")}
+            description={_("optionsRokuCategoryDescription")}
+        >
+            <Option
+                id="rokuTranscodePreset"
+                label={_("optionsRokuTranscodePreset")}
+                description={_("optionsRokuTranscodePresetDescription")}
+                choices={rokuTranscodePresetChoices}
+                bind:value={opts.rokuTranscodePreset}
             />
         </OptionsCategory>
 

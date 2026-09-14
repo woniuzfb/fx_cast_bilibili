@@ -24,6 +24,33 @@ let dashServerGeneration = 0;
 const dashAuxProcesses = new Set<ChildProcess>();
 
 /**
+ * Roku DASH remux video handling. Any preset name is passed to x264; the
+ * literal "copy" skips the video re-encode entirely and remuxes the
+ * representation the page player selected as-is. Only x264 is offered: the
+ * point of the transcode is that older Roku devices cannot decode AV1/HEVC,
+ * which is also why "copy" can black-screen on such devices (the extension
+ * warns about it in the UI when the option is selected).
+ */
+const ROKU_TRANSCODE_PRESETS = new Set([
+    "copy",
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium"
+]);
+const ROKU_DEFAULT_TRANSCODE_PRESET = "veryfast";
+
+/** Unknown/absent values fall back to the long-standing default so a stale
+ *  extension cannot select arbitrary ffmpeg arguments. */
+function normalizeRokuTranscodePreset(preset?: string): string {
+    return preset && ROKU_TRANSCODE_PRESETS.has(preset)
+        ? preset
+        : ROKU_DEFAULT_TRANSCODE_PRESET;
+}
+
+/**
  * Observers notified on EVERY request reaching the live HLS relay (any path,
  * including playlist/segment/capture traffic). Purely observational
  * instrumentation for Roku session emulation (roku/session.ts uses it to learn
@@ -364,7 +391,8 @@ async function startDashRemuxServer(
     referer: string,
     port: number,
     startTime = 0,
-    rokuDashPrebuffer = false
+    rokuDashPrebuffer = false,
+    rokuTranscodePreset?: string
 ) {
     if (!remoteHostAllowed(videoUrl) || !remoteHostAllowed(audioUrl)) {
         messaging.sendMessage({
@@ -1571,6 +1599,9 @@ async function startDashRemuxServer(
     const ROKU_DASH_PREBUFFER_SEGMENTS = 12;
     const ROKU_DASH_SEGMENT_SECONDS = 4;
     const ROKU_DASH_CACHE_KEEP = 16;
+    // Validated user preference for the Roku video transcode (see
+    // ROKU_TRANSCODE_PRESETS); only consulted on the rokuDashPrebuffer path.
+    const rokuPreset = normalizeRokuTranscodePreset(rokuTranscodePreset);
     const rokuDashSegmentCache = new Map<number, Buffer>();
     let rokuDashWindowStartedAt = 0;
 
@@ -1745,16 +1776,21 @@ async function startDashRemuxServer(
         "-map",
         "1:a:0",
         // libx264 is a Roku compatibility requirement for older devices that
-        // cannot decode the page-selected AV1/HEVC representation. Keep the
-        // established Chromecast path in stream-copy mode: making every DASH
-        // cast transcode delayed segment production enough for Chromecast to
-        // remain buffering while the source page was already paused.
-        ...(rokuDashPrebuffer
+        // cannot decode the page-selected AV1/HEVC representation; the preset
+        // is the user's quality/speed preference (veryfast unless changed).
+        // "copy" skips the re-encode: the receiver then has to decode the
+        // captured codec itself, which black-screens on AV1/HEVC-only
+        // devices — the extension warns about that in the option's help text.
+        // Keep the established Chromecast path in stream-copy mode: making
+        // every DASH cast transcode delayed segment production enough for
+        // Chromecast to remain buffering while the source page was already
+        // paused.
+        ...(rokuDashPrebuffer && rokuPreset !== "copy"
             ? [
                   "-c:v",
                   "libx264",
                   "-preset",
-                  "veryfast",
+                  rokuPreset,
                   "-pix_fmt",
                   "yuv420p",
                   "-c:a",
@@ -5326,7 +5362,8 @@ export async function startRemoteMediaServer(
     hlsLive = false,
     userAgent?: string,
     cctvDebugEnabled = false,
-    rokuDashPrebuffer = false
+    rokuDashPrebuffer = false,
+    rokuTranscodePreset?: string
 ) {
     if (hlsLive) {
         await startLiveHlsRelayServer(
@@ -5349,7 +5386,8 @@ export async function startRemoteMediaServer(
             referer,
             port,
             startTime,
-            rokuDashPrebuffer
+            rokuDashPrebuffer,
+            rokuTranscodePreset
         );
         return;
     }

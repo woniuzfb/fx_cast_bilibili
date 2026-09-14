@@ -698,6 +698,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "Show verbose CCTV relay diagnostics in the extension background console."
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "How Bilibili casts to Roku devices are transcoded. Applies to new Roku casts."
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "Video transcode:"
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "x264 preset used to re-encode the Bilibili video for Roku. Slower presets give better quality at the same file size, but use more CPU on this computer. \"copy\" skips the re-encode entirely (fastest, no quality loss), but many older Roku devices cannot decode AV1 or HEVC, so choosing copy for such a stream displays a black screen."
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy (no re-encode)"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "Could not capture the CCTV live stream URL. Make sure the live video is playing on the page, then try again."
     },

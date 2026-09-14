@@ -4,6 +4,7 @@ import type {
 } from "../../../../shared/playbackCommand";
 import { Logger } from "../../lib/logger";
 import defaultOptions, { type Options } from "../../defaultOptions";
+import { normalizeRokuTranscodePreset } from "../../lib/rokuTranscodePresets";
 
 import type { Message } from "../../messaging";
 
@@ -2487,7 +2488,7 @@ export default class MediaSender {
         }
     }
 
-    private startRemoteMediaServer(
+    private async startRemoteMediaServer(
         requestId: string,
         mediaUrl: string,
         referer: string,
@@ -2514,6 +2515,15 @@ export default class MediaSender {
         /** Synthetic-DVR segment cadence in seconds. */
         stepSeconds?: number;
     }> {
+        // Roku DASH remux video handling, set on the options page. Read on
+        // every start so a changed preset applies to the next remux start
+        // (including seek-driven rebuilds) without re-casting; the bridge
+        // ignores it on every non-Roku path.
+        const rokuTranscodePreset = rokuDashPrebuffer
+            ? normalizeRokuTranscodePreset(
+                  await getOption("rokuTranscodePreset")
+              )
+            : undefined;
         return new Promise((resolve, reject) => {
             if (!this.port) return reject("Cast bridge unavailable");
 
@@ -2594,7 +2604,8 @@ export default class MediaSender {
                 startTime,
                 hlsLive,
                 rokuDashPrebuffer,
-                resetCaptureWindow
+                resetCaptureWindow,
+                rokuTranscodePreset
             });
             this.port.postMessage({
                 subject: "bridge:startRemoteMediaServer",
@@ -2610,7 +2621,8 @@ export default class MediaSender {
                     rokuDashPrebuffer,
                     resetCaptureWindow,
                     cctvDebugEnabled,
-                    userAgent
+                    userAgent,
+                    rokuTranscodePreset
                 }
             });
         });

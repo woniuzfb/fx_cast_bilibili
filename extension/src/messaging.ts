@@ -439,6 +439,11 @@ type BridgeMessageDefinitions = {
         hlsLive?: boolean;
         /** Hold Bilibili DASH readiness until Roku startup segments are closed, then drip a complete-only EVENT prefix. */
         rokuDashPrebuffer?: boolean;
+        /** Roku DASH remux video handling: an x264 preset name ("ultrafast",
+         *  "superfast", "veryfast", "faster", "fast", "medium") or "copy" to
+         *  remux the page-captured representation without re-encoding.
+         *  Omitted/unknown values fall back to the bridge default. */
+        rokuTranscodePreset?: string;
         /** Seek remux restart: drop mid-file captured fragments so ffmpeg
          *  cannot start at the previous page position. First play / overflow
          *  omit this so already-buffered ranges stay usable. */

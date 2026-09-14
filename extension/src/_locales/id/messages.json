@@ -816,6 +816,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "Tampilkan diagnostik relay CCTV yang terperinci di konsol latar belakang ekstensi."
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "Bagaimana cast Bilibili ke perangkat Roku ditranskodekan. Berlaku untuk cast Roku baru."
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "Transkode video:"
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "Preset x264 yang dipakai untuk mengodekan ulang video Bilibili bagi Roku. Preset yang lebih lambat memberi kualitas lebih baik pada ukuran berkas yang sama, tetapi lebih membebani CPU komputer ini. \"copy\" melewati pengodean ulang sepenuhnya (paling cepat, tanpa penurunan kualitas), tetapi banyak perangkat Roku lama tidak dapat mendekode AV1 atau HEVC, sehingga memilih copy untuk stream seperti itu menampilkan layar hitam."
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy (tanpa pengodean ulang)"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "Tidak dapat menangkap URL siaran langsung CCTV. Pastikan video langsung sedang diputar di halaman, lalu coba lagi."
     },

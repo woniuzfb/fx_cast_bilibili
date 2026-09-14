@@ -614,6 +614,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "Mostra la diagnostica dettagliata del relay CCTV nella console in background dell'estensione."
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "Come vengono transcodificati i cast Bilibili verso i dispositivi Roku. Vale per i nuovi cast su Roku."
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "Transcodifica video:"
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "Preset x264 usato per ricodificare il video Bilibili per Roku. I preset più lenti offrono qualità migliore a parità di dimensione del file, ma usano più CPU su questo computer. «copy» salta del tutto la ricodifica (il più veloce, senza perdita di qualità), ma molti dispositivi Roku più vecchi non decodificano AV1 o HEVC: scegliendo copy su questi flussi si ottiene uno schermo nero."
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy (nessuna ricodifica)"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "Impossibile acquisire l'URL del live CCTV. Assicurarsi che il video in diretta sia in riproduzione nella pagina, quindi riprovare."
     },

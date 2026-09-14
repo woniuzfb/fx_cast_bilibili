@@ -629,6 +629,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "Mostrar diagnósticos detallados del relé de CCTV en la consola en segundo plano de la extensión."
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "Cómo se transcodifican los casts de Bilibili a dispositivos Roku. Se aplica a los nuevos casts a Roku."
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "Transcodificación de vídeo:"
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "Preajuste x264 usado para recodificar el vídeo de Bilibili para Roku. Los preajustes más lentos ofrecen mejor calidad con el mismo tamaño de archivo, pero consumen más CPU en este equipo. «copy» omite por completo la recodificación (lo más rápido, sin pérdida de calidad), pero muchos dispositivos Roku antiguos no pueden decodificar AV1 ni HEVC: elegir copy en esos flujos muestra una pantalla negra."
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy (sin recodificar)"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "No se pudo capturar la URL del directo de CCTV. Asegúrese de que el vídeo en directo se esté reproduciendo en la página e inténtelo de nuevo."
     },

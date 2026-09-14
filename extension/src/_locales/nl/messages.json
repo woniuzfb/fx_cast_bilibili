@@ -831,6 +831,21 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "Uitgebreide diagnostiek van het CCTV-relais tonen in de achtergrondconsole van de extensie."
     },
+    "optionsRokuCategoryName": {
+        "message": "Roku"
+    },
+    "optionsRokuCategoryDescription": {
+        "message": "Hoe Bilibili-casts naar Roku-apparaten worden getranscodeerd. Geldt voor nieuwe Roku-casts."
+    },
+    "optionsRokuTranscodePreset": {
+        "message": "Videotranscodering:"
+    },
+    "optionsRokuTranscodePresetDescription": {
+        "message": "x264-preset waarmee de Bilibili-video voor Roku opnieuw wordt gecodeerd. Tragere presets geven betere kwaliteit bij dezelfde bestandsgrootte, maar gebruiken meer CPU op deze computer. „copy“ slaat het hercoderen helemaal over (snelst, zonder kwaliteitsverlies), maar veel oudere Roku-apparaten kunnen AV1 of HEVC niet decoderen; bij zulke streams geeft copy een zwart scherm."
+    },
+    "optionsRokuTranscodeCopy": {
+        "message": "copy (geen hercodering)"
+    },
     "errorCctvLiveUrlCaptureFailed": {
         "message": "Kon de URL van de CCTV-livestream niet vastleggen. Zorg dat de livevideo op de pagina wordt afgespeeld en probeer het opnieuw."
     },

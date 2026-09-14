@@ -434,6 +434,7 @@ export function run(messaging: Messenger) {
                     startTime,
                     hlsLive,
                     rokuDashPrebuffer,
+                    rokuTranscodePreset,
                     cctvDebugEnabled,
                     userAgent
                 } = message.data;
@@ -460,7 +461,8 @@ export function run(messaging: Messenger) {
                         hlsLive,
                         userAgent,
                         cctvDebugEnabled,
-                        rokuDashPrebuffer
+                        rokuDashPrebuffer,
+                        rokuTranscodePreset
                     )
                 );
                 break;

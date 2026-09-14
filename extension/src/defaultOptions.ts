@@ -1,4 +1,5 @@
 import type { WhitelistItemData } from "./background/whitelist";
+import type { RokuTranscodePreset } from "./lib/rokuTranscodePresets";
 
 export interface Options {
     /** Native messaging host name. */
@@ -25,6 +26,15 @@ export interface Options {
     localMediaEnabled: boolean;
     /** HTTP server port for local media. */
     localMediaServerPort: number;
+
+    /**
+     * Video handling for the Roku DASH remux (Bilibili casts to Roku): an
+     * x264 preset name, or "copy" to remux the representation the page player
+     * selected without re-encoding. Only x264 is offered because older Roku
+     * devices cannot decode AV1/HEVC — the same devices for which a "copy" of
+     * such a representation shows a black screen.
+     */
+    rokuTranscodePreset: RokuTranscodePreset;
 
     /** Screen mirroring casting. */
     mirroringEnabled: boolean;
@@ -117,6 +127,8 @@ export default {
     mediaStopOnUnload: true,
     localMediaEnabled: true,
     localMediaServerPort: 9555,
+
+    rokuTranscodePreset: "veryfast",
 
     mirroringEnabled: false,
     mirroringAppId: MIRRORING_APP_ID,
