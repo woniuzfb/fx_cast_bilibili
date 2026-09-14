@@ -355,6 +355,14 @@ function parseArgs(argv) {
             `sessionHarness: --cleanup-fault must be removeListener or actionState (got ${args.cleanupFault})`
         );
     }
+    if (args.discoveryReconnectGap && args.discoveryReconnectFixed) {
+        // Same rule as the settlement pair below: two contradictory expectations
+        // must not silently resolve to one of them (this would run `fixed` and
+        // report red for a defect the caller did not ask about).
+        throw new Error(
+            "sessionHarness: --discovery-reconnect-gap and --discovery-reconnect-fixed are mutually exclusive"
+        );
+    }
     if (args.requestSettlementGap && args.requestSettlementFixed) {
         // The pair is a red/green EXPECTATION pair about the same production
         // behaviour; accepting both would silently run the gap expectation and
