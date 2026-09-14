@@ -1061,11 +1061,37 @@ async function main() {
             );
             const cancelText = fs.readFileSync(cancelFile, "utf8");
             const needle = 'subject: "cast:sessionRequestCancelled"';
-            const counter =
-                "try { const __fxN = (globalThis.__fxHarnessCancelPosts = (globalThis.__fxHarnessCancelPosts || 0) + 1); void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ ['__fxHarnessCancelPost_' + __fxN]: { runId: r && r.__fxHarnessDiagnosticRunId, count: __fxN, at: Date.now() } })).catch(() => {}); } catch (e) {}";
+            /**
+             * Each post marker carries the IDENTITY of the site that fired, not
+             * just the run-wide ordinal: `count` alone said "one cancel was
+             * posted" without saying WHICH of the three sites posted it, and
+             * "which site settled the page" is exactly what the page-contract
+             * question turns on. The identity is a snippet of the site's own
+             * source context, taken at patch time, so a reader never has to trust
+             * a hand-maintained index.
+             */
+            /**
+             * The error the site's own `catch` is handling, when there is one in
+             * scope. `typeof` is safe on an undeclared identifier, so this is the
+             * same expression at every site: the two `if` sites have no binding
+             * and record an empty string, the `catch (err)` site records what it
+             * actually caught - which is the fact that decides whether the page
+             * was settled by the failed start or by the selector that replaced it.
+             */
+            const caughtErrorExpr =
+                "(function () { try { if (typeof err === 'undefined' || !err) return ''; return String(err.message || err); } catch (e) { return ''; } })()";
+            const counterFor = (site, hint) =>
+                "try { const __fxN = (globalThis.__fxHarnessCancelPosts = (globalThis.__fxHarnessCancelPosts || 0) + 1); " +
+                "void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ " +
+                `['__fxHarnessCancelPost_' + __fxN]: { runId: r && r.__fxHarnessDiagnosticRunId, count: __fxN, site: ${site}, siteHint: ${JSON.stringify(
+                    hint
+                )}, caughtError: ${caughtErrorExpr}, at: Date.now() } ` +
+                "})).catch(() => {}); } catch (e) {}";
             let cancelPatched = "";
             let cancelCursor = 0;
             let cancelSites = 0;
+            /** Human-readable site map, printed so the marker's index is never a guess. */
+            const cancelSiteLabels = [];
             for (;;) {
                 const subjectAt = cancelText.indexOf(needle, cancelCursor);
                 if (subjectAt === -1) break;
@@ -1114,10 +1140,15 @@ async function main() {
                     );
                 }
                 statementEnd++;
+                const siteHint = cancelText
+                    .slice(Math.max(0, callAt - 160), callAt)
+                    .replace(/\s+/g, " ")
+                    .trim();
+                cancelSiteLabels.push(`${cancelSites + 1}: ...${siteHint.slice(-70)}`);
                 cancelPatched +=
                     cancelText.slice(cancelCursor, statementEnd) +
                     " " +
-                    counter +
+                    counterFor(cancelSites + 1, siteHint) +
                     "\n";
                 cancelCursor = statementEnd;
                 cancelSites++;
@@ -1132,6 +1163,9 @@ async function main() {
             console.log(
                 `failure mode: counting ${cancelSites} sessionRequestCancelled post site(s)`
             );
+            for (const label of cancelSiteLabels) {
+                console.log(`  cancel site ${label}`);
+            }
         }
 
         patch(
@@ -2606,6 +2640,37 @@ async function main() {
         // browser stdout -> log file, so it is not there the instant the click
         // returns; reading once made Gate A report "(no click-state marker)" for
         // a click that had in fact happened. Bounded polling, not a sleep.
+            /**
+             * Every `cast:sessionRequestCancelled` post of THIS run, in post
+             * order, each carrying the IDENTITY of the site that posted it and
+             * (where a `catch` binding is in scope) the error it was handling.
+             * A bare count could not distinguish "the page was settled by its own
+             * failed start" from "by the selector that replaced it".
+             */
+            const readCancelState = () =>
+                driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local.get(null).then(all => {
+                        const runId = all && all.__fxHarnessDiagnosticRunId;
+                        const keys = Object.keys(all || {}).filter(k => k.indexOf("__fxHarnessCancelPost_") === 0);
+                        const mine = keys.map(k => all[k]).filter(m => m && m.runId === runId);
+                        done({
+                            runId,
+                            markerKeys: keys.length,
+                            markersForRun: mine.length,
+                            maxCount: mine.length ? Math.max(...mine.map(m => m.count)) : 0,
+                            posts: mine
+                                .sort((a, b) => a.count - b.count)
+                                .map(m => ({
+                                    count: m.count,
+                                    site: m.site,
+                                    siteHint: m.siteHint,
+                                    caughtError: m.caughtError || null
+                                }))
+                        });
+                     }, err => done({ error: String(err) }));`
+                );
+
         let clickStateRaw;
         const clickStateDeadline = Date.now() + 8000;
         while (Date.now() < clickStateDeadline) {
@@ -2682,6 +2747,44 @@ async function main() {
                 : Boolean(pageResult && pageResult.sessionId),
             JSON.stringify(pageResult && pageResult.sessionId)
         );
+        // The success routes are the CONTROL for the page contract: a session IS
+        // established for the tab, so the page must see a success. Whether the
+        // replaced selector ALSO posts a cancel, and whether that arrives before
+        // or after the session, is what tells "one external contract" apart from
+        // "two internal paths that happen to converge".
+        if (!failureMode) {
+            // The current context here is the SENDER page (an http page, where
+            // `browser` does not exist); the storage read must run in an
+            // extension page.
+            await driver.switchTo().window(consoleTab);
+            const cancelState = await readCancelState();
+            console.log(
+                // NOT `args.requestSource`: outside the failure matrix that label
+                // is just its default value (a default run prints "queued" while
+                // it actually clicked the requestSession selector - path A).
+                `page settlement (${
+                    gapMode
+                        ? `--auto-cast-${expectGap ? "gap" : "fixed"}`
+                        : "default"
+                }):`,
+                JSON.stringify({
+                    requestSessionCalls: pageResult && pageResult.requestSessionCalls,
+                    successCount: pageResult && pageResult.successCount,
+                    errorCount: pageResult && pageResult.errorCount,
+                    settleType: pageResult && pageResult.settleType,
+                    sessionId: (pageResult && pageResult.sessionId) || null,
+                    backgroundCancels: cancelState.maxCount,
+                    cancelMarkers: cancelState.markersForRun,
+                    cancelSites: cancelState.posts,
+                    callbacks: ((pageResult && pageResult.sessionCallbacks) || []).map(
+                        c => ({
+                            type: c.type,
+                            code: c.payload && c.payload.code
+                        })
+                    )
+                })
+            );
+        }
         console.log(
             "ordering (ms):",
             JSON.stringify({
@@ -3836,20 +3939,7 @@ async function main() {
                 // `count`: each post writes its own key, so reading key _1 alone
                 // would report 1 even when a second settlement happened - hiding
                 // exactly what this measurement exists to find.
-                const cancelState = await driver.executeAsyncScript(
-                    `const done = arguments[arguments.length - 1];
-                     browser.storage.local.get(null).then(all => {
-                        const runId = all && all.__fxHarnessDiagnosticRunId;
-                        const keys = Object.keys(all || {}).filter(k => k.indexOf("__fxHarnessCancelPost_") === 0);
-                        const mine = keys.map(k => all[k]).filter(m => m && m.runId === runId);
-                        done({
-                            runId,
-                            markerKeys: keys.length,
-                            markersForRun: mine.length,
-                            maxCount: mine.length ? Math.max(...mine.map(m => m.count)) : 0
-                        });
-                     }, err => done({ error: String(err) }));`
-                );
+                const cancelState = await readCancelState();
                 console.log(
                     `page settlement (${args.requestSource}/${args.failStage}):`,
                     JSON.stringify({
@@ -3860,6 +3950,11 @@ async function main() {
                         sessionId: settle.sessionId,
                         backgroundCancels: cancelState.maxCount,
                         cancelMarkers: cancelState.markersForRun,
+                        // Which cancel SITE posted, in order. `maxCount` alone
+                        // cannot tell "the page was settled by its own failed
+                        // start" from "it was settled by the selector that got
+                        // replaced", and those are different contracts.
+                        cancelSites: cancelState.posts,
                         callbacks: callbacks.map(c => ({
                             type: c.type,
                             code: c.payload && c.payload.code
@@ -3909,6 +4004,15 @@ async function main() {
                 const originalId =
                     "harness: injected createCastSession failure";
                 const route = await readCallerRouteEvidence(originalId);
+                console.log(
+                    `caller route (${args.requestSource}/${args.failStage}):`,
+                    JSON.stringify({
+                        expected: route.expected,
+                        other: route.other,
+                        caught: Object.keys(route.caught),
+                        messages: route.messages
+                    })
+                );
                 check(
                     `session-failure mode (${args.requestSource}/${args.failStage}): the labelled caller's handler (${route.expected}) received the injected failure`,
                     route.expectedSawFailure,
