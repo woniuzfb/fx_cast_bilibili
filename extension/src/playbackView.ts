@@ -48,6 +48,19 @@ export function nextPlaybackIntentFor(
 ): PlaybackIntent | undefined {
     const view = device.playbackCommand;
     if (view?.lifecycle === "active") {
+        /**
+         * A sample that CONTRADICTS the pending command means the receiver has
+         * already moved the other way (the physical remote, another sender):
+         * the affordance must follow what was OBSERVED. Offering the inverse of
+         * an outstanding request is only right while the receiver has not been
+         * seen to disagree - otherwise the popup kept showing PLAY while the
+         * device was playing, until the receiver watchdog terminated the command
+         * seconds later (measured: the coordinator stays active on `opposite`,
+         * and this derivation was the only reason the button lagged).
+         */
+        if (view.lastObservation === "opposite") {
+            return view.intent;
+        }
         return view.intent === "PLAY" ? "PAUSE" : "PLAY";
     }
     return intentForPlaybackState(status?.playerState);
