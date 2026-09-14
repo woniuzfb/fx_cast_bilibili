@@ -72,3 +72,52 @@ receiver or a real CDN, so it cannot observe DASH segment requests, and it says
 nothing about the bridge's relay (`mediaServer.ts`). Claims about the real page
 keeping the capture supplied still need a page-driven integration run; what is
 proven here is which branch the sender takes and what it does to the page player.
+
+## DASH seek source priming: `dashSeekSync.js`
+
+```sh
+node test/senders/dashSeekSync.js --fixed     # the contract (wired into test:senders)
+node test/senders/dashSeekSync.js             # pre-fix Gap: negative control
+```
+
+The default mode asserts the behaviour of the source as it is now, so it is green
+before the fix and must be flipped to the fixed contract by the fix commit;
+`--fixed` is the negative control until then (it fails on `B` and skips `E`).
+Measured: default 13/13; `--fixed` 11/12 with the one expected failure and one
+skip.
+
+Same method as `pauseSync.js` (real bundled `media.ts`, cast SDK stubbed, the
+500ms tick fired directly), plus two additions it needs:
+
+-   **a live CastPort**: the SDK stub's `ensureInit()` hands the sender a port whose
+    `postMessage` is observable and whose listeners can be dispatched to, so the
+    test runs the production request identity chain end to end - it captures the
+    `bridge:startRemoteMediaServer` `requestId`, answers with
+    `mediaCast:mediaServerStarted` for the SAME id, and only then calls
+    `primeCaptureSource(requestId)` (what `bilibili:pageCaptureReady` does in a
+    real page). No private field is written to create state and the source is never
+    patched or copied;
+-   **a controllable clock** (`Date.now`) and captured timers, so the 800ms seek
+    debounce can be fired and a deadline can be crossed without asserting a
+    millisecond constant.
+
+Cases: `A` seek start pauses the receiver and only the next tick pauses the page;
+`B` the core gap - after priming, the OLD receiver session's `PAUSED` either
+stops the page again (default, today) or no longer does (`--fixed`); `C`
+`BUFFERING` still resumes a stalled page; `D` a new `mediaSessionId` reporting
+`PLAYING` ends the transaction and an external `PAUSED` pauses the page again;
+`E` the deadline contract as behaviour (before it the receiver's `PAUSED` is held
+off, at it the same tick applies ordinary reconciliation) - no product
+millisecond value is asserted; `F` a normal load (no explicit seek) never creates
+the seek-scoped priming state, and `PAUSED` still reaches the page.
+
+The default mode asserts the behaviour of the source as it is now, so it is green
+before the fix and must be flipped to the fixed contract by the fix commit;
+`--fixed` is the negative control until then (it fails on `B` and skips `E`).
+Measured: default 13/13; `--fixed` 11/12 with the one expected failure and one
+skip.
+
+Boundary, additionally: capture backlog, `bilibili:captureOverflow` and whether
+the receiver ends up ahead of the page after a real seek are NOT observable here
+(the fixture never runs the bridge or the page). Those need a real session run
+with the metrics listed in the plan.
