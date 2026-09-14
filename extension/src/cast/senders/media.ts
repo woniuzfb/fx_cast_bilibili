@@ -112,6 +112,23 @@ export interface MediaSenderOpts {
  */
 const PAGE_EVENT_WINDOW_MS = 2000;
 
+/**
+ * What the closure's most recent play/pause dispatch did, and when.
+ *
+ * `at` is when the DECISION started; `armedAt` is when the page-command arm
+ * became visible to page events - different moments, and only the second is a
+ * valid boundary for attributing a `pause`/`play` event.
+ */
+export type PlaybackDispatchResult = {
+    outcome:
+        | "no-media"
+        | "receiver-only"
+        | "transition"
+        | "page-sync-failed";
+    at: number;
+    armedAt?: number;
+};
+
 export default class MediaSender {
     private port?: CastPort;
 
@@ -140,16 +157,7 @@ export default class MediaSender {
      * by onBleRemoteAction (which owns the decision) and read by
      * controlPlayback (which must report it without duplicating that logic).
      */
-    /**
-     * The page-route command the closure should arm if it needs a page
-     * transition. Set only for the duration of one controlPlayback call.
-     */
-    private pendingPageCommand: PlaybackPageCommand | undefined;
-    private lastPlaybackDispatch: {
-        outcome: "no-media" | "receiver-only" | "transition";
-        at: number;
-        armedAt?: number;
-    } | null = null;
+    private lastPlaybackDispatch: PlaybackDispatchResult | null = null;
     private rokuMediaResolver?: MediaSenderOpts["rokuMediaResolver"];
     private onReceiverSelected?: (isRoku: boolean) => void;
     private onStopped?: () => void;
@@ -339,7 +347,25 @@ export default class MediaSender {
     private onBleRemoteAction?: (
         action: "seek_backward" | "seek_forward" | "pause" | "play",
         seekBackwardSeconds: number,
-        seekForwardSeconds: number
+        seekForwardSeconds: number,
+        /**
+         * The page-route command this call belongs to, if any. Passed BY
+         * ARGUMENT on purpose: the arm has to be attributable to exactly this
+         * synchronous call, and the previous implicit handshake (a class field
+         * written by `controlPlayback`, read by a same-named LOCAL variable in
+         * the listener closure) never connected at all - the arm install block
+         * was dead code, so the page route could drive the receiver through the
+         * BLE arm while reporting no progress and never confirming.
+         */
+        pageCommand?: PlaybackPageCommand,
+        /**
+         * The caller's OWN result slot. The closure still records the last
+         * dispatch on the instance (the BLE path has no caller to report to),
+         * but a caller that passes a sink reads its own result, so an older
+         * dispatch unwinding - a synchronous throw after a re-entrant command
+         * already ran - cannot overwrite the newer command's outcome.
+         */
+        pageDispatchSink?: { dispatch: PlaybackDispatchResult | null }
     ) => boolean;
 
     /** True while the current receiver session is a Roku device running the
@@ -567,21 +593,32 @@ export default class MediaSender {
         this.debug?.("popup control routed through page", { action });
         // The closure decides whether a page transition is needed; when one is,
         // it arms this exact command so a later page event can be attributed to
-        // it (and reports a timeout if that event never comes).
-        this.pendingPageCommand = command;
-        const accepted = this.onBleRemoteAction(action, 0, 0);
-        this.pendingPageCommand = undefined;
+        // it (and reports a timeout if that event never comes). The command
+        // travels as an argument, so there is no second slot to fall out of sync
+        // with and no state left behind if the closure throws.
+        const dispatchSink: { dispatch: PlaybackDispatchResult | null } = {
+            dispatch: null
+        };
+        const accepted = this.onBleRemoteAction(
+            action,
+            0,
+            0,
+            command,
+            dispatchSink
+        );
         if (!accepted) {
-            const failed = this.lastPlaybackDispatch;
+            const failed = dispatchSink.dispatch;
             return {
                 accepted: false,
                 error:
                     failed?.outcome === "no-media"
                         ? "No active cast media"
-                        : "Page playback route rejected"
+                        : failed?.outcome === "page-sync-failed"
+                          ? "Page transition could not be started"
+                          : "Page playback route rejected"
             };
         }
-        const dispatch = this.lastPlaybackDispatch;
+        const dispatch = dispatchSink.dispatch;
         if (!dispatch || dispatch.outcome === "no-media") {
             // Defensive: a truthy return with no recorded dispatch would mean
             // the closure and this method disagree about what happened.
@@ -1439,7 +1476,6 @@ export default class MediaSender {
          * one can be outstanding: a newer command replaces the arm, which is
          * what makes latest-wins hold on the page side too.
          */
-        let pendingPageCommand: PlaybackPageCommand | undefined;
 
         let pageArm:
             | {
@@ -1753,9 +1789,15 @@ export default class MediaSender {
         this.onBleRemoteAction = (
             action,
             seekBackwardSeconds,
-            seekForwardSeconds
+            seekForwardSeconds,
+            pageCommand,
+            pageDispatchSink
         ) => {
             const now = Date.now();
+            const recordDispatch = (value: PlaybackDispatchResult) => {
+                this.lastPlaybackDispatch = value;
+                if (pageDispatchSink) pageDispatchSink.dispatch = value;
+            };
             // Shared by the BLE-remote path and the popup page route (see
             // controlPlayback): the page transition and the receiver dispatch
             // are the same two operations either way, so they must not drift.
@@ -1763,10 +1805,10 @@ export default class MediaSender {
                 const media = currentMedia();
                 if (!media) {
                     this.debug?.("page play/pause ignored: no cast media");
-                    this.lastPlaybackDispatch = {
+                    recordDispatch({
                         outcome: "no-media",
                         at: now
-                    };
+                    });
                     return false;
                 }
                 const alreadyAtTarget =
@@ -1777,10 +1819,10 @@ export default class MediaSender {
                     // No page transition, hence no arm and no page event: the
                     // receiver is driven directly, and the dispatch timestamp
                     // is the moment before that call.
-                    this.lastPlaybackDispatch = {
+                    recordDispatch({
                         outcome: "receiver-only",
                         at: Date.now()
-                    };
+                    });
                     if (action === "pause") {
                         media.pause(undefined, undefined, sendError("pause"));
                     } else {
@@ -1788,42 +1830,37 @@ export default class MediaSender {
                     }
                     return true;
                 }
-                this.lastPlaybackDispatch = {
-                    outcome: "transition",
-                    at: now
-                };
-                this.lastPlaybackDispatch = {
-                    outcome: "transition",
-                    at: now,
-                    armedAt: now
-                };
-                if (action === "pause") {
-                    blePauseArmedUntil = now + BLE_EVENT_WINDOW_MS;
-                    mediaElement.pause();
-                } else {
-                    blePlayArmedUntil = now + BLE_EVENT_WINDOW_MS;
-                    void mediaElement.play().catch(error => {
-                        blePlayArmedUntil = 0;
-                        sendError("page play")(error);
-                    });
-                }
-                if (pendingPageCommand) {
+                // Arm FIRST, then trigger the page transition. `pause()` and
+                // `play()` can deliver their media events synchronously (or so
+                // fast that the arm is not yet visible), and an event that
+                // arrives before its arm exists cannot be attributed to the
+                // command: it is consumed by the BLE arm instead, the receiver
+                // is driven, and every `reportProgress` for that command is
+                // skipped - which is exactly how a real session ended up with a
+                // paused Roku and a background still waiting for the page leg.
+                let armedAt: number | undefined;
+                if (pageCommand) {
                     // The window's arm must be usable by ONE command: a second
                     // command replaces it, and the replaced one is told why it
                     // will never see its event.
                     const replaced = pageArm?.command;
-                    const command = pendingPageCommand;
-                    pendingPageCommand = undefined;
-                    if (replaced) {
+                    if (replaced && replaced !== pageCommand) {
                         reportProgress(replaced, {
                             pagePhase: "timeout",
                             pagePausedSnapshot: mediaElement.paused
                         });
                     }
                     clearPageArm();
+                    const command = pageCommand;
+                    // Sampled HERE, at the assignment, not at the top of the
+                    // dispatch: `armedAt` is handed to the background as the
+                    // boundary a page event must be newer than, so it has to be
+                    // the moment the arm really exists. `lastPlaybackDispatch.at`
+                    // stays what it always was - when the decision started.
+                    const pageArmInstalledAt = Date.now();
                     pageArm = {
                         command,
-                        expiresAt: now + BLE_EVENT_WINDOW_MS,
+                        expiresAt: pageArmInstalledAt + BLE_EVENT_WINDOW_MS,
                         timeoutId: window.setTimeout(() => {
                             const expired = pageArm;
                             if (!expired || expired.command !== command) return;
@@ -1837,6 +1874,43 @@ export default class MediaSender {
                             });
                         }, BLE_EVENT_WINDOW_MS)
                     };
+                    armedAt = pageArmInstalledAt;
+                }
+                recordDispatch({
+                    outcome: "transition",
+                    at: now,
+                    ...(armedAt === undefined ? {} : { armedAt })
+                });
+                try {
+                    if (action === "pause") {
+                        blePauseArmedUntil = now + BLE_EVENT_WINDOW_MS;
+                        mediaElement.pause();
+                    } else {
+                        blePlayArmedUntil = now + BLE_EVENT_WINDOW_MS;
+                        void mediaElement.play().catch(error => {
+                            blePlayArmedUntil = 0;
+                            sendError("page play")(error);
+                        });
+                    }
+                } catch (error) {
+                    // The page call failed SYNCHRONOUSLY: nothing was
+                    // dispatched, so the arm installed above must not stay
+                    // behind waiting for an event that will never come - but
+                    // only OUR arm may be cleared, never one a re-entrant
+                    // command installed while this call was unwinding.
+                    if (pageCommand && pageArm?.command === pageCommand) {
+                        clearPageArm();
+                    }
+                    if (action === "pause") blePauseArmedUntil = 0;
+                    else blePlayArmedUntil = 0;
+                    recordDispatch({
+                        outcome: "page-sync-failed",
+                        at: Date.now()
+                    });
+                    sendError(
+                        action === "pause" ? "page pause" : "page play"
+                    )(error);
+                    return false;
                 }
                 return true;
             }
