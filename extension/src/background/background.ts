@@ -7,6 +7,7 @@ import messaging from "../messaging";
 
 import castManager from "./castManager";
 import deviceManager from "./deviceManager";
+import { registerPagePlaybackProgressRuntimeRelay } from "./pageProgressRelay";
 
 import { initAction } from "./action";
 import { initMenus, launchBilibiliSender } from "./menus";
@@ -134,6 +135,8 @@ async function init() {
             );
         });
     });
+
+    registerPagePlaybackProgressRuntimeRelay(deviceManager);
 
     // Sender/content-script consoles are separate from the extension
     // background console. Forward CCTV recovery diagnostics here so a single

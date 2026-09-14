@@ -616,6 +616,24 @@ export default new (class extends TypedEventTarget<EventMap> {
         );
     }
 
+    /**
+     * Page-reported asynchronous facts for a play/pause command (arm consumed,
+     * receiver called, arm expired). The coordinator decides whether they belong
+     * to the current command.
+     *
+     * Reachable from BOTH channels on purpose: the page sender posts this with
+     * `browser.runtime.sendMessage`, while the coordinator's consumer used to be
+     * reachable only from the native bridge port - so the progress never
+     * arrived and a page-route command could never be confirmed. The runtime hop
+     * is registered in `registerPagePlaybackProgressRuntimeRelay()`.
+     */
+    handlePagePlaybackProgress(detail: PlaybackCommandProgress) {
+        if (!detail || typeof detail !== "object") return;
+        this.dispatchEvent(
+            new CustomEvent("bilibiliPlaybackProgress", { detail })
+        );
+    }
+
     private onBridgeMessage = (message: Message) => {
         switch (message.subject) {
             case "main:deviceUp": {
@@ -770,19 +788,9 @@ export default new (class extends TypedEventTarget<EventMap> {
                 break;
             }
 
-            case "main:bilibiliPlaybackProgress": {
-                // Page-reported asynchronous facts for a play/pause command
-                // (arm consumed, receiver called, arm expired). Routed here
-                // because the message carries a deviceId; the coordinator
-                // decides whether it belongs to the current command.
-                const detail = message.data;
-                this.dispatchEvent(
-                    new CustomEvent("bilibiliPlaybackProgress", {
-                        detail
-                    })
-                );
+            case "main:bilibiliPlaybackProgress":
+                this.handlePagePlaybackProgress(message.data);
                 break;
-            }
 
             case "main:rokuPlaybackObservation": {
                 // Observation-only feed: does not touch device.mediaStatus,
