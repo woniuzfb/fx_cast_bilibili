@@ -1056,7 +1056,13 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             break;
 
         case "main:dashRemuxDebug": {
-            logger.info(`DASH remux ${message.data.event}`, {
+            // GATED like every other Roku debug relay in this file: the bridge
+            // emits one of these per remuxed segment (and per response), so an
+            // ungated `logger.info` fills the background console during ordinary
+            // playback even with both debug options off. `cctvDebugEnabled`
+            // covers the live-relay path and `bilibiliDebugEnabled` the DASH
+            // remux path.
+            void logRokuDebug(`DASH remux ${message.data.event}`, {
                 requestId: message.data.requestId,
                 details: message.data.details
             });
