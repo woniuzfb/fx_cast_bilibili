@@ -940,7 +940,15 @@ export default new (class extends TypedEventTarget<EventMap> {
 
         delete this.bridgeInfo;
         this.receiverDevices.clear();
-        this.rokuSessionMedia.clear();
+        // NOT cleared: session media belongs to the independent session
+        // lifecycle, not to the discovery process. Keeping the extension-side
+        // mirror is what lets `replayRokuLoadGenerations()` refill the
+        // REPLACEMENT process's empty cache on the next connect - clearing it
+        // here emptied the very table that replay reads, so a reconnected
+        // discovery process could only fall back to ECP state until some later
+        // session-media publish or a new LOAD. A new LOAD, the current owner's
+        // clear, a legitimate new owner's set or the optimistic-relay cleanup
+        // retire it, exactly as before.
         this.lastRokuMergedMediaDebug.clear();
         this.pendingRokuMediaLoads.clear();
         this.rokuRealMediaReady.clear();
