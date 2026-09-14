@@ -23,8 +23,10 @@
  * under test mean comes from the production code paths themselves.
  *
  * Usage:
- *   node test/senders/dashSeekSync.js            # current production: the Gap stays frozen
- *   node test/senders/dashSeekSync.js --fixed     # post-fix contract (seek-scoped source priming)
+ *   node test/senders/dashSeekSync.js --fixed     # the post-fix contract (wired into test:senders)
+ *   node test/senders/dashSeekSync.js             # pre-fix reproduction: the Gap, kept as the
+ *                                                 # negative control - it fails on B once the
+ *                                                 # seek-scoped priming is in place
  *
  * Cases:
  *   A seek-start-pause                        (shared fact, both modes)
@@ -682,6 +684,110 @@ async function runDeadline(MediaSender) {
     );
 }
 
+/**
+ * G: ownership. A superseded seek's late capture-ready / late bridge response
+ * must not create or disturb the newer transaction's priming.
+ */
+async function runSupersededSeekOwnership(MediaSender) {
+    if (!FIXED) {
+        // Ownership only exists once there is a transaction to own.
+        skip("G: superseded-seek ownership", "post-fix case; run with --fixed");
+        return;
+    }
+    const h = await makeSender(MediaSender, {
+        pagePaused: false,
+        pageTime: 10
+    });
+    h.setReceiverState(PlayerState.PLAYING, 10);
+    h.tick();
+
+    // Seek A: its load is in flight (waiting for the bridge).
+    h.sender.seekDashRemux(50);
+    fireTimeout(800);
+    await flush();
+    const requestA =
+        h.startedMediaServers[h.startedMediaServers.length - 1]?.requestId;
+    h.sender.primeCaptureSource(requestA);
+    await flush();
+    const primingA = Boolean(h.sender.dashSeekSourcePriming);
+
+    // Seek B arrives while A still awaits; runDashSeek serialises the loop.
+    h.sender.seekDashRemux(80);
+    fireTimeout(800);
+    await flush();
+    h.answerMediaServerStarted(requestA);
+    await flush();
+    h.resolveLoad();
+    await flush();
+    const requestB =
+        h.startedMediaServers[h.startedMediaServers.length - 1]?.requestId;
+
+    check(
+        "G: the superseding seek started its own load with a new request id and A's priming was dropped",
+        primingA &&
+            typeof requestA === "string" &&
+            typeof requestB === "string" &&
+            requestB !== requestA &&
+            h.sender.activeMediaServerRequestId === requestB &&
+            h.sender.dashSeekSourcePriming === undefined,
+        JSON.stringify({
+            primingA,
+            requestA,
+            requestB,
+            active: h.sender.activeMediaServerRequestId,
+            priming: h.sender.dashSeekSourcePriming
+        })
+    );
+
+    // A's capture-ready arrives late: it must not arm anything for A.
+    h.sender.primeCaptureSource(requestA);
+    await flush();
+    check(
+        "G: a late capture-ready for the superseded request does not arm priming",
+        h.sender.dashSeekSourcePriming === undefined &&
+            h.sender.activeMediaServerRequestId === requestB,
+        JSON.stringify({
+            priming: h.sender.dashSeekSourcePriming,
+            active: h.sender.activeMediaServerRequestId
+        })
+    );
+
+    // B's own capture-ready arms its transaction...
+    h.sender.primeCaptureSource(requestB);
+    await flush();
+    const primingB = h.sender.dashSeekSourcePriming;
+    check(
+        "G: the superseding seek's priming carries its own request id",
+        primingB?.requestId === requestB,
+        JSON.stringify({ priming: primingB })
+    );
+
+    // ...and a late bridge response for A must be inert against it.
+    h.answerMediaServerStarted(requestA);
+    await flush();
+    check(
+        "G: a late mediaServerStarted for the superseded request is inert",
+        h.sender.dashSeekSourcePriming?.requestId === requestB,
+        JSON.stringify({ priming: h.sender.dashSeekSourcePriming })
+    );
+
+    h.answerMediaServerStarted(requestB, { startTime: 80 });
+    await flush();
+    h.resolveLoad();
+    await flush();
+    h.setReceiverState(PlayerState.PLAYING, 80, 2);
+    h.tick();
+    check(
+        "G: the surviving transaction still releases on the new session's PLAYING",
+        h.sender.dashSeekSourcePriming === undefined &&
+            h.element.paused === false,
+        JSON.stringify({
+            priming: h.sender.dashSeekSourcePriming,
+            paused: h.element.paused
+        })
+    );
+}
+
 /** F: without an explicit seek, no seek-scoped priming may be created. */
 async function runInitialCastNoPrime(MediaSender) {
     const h = await makeSender(MediaSender, {
@@ -769,7 +875,7 @@ async function main() {
     console.info(
         FIXED
             ? "dashSeekSync: asserting the FIXED (seek-scoped priming) contract"
-            : "dashSeekSync: asserting current production (the Gap stays frozen)"
+            : "dashSeekSync: asserting the pre-fix Gap (negative control: B is expected to FAIL once the seek-scoped priming is in place)"
     );
     console.info("bundling the real sender with the cast SDK stubbed");
     writeStub(stubDir);
@@ -793,6 +899,7 @@ async function main() {
     await runNewMediaReleases(MediaSender);
     await runDeadline(MediaSender);
     await runInitialCastNoPrime(MediaSender);
+    await runSupersededSeekOwnership(MediaSender);
 
     console.info("");
     console.info(

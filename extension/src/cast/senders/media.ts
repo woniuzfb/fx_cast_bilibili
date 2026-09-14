@@ -18,6 +18,38 @@ import cast, { ensureInit, type CastPort } from "../export";
 const logger = new Logger("fx_cast_bilibili [media sender]");
 
 /**
+ * How long the sender waits for the bridge to report its media server ready.
+ * The bridge answers `mediaCast:mediaServerStarted` only after the Roku startup
+ * segments are closed, and its own readiness poll gives up after ~90s
+ * (900 x 100ms, mediaServer.ts), so this is the sender-side bound on the same
+ * window.
+ */
+const BRIDGE_MEDIA_SERVER_READY_TIMEOUT_MS = 90_000;
+
+/**
+ * Liveness cap for the DASH seek priming window - a backstop, not a product
+ * promise, and not the popup's seek-confirm window.
+ *
+ * It has to cover a legitimate rebuild (the bridge needs its startup segments
+ * closed before it reports ready, and only then does the receiver load and
+ * consume). It must NOT be the popup's 15s settle window: releasing the page
+ * mid-rebuild stalls the capture, the readiness gate then never closes, and the
+ * seek dies in the sender's bridge-readiness timeout instead of degrading.
+ *
+ * Ordering, stated as it is: the priming starts at the capture-ready, which the
+ * bridge sends BEFORE its own readiness poll starts (mediaServer.ts: the capture
+ * input server listens and reports before the media server does), and the
+ * sender's ready timeout started even earlier - before the request was posted.
+ * So in the live paths this cap expires after the failure paths that clear the
+ * priming (a rejected/timed-out LOAD or the media server error). That is a
+ * nominal ordering, not a guarantee: the margin below is what keeps a live
+ * transaction ending through its own path, and this cap remains the backstop
+ * when such a path is itself delayed. The clear path logs the real elapsed time
+ * so measurement can replace this reasoning.
+ */
+const DASH_SEEK_PRIME_MAX_MS = BRIDGE_MEDIA_SERVER_READY_TIMEOUT_MS + 30_000;
+
+/**
  * Read options directly in an injected sender. The shared options singleton
  * extends EventTarget; Firefox isolated worlds do not reliably expose its
  * prototype methods to dynamically injected scripts.
@@ -248,6 +280,55 @@ export default class MediaSender {
      * generation that stopMediaServer just tore down.
      */
     private capturePrimeTarget?: number;
+    /** Monotonic id for one DASH seek transaction (a target can repeat). */
+    private dashSeekId = 0;
+    /**
+     * runDashSeek -> loadMedia handoff. Set immediately before loadMedia(target)
+     * and consumed (and cleared) SYNCHRONOUSLY at loadMedia's entry, so a pending
+     * seek can never leak into the next load.
+     */
+    private pendingDashSeekPrime?: {
+        seekId: number;
+        target: number;
+        /** Receiver media session bound when the seek started. */
+        previousMediaSessionId?: number;
+    };
+    /**
+     * The load a pending seek turned into. primeCaptureSource consumes it to arm
+     * the priming for exactly this load/request (never a stale one).
+     */
+    private dashSeekLoadIdentity?: {
+        seekId: number;
+        loadId: number;
+        requestId?: string;
+        target: number;
+        previousMediaSessionId?: number;
+    };
+    /**
+     * Seek-scoped source priming: the new capture generation has been primed
+     * onto the page, and the receiver's NEW media has not taken over yet.
+     *
+     * The page is what feeds the capture, so the receiver's own PAUSED - which
+     * during this window is the seek's hold echoed by the OLD media session -
+     * must not be mirrored onto the page (see reconcilePlaybackState). Once the
+     * receiver's new session reports PLAYING, ordinary receiver -> page
+     * play/pause authority resumes, so a real user pause still stops the page.
+     *
+     * Only ever armed for an explicit DASH seek: initial casts, quality changes
+     * and capture-recovery reloads keep their behaviour.
+     */
+    private dashSeekSourcePriming?: {
+        requestId: string;
+        seekId: number;
+        loadId: number;
+        target: number;
+        previousMediaSessionId?: number;
+        /** The current-loadId LOAD callback resolved. */
+        loadResolved: boolean;
+        startedAt: number;
+        deadline: number;
+    };
+
     /**
      * Seeks/plays the page element with the listener suppress counters armed.
      * Undefined when page controls are detached.
@@ -446,6 +527,9 @@ export default class MediaSender {
         this.capturePrimeTarget = undefined;
         this.dashSyncHold = false;
         this.dashTightenSync = false;
+        this.pendingDashSeekPrime = undefined;
+        this.dashSeekLoadIdentity = undefined;
+        this.clearDashSeekSourcePriming("stopped");
         this.suspendMediaElementSync();
         this.clearRecoveryActivityWatchdog();
         this.clearRecoveryRetry();
@@ -659,6 +743,10 @@ export default class MediaSender {
         const mediaElement = this.mediaElement;
         if (!(mediaElement instanceof HTMLMediaElement)) return;
         const target = this.capturePrimeTarget;
+        // Arm the seek-scoped priming BEFORE the page is moved: from here until
+        // the receiver's new session reports PLAYING, this page is the only
+        // supplier of the new capture generation.
+        this.armDashSeekSourcePriming(requestId);
         if (target !== undefined && this.primePageCaptureAt) {
             this.debug?.("priming page capture at remux start", {
                 requestId,
@@ -686,6 +774,97 @@ export default class MediaSender {
             target,
             pageTime: mediaElement.currentTime
         });
+    }
+
+    /** The receiver media session the sync loop reconciles against. */
+    private latestBoundMedia() {
+        const sessionMedia = this.session?.media;
+        return sessionMedia && sessionMedia.length
+            ? sessionMedia[sessionMedia.length - 1]
+            : this.media;
+    }
+
+    /**
+     * Arm the seek-scoped priming for exactly the load that asked for
+     * `requestId`. No identity match means no priming: a stale or foreign
+     * capture-ready must not create a transaction (initial casts, item changes
+     * and recovery reloads have no seek identity at all).
+     */
+    private armDashSeekSourcePriming(requestId: string) {
+        const identity = this.dashSeekLoadIdentity;
+        if (!identity) return;
+        if (identity.requestId !== requestId) return;
+        if (identity.loadId !== this.dashLoadId) return;
+        const now = Date.now();
+        this.dashSeekSourcePriming = {
+            requestId,
+            seekId: identity.seekId,
+            loadId: identity.loadId,
+            target: identity.target,
+            previousMediaSessionId: identity.previousMediaSessionId,
+            loadResolved: false,
+            startedAt: now,
+            deadline: now + DASH_SEEK_PRIME_MAX_MS
+        };
+        this.dashSeekLoadIdentity = undefined;
+        this.debug?.("DASH seek source priming armed", {
+            requestId,
+            target: identity.target,
+            previousMediaSessionId: identity.previousMediaSessionId,
+            maxMs: DASH_SEEK_PRIME_MAX_MS
+        });
+    }
+
+    /**
+     * Drop everything a FAILED seek iteration owned, by identity only: a later
+     * transaction (or a newer load) must survive the failure of an older one.
+     * unowned state is left alone.
+     */
+    private clearDashSeekTransaction(seekId: number, reason: string) {
+        if (this.pendingDashSeekPrime?.seekId === seekId) {
+            this.pendingDashSeekPrime = undefined;
+        }
+        if (this.dashSeekLoadIdentity?.seekId === seekId) {
+            this.dashSeekLoadIdentity = undefined;
+        }
+        if (this.dashSeekSourcePriming?.seekId === seekId) {
+            this.clearDashSeekSourcePriming(reason);
+        }
+    }
+
+    /** End the seek-scoped priming, with the reason in the trace. */
+    private clearDashSeekSourcePriming(reason: string) {
+        const priming = this.dashSeekSourcePriming;
+        if (!priming) return;
+        this.dashSeekSourcePriming = undefined;
+        this.debug?.("DASH seek source priming ended", {
+            reason,
+            requestId: priming.requestId,
+            target: priming.target,
+            elapsedMs: Date.now() - priming.startedAt,
+            loadResolved: priming.loadResolved
+        });
+    }
+
+    /**
+     * Has the receiver's NEW session taken over? With a known previous session,
+     * only a different mediaSessionId counts; without one, the LOAD callback of
+     * THIS load has to have resolved first - any PLAYING (including the old
+     * session's last one, before our pause lands) is not proof. Both forms still
+     * require PLAYING, so a transaction never ends on an echo of its own hold.
+     */
+    private isDashSeekPrimingSatisfied(boundMedia: {
+        playerState: string;
+        mediaSessionId?: number;
+    }) {
+        const priming = this.dashSeekSourcePriming;
+        if (!priming) return false;
+        if (boundMedia.playerState !== cast.media.PlayerState.PLAYING) {
+            return false;
+        }
+        return priming.previousMediaSessionId !== undefined
+            ? boundMedia.mediaSessionId !== priming.previousMediaSessionId
+            : priming.loadResolved;
     }
 
     /** Temporarily detach page controls before a programmatic page pause. */
@@ -935,6 +1114,23 @@ export default class MediaSender {
      */
     private async loadMedia(startTimeOverride?: number) {
         if (this.stopped) return;
+        // This load's identity and the seek handoff are claimed FIRST, before any
+        // await: runDashSeek sets the pending immediately before calling this, so
+        // claiming it here makes "a pending seek can never leak into the next
+        // load" structural instead of incidental (the URL resolver below awaits).
+        const loadId = ++this.dashLoadId;
+        const seekPrime = this.pendingDashSeekPrime;
+        this.pendingDashSeekPrime = undefined;
+        this.dashSeekLoadIdentity = seekPrime
+            ? {
+                  seekId: seekPrime.seekId,
+                  loadId,
+                  target: seekPrime.target,
+                  previousMediaSessionId: seekPrime.previousMediaSessionId
+              }
+            : undefined;
+        // Every load supersedes the previous transaction's hold.
+        this.clearDashSeekSourcePriming("new-load");
         // Consume the lazy URL resolver (CCTV live capture) before anything
         // touches this.mediaUrl. One-shot: reloads (seeks, auto-recovery) reuse
         // the resolved URL — the bridge rebuilds its relay from it directly.
@@ -950,7 +1146,6 @@ export default class MediaSender {
                 mediaUrl: this.mediaUrl
             });
         }
-        const loadId = ++this.dashLoadId;
         let mediaUrl = new URL(this.mediaUrl);
         const mediaTitle = this.mediaTitle ?? mediaUrl.pathname.slice(1);
         const subtitleUrls: URL[] = [];
@@ -1011,6 +1206,11 @@ export default class MediaSender {
             }
             const requestId = this.nextMediaServerRequestId();
             this.activeMediaServerRequestId = requestId;
+            // Bind the request identity to this load so primeCaptureSource can
+            // only ever arm the priming for THIS generation.
+            if (this.dashSeekLoadIdentity?.loadId === loadId) {
+                this.dashSeekLoadIdentity.requestId = requestId;
+            }
             if (
                 this.isDashRemux &&
                 startTimeOverride === undefined &&
@@ -1381,6 +1581,12 @@ export default class MediaSender {
                 this.debug?.("receiver media loaded");
                 this.media = media;
                 if (loadId === this.dashLoadId) this.dashSyncHold = false;
+                // Load identity for the priming release check: the callback's own
+                // Media object can be the stale previous session (see
+                // addMediaElementListeners), so this is a signal, not proof.
+                if (this.dashSeekSourcePriming?.loadId === loadId) {
+                    this.dashSeekSourcePriming.loadResolved = true;
+                }
                 if (this.mediaElement instanceof HTMLMediaElement) {
                     // Silence only the local tab. This assignment happens before
                     // controls are attached, so it can never mute the receiver.
@@ -1432,6 +1638,13 @@ export default class MediaSender {
                     // deadline, polling GET_STATUS every second and suppressing
                     // normal drift correction.
                     this.dashTightenSync = false;
+                    // A rejected load must not leave a hold behind either.
+                    if (this.dashSeekSourcePriming?.loadId === loadId) {
+                        this.clearDashSeekSourcePriming("load-rejected");
+                    }
+                    if (this.dashSeekLoadIdentity?.loadId === loadId) {
+                        this.dashSeekLoadIdentity = undefined;
+                    }
                 }
                 logger.error("Failed to load media", err);
             }
@@ -2018,6 +2231,27 @@ export default class MediaSender {
         const reconcilePlaybackState = (
             boundMedia: { playerState: string; mediaSessionId?: number }
         ) => {
+            // DASH seek transaction first, and BEFORE every early return below:
+            // a tick that would otherwise be a no-op still has to end the hold
+            // (satisfied / superseded / expired), and neither the release test
+            // nor the deadline may be skipped by the localState early return.
+            let seekPriming = this.dashSeekSourcePriming;
+            if (seekPriming) {
+                if (seekPriming.requestId !== this.activeMediaServerRequestId) {
+                    // A newer load owns the sender: this transaction is stale.
+                    this.clearDashSeekSourcePriming("request-superseded");
+                    seekPriming = undefined;
+                } else if (this.isDashSeekPrimingSatisfied(boundMedia)) {
+                    this.clearDashSeekSourcePriming("new-media-playing");
+                    seekPriming = undefined;
+                } else if (Date.now() >= seekPriming.deadline) {
+                    // Clearing is enough: this same call now falls through to the
+                    // ordinary reconciliation below (no recursion needed).
+                    this.clearDashSeekSourcePriming("deadline");
+                    seekPriming = undefined;
+                }
+            }
+
             const localState = mediaElement.paused
                 ? cast.media.PlayerState.PAUSED
                 : cast.media.PlayerState.PLAYING;
@@ -2053,6 +2287,14 @@ export default class MediaSender {
                     resumePage();
                     break;
                 case cast.media.PlayerState.PAUSED:
+                    // DASH seek transaction: during this window this PAUSED is
+                    // our own seek hold echoed by the OLD media session while the
+                    // new capture generation is being built. The page is the only
+                    // supplier of that generation, so it keeps playing until the
+                    // receiver's new session plays (or the transaction ends).
+                    // Outside the window a receiver pause pauses the page as
+                    // before (9704dac).
+                    if (seekPriming) break;
                     if (!gated && !mediaElement.paused) suppressPause++;
                     mediaElement.pause();
                     break;
@@ -2473,12 +2715,26 @@ export default class MediaSender {
                 } else {
                     this.dashTightenSync = false;
                 }
+                // Seek -> load handoff (see pendingDashSeekPrime): the priming
+                // transaction this seek may create is scoped to the load it is
+                // about to start, and the session bound right now is the one whose
+                // PAUSED must not be mirrored while the new generation is primed.
+                const seekId = ++this.dashSeekId;
+                this.pendingDashSeekPrime = {
+                    seekId,
+                    target,
+                    previousMediaSessionId:
+                        this.latestBoundMedia()?.mediaSessionId
+                };
                 try {
                     await this.loadMedia(target);
                 } catch (err) {
                     this.dashSyncHold = false;
                     // Don't snap to the stale position of a failed reload.
                     this.dashTightenSync = false;
+                    // A failed reload leaves no transaction behind - but only ITS
+                    // OWN: this iteration may have been superseded while it awaited.
+                    this.clearDashSeekTransaction(seekId, "seek-load-failed");
                     this.debug?.("dash seek reload failed", String(err));
                     logger.error("DASH seek reload failed", err);
                 }
@@ -2590,7 +2846,9 @@ export default class MediaSender {
                         "Timed out waiting for the Cast bridge media server"
                     );
                 },
-                audioUrl || hlsLive ? 90_000 : 10_000
+                audioUrl || hlsLive
+                    ? BRIDGE_MEDIA_SERVER_READY_TIMEOUT_MS
+                    : 10_000
             );
 
             this.port.addEventListener("message", onMessage);

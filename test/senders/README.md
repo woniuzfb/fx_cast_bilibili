@@ -80,11 +80,10 @@ node test/senders/dashSeekSync.js --fixed     # the contract (wired into test:se
 node test/senders/dashSeekSync.js             # pre-fix Gap: negative control
 ```
 
-The default mode asserts the behaviour of the source as it is now, so it is green
-before the fix and must be flipped to the fixed contract by the fix commit;
-`--fixed` is the negative control until then (it fails on `B` and skips `E`).
-Measured: default 13/13; `--fixed` 11/12 with the one expected failure and one
-skip.
+The default mode asserts the behaviour of the source as it was BEFORE the fix, so it
+is the reproduction (it fails on `B` and is expected to); `--fixed` is the contract
+that `test:senders` runs. Measured against the fixed source: `--fixed` 20/20;
+default 14/15 with exactly the `B` gap assertion failing and `G` skipped.
 
 Same method as `pauseSync.js` (real bundled `media.ts`, cast SDK stubbed, the
 500ms tick fired directly), plus two additions it needs:
@@ -109,13 +108,9 @@ stops the page again (default, today) or no longer does (`--fixed`); `C`
 `E` the deadline contract as behaviour (before it the receiver's `PAUSED` is held
 off, at it the same tick applies ordinary reconciliation) - no product
 millisecond value is asserted; `F` a normal load (no explicit seek) never creates
-the seek-scoped priming state, and `PAUSED` still reaches the page.
-
-The default mode asserts the behaviour of the source as it is now, so it is green
-before the fix and must be flipped to the fixed contract by the fix commit;
-`--fixed` is the negative control until then (it fails on `B` and skips `E`).
-Measured: default 13/13; `--fixed` 11/12 with the one expected failure and one
-skip.
+the seek-scoped priming state, and `PAUSED` still reaches the page; `G`
+(`--fixed` only) ownership - a superseded seek's late capture-ready and late
+bridge response neither arm nor disturb the newer transaction's priming.
 
 Boundary, additionally: capture backlog, `bilibili:captureOverflow` and whether
 the receiver ends up ahead of the page after a real seek are NOT observable here
