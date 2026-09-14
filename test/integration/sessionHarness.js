@@ -132,6 +132,35 @@ const EXTENSION_UUID = "8a1f3c2e-9d4b-4c7a-9f21-2b6c5d8e0a13";
 const popupUrl = `moz-extension://${EXTENSION_UUID}/ui/popup/index.html`;
 const optionsUrl = `moz-extension://${EXTENSION_UUID}/ui/options/index.html`;
 
+/**
+ * The cleanup steps `--cleanup-fault` can inject a throw into, as an ordered
+ * list because the ORDER is part of what is asserted (the message listener is
+ * removed before the action state is reset).
+ *
+ * `message` is a STABLE IDENTIFIER, not a message: it appears literally in the
+ * injected Error, and the harness tests for it separately in the injected
+ * cleanup error and in the error the outer handler caught. Without that, "the
+ * original error propagated" would be unfalsifiable whenever a cleanup error
+ * could have landed in the same outer catch.
+ */
+const CLEANUP_FAULTS = [
+    {
+        id: "removeListener",
+        site: "onMessage.removeListener",
+        message: "harness: cleanup fault at onMessage.removeListener",
+        // Global counter of the REAL call this fault replaces, kept on
+        // `globalThis.__fxHarnessCleanupCalls` so the gate can read it
+        // synchronously and a checker outside the browser can read it too.
+        counter: "removeListener"
+    },
+    {
+        id: "actionState",
+        site: "updateActionState(Default)",
+        message: "harness: cleanup fault at updateActionState",
+        counter: "actionState"
+    }
+];
+
 let pass = 0;
 let fail = 0;
 function check(name, cond, detail) {
@@ -180,16 +209,39 @@ function parseArgs(argv) {
         interleave: false,
         // Which checkpoint of createCastSession the injection fires at.
         failStage: "p0",
-        // Which caller drives the session start under test. "queued" is the
-        // provoked path the failure modes were built around (auto-cast replaces
-        // the requestSession selector, so loadSender owns the session);
-        // "selector" keeps the popup mounting early, so the click resolves the
-        // requestSession selector and the main:requestSession handler owns it.
+        // Which caller drives the session start under test. Both labels mount
+        // the popup LATE (after requestSession opened its selector); what
+        // differs is whether the first `popup:init` is suppressed:
+        //
+        //   "queued" suppresses it, so the popup believes no selector exists,
+        //   its auto-cast replaces the selector and loadSender owns the session;
+        //   "selector" does not suppress it, so the popup binds to the selector
+        //   that already exists (clearing its auto-cast timer) and the click
+        //   resolves through main:requestSession, which owns the session.
         requestSource: "queued",
         // Pre-fix expectation for the staged matrix: the failed call left an
         // idle native host behind. Without it the matrix expects the cleanup
         // (no idle host survives), which is the post-fix behaviour.
         expectResidue: false,
+        // Which step of the partial-session cleanup is injected to THROW, on
+        // top of the original p2 failure. The cleanup is best-effort by design
+        // (each step has its own catch), so this asks whether a failing step
+        // can still leave the port closed and the ORIGINAL error propagating.
+        // Only meaningful together with --fail-stage p2:
+        //
+        //   p0 fires at the top of createCastSession, BEFORE `bridge.connect()`
+        //   and before the internal `try` exists. It does not enter that
+        //   catch/finally at all, owns no port, and propagates straight to its
+        //   caller (which is what releases the announcement and settles the
+        //   page);
+        //   p1 fires inside that `try` with a port in hand, but BEFORE
+        //   `opts.instance.session = session` ran, so the identity guard below
+        //   is false: the finally still detaches the disconnect listener and
+        //   closes the port;
+        //   only p2 has the reference attached, so only p2 reaches the two
+        //   steps instrumented below (both sit inside
+        //   `if (opts.instance.session === session)`).
+        cleanupFault: undefined,
         expectReleased: false,
         instrument: false
     };
@@ -213,7 +265,16 @@ function parseArgs(argv) {
             args.requestSource = value;
             i++;
         } else if (argv[i] === "--expect-residue") args.expectResidue = true;
-        else if (argv[i] === "--fail-stage") {
+        else if (argv[i] === "--cleanup-fault") {
+            const value = argv[i + 1];
+            if (value === undefined || value.startsWith("--")) {
+                throw new Error(
+                    "sessionHarness: --cleanup-fault needs a value (removeListener or actionState)"
+                );
+            }
+            args.cleanupFault = value;
+            i++;
+        } else if (argv[i] === "--fail-stage") {
             const value = argv[i + 1];
             if (value === undefined || value.startsWith("--")) {
                 throw new Error(
@@ -251,6 +312,28 @@ function parseArgs(argv) {
     if (!["selector", "queued"].includes(args.requestSource)) {
         throw new Error(
             `sessionHarness: --request-source must be selector or queued (got ${args.requestSource})`
+        );
+    }
+    if (
+        args.cleanupFault !== undefined &&
+        !["removeListener", "actionState"].includes(args.cleanupFault)
+    ) {
+        throw new Error(
+            `sessionHarness: --cleanup-fault must be removeListener or actionState (got ${args.cleanupFault})`
+        );
+    }
+    if (args.cleanupFault !== undefined && args.failStage !== "p2") {
+        // p0 fires before `bridge.connect()` and before the internal try, so
+        // it owns no port and does not enter this cleanup at all. p1 enters
+        // the internal try with a port, but fails before
+        // `opts.instance.session = session`, so the identity guard around both
+        // instrumented steps is false. Only p2 reaches those two instrumented
+        // cleanup steps. Accepting the other combinations would arm a fault
+        // that can never fire and then read the absence of its marker as
+        // "the cleanup was not reached" - the exact ambiguity this flag
+        // exists to remove.
+        throw new Error(
+            `sessionHarness: --cleanup-fault needs --fail-stage p2 (the only checkpoint that reaches the two instrumented cleanup steps; got ${args.failStage})`
         );
     }
 
@@ -450,21 +533,38 @@ function findGeckodriver(harnessDir) {
 }
 
 /** Waits for a window handle whose URL contains `fragment`. */
-async function findHandleByUrl(driver, fragment, timeoutMs) {
+/**
+ * ALL handles whose current URL contains `fragment`. The click target for the
+ * failure matrix is the single `/ui/popup/` handle, and the COUNT is the point:
+ * the harness asserts it is exactly one, so "the first match" cannot be a coin
+ * flip between two callers without saying so.
+ *
+ * An earlier version tried to identify that handle by the tab id recorded in
+ * `__fxHarnessSelectorOpened`. That is the tab the SELECTION IS FOR (the sender
+ * page, served over http by this harness) - not the tab hosting the UI - so it
+ * matched nothing and the run collapsed without ever clicking (measured:
+ * 30/50, "no popup handle"). The route is decided by the popup's mount timing
+ * and by whether its first `popup:init` was suppressed, not by which handle is
+ * clicked, and it is asserted afterwards from the outer-catch markers.
+ */
+async function findHandlesByUrl(driver, fragment, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
+    let last = [];
     while (Date.now() < deadline) {
+        last = [];
         for (const handle of await driver.getAllWindowHandles()) {
             try {
                 await driver.switchTo().window(handle);
                 const url = await driver.getCurrentUrl();
-                if (url.includes(fragment)) return handle;
+                if (url.includes(fragment)) last.push(handle);
             } catch {
                 // The handle may have gone away between listing and switching.
             }
         }
+        if (last.length) return last;
         await sleep(300);
     }
-    return undefined;
+    return last;
 }
 
 async function main() {
@@ -532,9 +632,25 @@ async function main() {
      * `popup:init` on top of it is what turns the same click into a REPLACEMENT
      * selector. `--interleave-*` wants the former, `--auto-cast-*` and
      * `--create-failure-*` the latter.
+     *
+     * With `--request-source selector` nothing is suppressed: the popup mounts
+     * late and finds the selector that already exists, so the click resolves
+     * through `main:requestSession` instead of the popup's auto-cast. Which of
+     * the two actually ran is asserted (`request-source ...: the click went
+     * through ...`), because the label alone was wrong in most earlier runs.
      */
-    const provocation =
-        (gapMode || failureMode) && args.requestSource === "queued";
+    /**
+     * Mounting the popup LATE - after `requestSession` has opened its selector -
+     * is what makes the click's route deterministic at all, and it is wanted for
+     * BOTH labels: for `queued` the popup's port is then answered with the
+     * suppressed `popup:init` (the replacement selector, i.e. the auto-cast
+     * route), for `selector` the port matches the selector that already exists
+     * (the popup clears its auto-cast timer and the click resolves through
+     * `main:requestSession`). Mounting it early made the route a race: 3 of 4
+     * runs labelled `selector` were in fact served by the popup's auto-cast, so
+     * the label was a lie and the caller-identity check below could not catch it.
+     */
+    const deferPopup = gapMode || failureMode;
     const suppressPopupInit =
         (gapMode || args.createFailure) && args.requestSource === "queued";
     const expectReleased = args.expectReleased;
@@ -1048,7 +1164,7 @@ async function main() {
                     "deviceId, hasIdentity: Boolean(identity), loadGeneration: identity ? identity.loadGeneration : null"
                 )
         );
-        if (provocation) {
+        if (deferPopup) {
             // Run-bound proof that a receiver selector OPENED, which is the
             // order this mode has to establish: the popup must mount while the
             // `requestSession` selector is already waiting. Without that, the
@@ -1061,7 +1177,7 @@ async function main() {
                 )
             );
             // Suppress the FIRST `popup:init` post of this run, once, on a
-            // run-bound flag. This is the provocation, and it is deliberately
+            // run-bound flag. This is the queued label's provocation, and it is deliberately
             // narrow: it reproduces the exact production failure the popup's
             // own watchdog exists for ("a stale page<->background messaging
             // channel... that message never arrives"), i.e. a ready selector
@@ -1239,6 +1355,223 @@ async function main() {
             );
             console.log(
                 "failure mode: createCastSession is gate-able for this run (run-bound control)"
+            );
+
+            // --- injecting a fault into the cleanup ITSELF ------------------
+            //
+            // The p2 failure reaches the catch that cleans up the half-created
+            // session. That cleanup is best-effort: each step has its own catch
+            // and the two port-closing steps sit in a `finally`, so a throwing
+            // step must not (a) leak the native host or (b) replace the error
+            // that explains the failure. Both are properties of the production
+            // structure, and until now they had only static backing plus the
+            // happy path's dynamic evidence - a cleanup step that never threw
+            // in a test cannot show that the finally still ran.
+            //
+            // Only p2 can reach this code (parseArgs rejects the rest), and the
+            // gates below are run-bound and read the SAME control record the
+            // stage gates use, so a fault cannot fire in another run.
+            const cleanupFile = path.join(
+                extensionDir,
+                "background/background.js"
+            );
+            const cleanupText = fs.readFileSync(cleanupFile, "utf8");
+            /**
+             * A gate plus a marker, inserted at the TOP of the cleanup `try`
+             * block whose call may be faulted.
+             *
+             * The gate is run-bound AND type-checked (`fault === this site's
+             * id`), so the other site's gate reads the same record and passes:
+             * without the check, arming one fault would make BOTH cleanup steps
+             * throw and the exit path would no longer be the production one.
+             *
+             * The marker is deliberate even when no fault is armed: it says
+             * "this block was entered and got past the gate", which is what
+             * makes the bail-out assertion below falsifiable rather than
+             * vacuous when the fault marker is missing.
+             */
+            const instrumentCleanupSite = (text, anchor, fault) => {
+                const at = text.indexOf(anchor);
+                if (at === -1) {
+                    throw new Error(
+                        `sessionHarness: cannot instrument the cleanup step ${fault.site} (anchor not found): ${anchor}`
+                    );
+                }
+                if (text.indexOf(anchor, at + anchor.length) !== -1) {
+                    throw new Error(
+                        `sessionHarness: the cleanup anchor for ${fault.site} is not unique: ${anchor}`
+                    );
+                }
+                const insertAt = at + anchor.length;
+                // The observable entry marker: storage, because in-memory
+                // counters in the background are invisible to the harness, and
+                // "the cleanup reached this step" must be a fact the run can read
+                // (it is what makes the fault marker's absence meaningful).
+                const siteEntry =
+                    `\n          try { await browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ ${JSON.stringify(
+                        `__fxHarnessCleanupSiteEntered_${fault.id}`
+                    )}: { runId: r && r.__fxHarnessDiagnosticRunId, site: ${JSON.stringify(
+                        fault.site
+                    )}, at: Date.now() } })); } catch (e) {}`;
+                const gate =
+                    siteEntry +
+                    ` await __fxHarnessCleanupGate(${JSON.stringify(
+                        fault.id
+                    )}, ${JSON.stringify(fault.message)}, ${JSON.stringify(
+                        fault.site
+                    )});\n          `;
+                return (
+                    text.slice(0, insertAt) +
+                    gate +
+                    text.slice(insertAt)
+                );
+            };
+            /**
+             * The gate itself: hoisted function declaration (so its position in
+             * the bundle cannot matter), run-bound, and it throws ONLY the fault.
+             *
+             * It deliberately does NOT catch the fault it raises: the point is for
+             * the PRODUCTION catch of the step it guards to receive it - that is
+             * the code path under test (does the outer `finally` still close the
+             * port, and does the original error still reach the caller, when a
+             * cleanup step throws). An earlier version absorbed its own fault and
+             * therefore tested nothing while looking green.
+             *
+             * Awaiting is correct here even though the guarded calls are
+             * synchronous: the gate runs BEFORE the call inside the same `try`, so
+             * the call is skipped and the throw lands in the same production catch
+             * - the extra storage round trip cannot make the injection "too late",
+             * it can only delay it.
+             */
+            const cleanupGateSource =
+                "async function __fxHarnessCleanupGate(faultId, message, site) {\n" +
+                "    let ctl;\n" +
+                "    let runId;\n" +
+                "    try {\n" +
+                "        const r = await browser.storage.local.get(['__fxHarnessCleanupFaultControl', '__fxHarnessDiagnosticRunId']);\n" +
+                "        ctl = r && r.__fxHarnessCleanupFaultControl;\n" +
+                "        runId = r && r.__fxHarnessDiagnosticRunId;\n" +
+                "    } catch (e) { return; }\n" +
+                "    if (!ctl || ctl.runId !== runId || ctl.fault !== faultId) {\n" +
+                "        return;\n" +
+                "    }\n" +
+                "    try {\n" +
+                "        await browser.storage.local.set({ ['__fxHarnessCleanupFaultRaised_' + faultId]: { runId: runId, fault: faultId, site: site, message: message, at: Date.now() } });\n" +
+                "    } catch (e) {}\n" +
+                "    throw new Error(message);\n" +
+                "}";
+            {
+                // Both sites always carry a gate; the CONTROL decides whether
+                // anything throws, so a run without --cleanup-fault behaves
+                // exactly as it did before (the gate reads a key that is absent
+                // or belongs to another run).
+                let text = instrumentCleanupSite(
+                    cleanupText,
+                    "try {\n            if (opts.instance.bridgeMessageListener) {",
+                    CLEANUP_FAULTS[0]
+                );
+                text = instrumentCleanupSite(
+                    text,
+                    "opts.instance.session = void 0;\n          try {\n            if (opts.instance.contentContext?.tabId !== void 0) {",
+                    CLEANUP_FAULTS[1]
+                );
+                fs.writeFileSync(cleanupFile, text);
+                // The gate function must be patched in AFTER this write: the
+                // block above reads the bundle into `text` and writes the whole
+                // file back, so a patch applied between that read and this
+                // write is silently clobbered (the call sites live in `text`,
+                // a separate patch call does not).
+                patch(
+                    "background/background.js",
+                    "async function createCastSession(opts) {",
+                    () => "\n" + cleanupGateSource + "\n"
+                );
+                console.log(
+                    args.cleanupFault
+                        ? `failure mode: the partial-session cleanup is gate-able (every cleanup site carries a gate; injecting a throw into ${args.cleanupFault})`
+                        : "failure mode: the partial-session cleanup is gate-able (both sites carry a gate, no fault armed)"
+                );
+            }
+            // Both handlers are the places the ORIGINAL error is finally
+            // consumed, and they are different code for the two callers:
+            //
+            //   the main:requestSession handler catches it, logs it, and tells
+            //   the page "cancelled" (the `--request-source selector` path);
+            //   triggerCast() catches what loadSender rethrows and only logs
+            //   (the `--request-source queued` path - the popup's auto-cast).
+            //
+            // A marker holding the message they ACTUALLY caught is the only
+            // thing that can distinguish "the original error propagated" from
+            // "both errors landed in the same outer catch", which is what the
+            // cleanup fault is meant to rule out.
+            //
+            // The anchor is a complete statement or block END, never the `{` of
+            // a call's argument object: inserting into those braces produced
+            // `logger.error("...", { <marker> mediaType: ... })`, which does not
+            // parse (the harness's own syntax gate caught it before launching -
+            // which is why that gate is not optional).
+            const outerCaughtMarker = name =>
+                `try { void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ ${JSON.stringify(
+                    `__fxHarnessOuterCaught_${name}`
+                )}: { handler: ${JSON.stringify(
+                    name
+                )}, runId: r && r.__fxHarnessDiagnosticRunId, message: String((err && err.message) || err), at: Date.now() } })).catch(() => {}); } catch (e) {}`;
+            for (const outer of [
+                {
+                    anchor:
+                        '} catch (err) {\n          pendingRokuMedia?.release();',
+                    name: "requestSessionHandler"
+                },
+                {
+                    anchor: '} catch (err) {\n          rokuLoad?.release();',
+                    name: "loadSender"
+                }
+            ]) {
+                patch("background/background.js", outer.anchor, () =>
+                    `\n          ${outerCaughtMarker(outer.name)}\n`
+                );
+            }
+            // triggerCast's catch holds a single logging CALL, so its marker
+            // goes after that statement ends (`});`) and before the catch block
+            // closes - located by matching braces instead of spelling out the
+            // catch block's shape, which changes with every reformat.
+            {
+                const file = path.join(extensionDir, "background/background.js");
+                const text = fs.readFileSync(file, "utf8");
+                const site = text.indexOf(
+                    'logger_default.error("loadSender failed (triggerCast)"'
+                );
+                const callEnd = site === -1 ? -1 : text.indexOf("});", site);
+                let closeAt = callEnd === -1 ? -1 : callEnd + 3;
+                if (closeAt !== -1) {
+                    let depth = 0;
+                    let found = -1;
+                    for (let i = closeAt; i < text.length; i++) {
+                        if (text[i] === "{") depth++;
+                        else if (text[i] === "}") {
+                            if (depth === 0) {
+                                found = i;
+                                break;
+                            }
+                            depth--;
+                        }
+                    }
+                    closeAt = found;
+                }
+                if (closeAt === -1) {
+                    throw new Error(
+                        "sessionHarness: cannot instrument the triggerCast catch (loadSender failed (triggerCast) anchor not found)"
+                    );
+                }
+                fs.writeFileSync(
+                    file,
+                    text.slice(0, closeAt) +
+                        `\n          ${outerCaughtMarker("triggerCast")}\n` +
+                        text.slice(closeAt)
+                );
+            }
+            console.log(
+                "failure mode: every outer handler records the error it actually caught"
             );
         }
         for (const relPath of [
@@ -1577,7 +1910,7 @@ async function main() {
                         active: false
                     });
                     ${
-                        provocation
+                        deferPopup
                             ? ""
                             : `setTimeout(() => {
                         browser.tabs.update(tab.id, {
@@ -1766,7 +2099,23 @@ async function main() {
             // count > 1).
             "__fxHarnessCancelPost_1",
             "__fxHarnessCancelPost_2",
-            "__fxHarnessCancelPost_3"
+            "__fxHarnessCancelPost_3",
+            // Cleanup-fault injection: the run-bound control, the marker each
+            // cleanup site writes when it throws, and one marker PER OUTER
+            // HANDLER holding the message it caught. A shared key would let the
+            // handler that runs second overwrite the first - and "which error
+            // reached which handler" is the whole question.
+            "__fxHarnessCleanupFaultControl",
+            // The gate reads the control straight out of storage on every
+            // call (no cached event), so these are the only keys involved:
+            // the control, the marker the armed site writes before it throws,
+            // and the marker each site writes on entry (present without a
+            // fault too - it is what proves the gate is really in the path).
+            ...CLEANUP_FAULTS.map(f => `__fxHarnessCleanupFaultRaised_${f.id}`),
+            ...CLEANUP_FAULTS.map(f => `__fxHarnessCleanupSiteEntered_${f.id}`),
+            "__fxHarnessOuterCaught_requestSessionHandler",
+            "__fxHarnessOuterCaught_loadSender",
+            "__fxHarnessOuterCaught_triggerCast"
         ];
         await driver.switchTo().window(consoleTab);
         const prepared = await driver.executeAsyncScript(
@@ -1839,7 +2188,7 @@ async function main() {
             })
         );
 
-        // Gap modes arm the provocation here, while an extension page is still
+        // The late-popup modes arm their control here, while an extension page is still
         // the current context (the probe above ran in it): the flag has to be
         // readable by the background BEFORE the first popup:init post of this
         // run, and awaiting the write is what makes that an ordering fact.
@@ -1865,7 +2214,7 @@ async function main() {
          * phase would otherwise be counted as this checkpoint's leak (or hide one).
          */
         let failureHostPidsBefore;
-        if (provocation) {
+        if (deferPopup) {
             // Independent identity for the sender tab. `tabs.query({url})` with a
             // match pattern returned nothing here even with the `tabs`
             // permission, so the list is filtered by URL instead, and the raw
@@ -1929,6 +2278,53 @@ async function main() {
                 armedInjection === true,
                 JSON.stringify({ armed: armedInjection, calls, stage: args.failStage })
             );
+            if (args.cleanupFault !== undefined) {
+                // Armed together with the stage gate and before the click, so
+                // the fault can only reach the cleanup of the start under test.
+                // `callIndex: 1` matches the stage gate's `{1: "failNow"}`: both
+                // are about the same invocation.
+                const armedCleanupFault = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .set({ __fxHarnessCleanupFaultControl: { runId: ${JSON.stringify(
+                            diagnosticRunId
+                        )}, fault: ${JSON.stringify(
+                            args.cleanupFault
+                        )}, callIndex: 1, at: Date.now() } })
+                        .then(() => done(true), err => done(String(err)));`
+                );
+                check(
+                    `session-failure mode: the cleanup fault is armed (${args.cleanupFault} throws inside the p2 cleanup)`,
+                    armedCleanupFault === true,
+                    JSON.stringify({
+                        armed: armedCleanupFault,
+                        fault: args.cleanupFault
+                    })
+                );
+                // The background reads the control at fault time (its own
+                // storage read inside the gate), so what has to hold is that the
+                // arm has LANDED before the click. Reading it back is that
+                // ordering fact; there is no cache to wait for any more.
+                const armedBack = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
+                     browser.storage.local
+                        .get("__fxHarnessCleanupFaultControl")
+                        .then(v => done(v.__fxHarnessCleanupFaultControl || null), err => done({ error: String(err) }));`
+                );
+                check(
+                    "session-failure mode: the cleanup-fault control is readable before the click",
+                    Boolean(
+                        armedBack &&
+                            armedBack.runId === diagnosticRunId &&
+                            armedBack.fault === args.cleanupFault
+                    ),
+                    JSON.stringify({
+                        armedBack: armedBack || null,
+                        runId: diagnosticRunId,
+                        fault: args.cleanupFault
+                    })
+                );
+            }
             // The failure phase's lower bound for the wire assertions, taken
             // after the arm has landed: nothing this phase produces can predate
             // it, so an earlier generation (or a replay) cannot be counted as
@@ -2002,7 +2398,7 @@ async function main() {
             "window.__HARNESS_REQUEST_SESSION__().catch(() => {});"
         );
 
-        if (provocation) {
+        if (deferPopup) {
             // The popup mounts only now, i.e. AFTER requestSession opened its
             // selector: mounting it earlier is what makes the popup's auto-cast
             // fire harmlessly before any selector exists, which is why the
@@ -2087,7 +2483,26 @@ async function main() {
             `popup:init marks before=${marksBefore} now=${markCount()}`
         );
 
-        const popupHandle = await findHandleByUrl(driver, "/ui/popup/", 20000);
+        // ONE `/ui/popup/` handle, and that fact is asserted rather than
+        // assumed: the sender page is served over http by this harness (`file://`
+        // is not a whitelisted SDK origin), so it can never collide with the UI's
+        // URL, and the selector UI plus the popup are the same tab.
+        const popupUrlHandles = await findHandlesByUrl(
+            driver,
+            "/ui/popup/",
+            20000
+        );
+        const popupHandle = popupUrlHandles[0];
+        check(
+            "the selector/popup UI is addressable AND unique (exactly one /ui/popup/ handle, so the click cannot be a coin flip)",
+            popupUrlHandles.length === 1,
+            JSON.stringify({
+                popupUrlHandles: popupUrlHandles.length,
+                totalHandles: (await driver.getAllWindowHandles()).length,
+                requestSelectorTabId: requestSelectorTabId ?? null,
+                senderTabId: senderTabId ?? null
+            })
+        );
         let clickAt;
         let clicked;
         // Guard against a vacuous pass: the popup page renders every device as
@@ -2540,6 +2955,51 @@ async function main() {
         // "the channel is broken", which is how a missing Gate B marker was
         // mis-read twice. Its presence or absence is diagnostic, printed below
         // and asserted explicitly where it is the point (`--auto-cast-gap`).
+        // SUPPORTING route evidence, not the authoritative one. This marker is
+        // written immediately before the production Roku branch of
+        // `main:requestSession`, so its presence is positive proof that the click
+        // resolved through that handler; its ABSENCE, however, is a bounded
+        // "not seen" observation (the read above waited for this run's own
+        // positive markers - the popup's click control and the load generation -
+        // and gave up after 15s), and a late write could in principle arrive
+        // after that window. The authoritative caller evidence is therefore the
+        // outer-catch assertions over the same failure matrix (they read what
+        // each caller's own catch actually received): in `--cleanup-fault` runs
+        // inside the cleanup-fault block, otherwise in the block that follows the
+        // page-settlement checks.
+        // Only the single-caller FAILURE matrix (`--create-failure-*`, with or
+        // without `--cleanup-fault`), because that is the only place where
+        // `--request-source` is a caller-ownership claim:
+        //
+        //   `--interleave-*` starts BOTH callers on purpose (a requestSession
+        //   start and the popup's own start), and the requestSession one walks
+        //   this very branch - under the default `queued` label this check would
+        //   demand an ABSENT marker in a run where the marker is legitimately
+        //   present;
+        //   the success modes (default, `--media-before-generation`,
+        //   `--generation-advance`, `--startup-synthesis`, `--auto-cast-*`) never
+        //   claimed single-caller ownership at all, so a default `queued` label
+        //   must not impose one on them either.
+        //
+        // Both cases would fail the harness's own assumption rather than the
+        // product. Interleave asserts its own two-start facts instead (which
+        // start announced, whose release was refused).
+        if (args.createFailure && !args.interleave) {
+            check(
+                `request-source ${args.requestSource}: supporting evidence - the Roku-branch marker of main:requestSession is ${
+                    args.requestSource === "selector" ? "present" : "absent"
+                } (the authoritative caller check is the outer-catch assertion)`,
+                args.requestSource === "selector"
+                    ? Boolean(selectionMarker)
+                    : !selectionMarker,
+                JSON.stringify({
+                    selectionAtRokuBranch: selectionMarker || null,
+                    clickControl: clickControl || null,
+                    requestSelectorTabId: requestSelectorTabId ?? null,
+                    senderTabId: senderTabId ?? null
+                })
+            );
+        }
         check(
             "Gate B channel self-proof: the popup's click marker and the background's probe/ack are both present for this run",
             Boolean(clickControl && backgroundControl),
@@ -2858,7 +3318,18 @@ async function main() {
             const failureMarkerKeys = [
                 ...callMarkerKeys(1),
                 ...callMarkerKeys(2),
-                "__fxHarnessLoadGenerationBegan"
+                "__fxHarnessLoadGenerationBegan",
+                // The cleanup-fault run's own evidence: what each cleanup site
+                // reached and raised, and what each outer handler caught.
+                ...CLEANUP_FAULTS.map(
+                    f => `__fxHarnessCleanupFaultRaised_${f.id}`
+                ),
+                ...CLEANUP_FAULTS.map(
+                    f => `__fxHarnessCleanupSiteEntered_${f.id}`
+                ),
+                "__fxHarnessOuterCaught_requestSessionHandler",
+                "__fxHarnessOuterCaught_loadSender",
+                "__fxHarnessOuterCaught_triggerCast"
             ];
             // Storage markers are only reachable from an extension page, and
             // this block runs after the click switched contexts around, so the
@@ -2881,6 +3352,77 @@ async function main() {
                     if (Date.now() > deadline) return undefined;
                     await sleep(250);
                 }
+            };
+            /**
+             * The AUTHORITATIVE caller evidence: which producer of this run
+             * actually received the injected failure, read from the marker each
+             * outer `catch` wrote (`__fxHarnessOuterCaught_<handler>`).
+             *
+             * Why not the Roku-branch marker: that one is written by an async
+             * `storage.get().then(set)` chain, so its ABSENCE is only a bounded
+             * "not seen" observation. What each caller's own `catch` received is
+             * a positive fact written by the code path that ran.
+             *
+             * `loadSender` is deliberately unconstrained: it is an intermediate
+             * handler that rethrows into `triggerCast`, so the queued route
+             * legitimately fills BOTH. Only the handler of the OTHER route is
+             * required to be free of THIS failure.
+             *
+             * Only used where exactly one caller is supposed to own the session:
+             * `--interleave-*` starts both callers on purpose, so it asserts its
+             * own two-start facts instead.
+             */
+            const readCallerRouteEvidence = async (
+                originalIdentifier,
+                cleanupIdentifier
+            ) => {
+                const keys = [
+                    "requestSessionHandler",
+                    "loadSender",
+                    "triggerCast"
+                ];
+                const caught = {};
+                for (const key of keys) {
+                    const marker = await waitForFailureMarker(
+                        `__fxHarnessOuterCaught_${key}`,
+                        undefined,
+                        key === keys[0] ? 15000 : 5000
+                    );
+                    if (marker) caught[key] = marker;
+                }
+                const expected =
+                    args.requestSource === "queued"
+                        ? "triggerCast"
+                        : "requestSessionHandler";
+                const other =
+                    expected === "triggerCast"
+                        ? "requestSessionHandler"
+                        : "triggerCast";
+                const identifies = key => {
+                    const message = caught[key] && caught[key].message;
+                    return (
+                        typeof message === "string" &&
+                        message.includes(originalIdentifier) &&
+                        !(
+                            cleanupIdentifier &&
+                            message.includes(cleanupIdentifier)
+                        )
+                    );
+                };
+                return {
+                    expected,
+                    other,
+                    caught,
+                    expectedMarker: caught[expected] || null,
+                    expectedSawFailure: identifies(expected),
+                    otherSawFailure: identifies(other),
+                    messages: Object.fromEntries(
+                        keys.map(key => [
+                            key,
+                            (caught[key] && caught[key].message) || null
+                        ])
+                    )
+                };
             };
             const readConnectionsNow = () =>
                 readNdjson(path.join(harnessDir, "spawns.ndjson"))
@@ -3347,6 +3889,50 @@ async function main() {
                 }
             }
 
+            // --- which caller really ran (the label is asserted, not assumed) --
+            //
+            // The settlement assertions above are quoted per `--request-source`,
+            // so the label has to be a fact: the authoritative evidence is what
+            // each caller's own `catch` received (see
+            // readCallerRouteEvidence). Without this, a run labelled `selector`
+            // could be settled entirely by the popup's auto-cast - which is what
+            // 3 of 4 earlier "selector" runs did before the route was asserted.
+            //
+            // `--interleave-*` is excluded on purpose: it starts BOTH callers, so
+            // "the other route did not receive it" is false by design there, and
+            // that mode asserts its own two-start facts (which start announced,
+            // whose release was refused). `--cleanup-fault` runs are excluded
+            // because the cleanup-fault block asserts the same route facts with
+            // the cleanup error identifier added, and a second bounded wait for
+            // the same markers would only make the run slower.
+            if (args.createFailure && !args.interleave && !args.cleanupFault) {
+                const originalId =
+                    "harness: injected createCastSession failure";
+                const route = await readCallerRouteEvidence(originalId);
+                check(
+                    `session-failure mode (${args.requestSource}/${args.failStage}): the labelled caller's handler (${route.expected}) received the injected failure`,
+                    route.expectedSawFailure,
+                    JSON.stringify({
+                        expected: route.expected,
+                        caughtHandlers: Object.keys(route.caught),
+                        messages: route.messages,
+                        originalIdentifier: originalId
+                    })
+                );
+                check(
+                    `session-failure mode (${args.requestSource}/${args.failStage}): the other route's handler (${route.other}) did NOT receive it, so only the labelled caller ran`,
+                    Boolean(route.expectedMarker) &&
+                        route.expectedSawFailure &&
+                        !route.otherSawFailure,
+                    JSON.stringify({
+                        expected: route.expected,
+                        other: route.other,
+                        caughtHandlers: Object.keys(route.caught),
+                        messages: route.messages
+                    })
+                );
+            }
+
             // --- partial-session residue at this checkpoint ------------------
             //
             // Create-failure modes only: the interleave modes legitimately post
@@ -3384,6 +3970,146 @@ async function main() {
                     !postedCreateSession,
                     JSON.stringify({ postedCreateSession })
                 );
+
+                // --- the cleanup's OWN failure: did the exit path hold? ------
+                //
+                // The original failure happens INSIDE createCastSession, this
+                // cleanup fault is raised by the catch that reacts to it, and
+                // the error is consumed two frames further out. "The page saw
+                // one cancel" cannot tell the two errors apart - both would land
+                // in the same outer catch - so the discriminator is the message
+                // that outer handler ACTUALLY caught, tested against the stable
+                // identifiers of both errors.
+                if (args.cleanupFault !== undefined) {
+                    const fault = CLEANUP_FAULTS.find(
+                        f => f.id === args.cleanupFault
+                    );
+                    const raised = await waitForFailureMarker(
+                        `__fxHarnessCleanupFaultRaised_${fault.id}`,
+                        undefined,
+                        15000
+                    );
+                    const otherFault = CLEANUP_FAULTS.find(
+                        f => f.id !== fault.id
+                    );
+                    // A bounded wait: the entry marker is written before the
+                    // fault, but both are storage writes and their order in the
+                    // log is what is asserted below.
+                    let enteredMine;
+                    let enteredOther;
+                    {
+                        const enteredDeadline = Date.now() + 10000;
+                        for (;;) {
+                            const siteMarkers = await readFailureMarkers();
+                            enteredMine = markerFor(
+                                siteMarkers,
+                                `__fxHarnessCleanupSiteEntered_${fault.id}`
+                            );
+                            enteredOther = markerFor(
+                                siteMarkers,
+                                `__fxHarnessCleanupSiteEntered_${otherFault.id}`
+                            );
+                            if (
+                                (enteredMine && enteredOther) ||
+                                Date.now() > enteredDeadline
+                            )
+                                break;
+                            await sleep(200);
+                        }
+                    }
+                    // Two SEPARATE layers of evidence, deliberately not merged:
+                    //
+                    //   the fault was raised at THAT site with THAT message and
+                    //   the step's own block WAS entered (so the fault marker's
+                    //   absence would mean something) - this is the injection;
+                    //
+                    //   the OTHER cleanup step was still reached - this proves
+                    //   the identity-guarded cleanup sequence continued past the
+                    //   fault that this step's own production catch absorbed. It
+                    //   is NOT evidence about the `finally`: that the port was
+                    //   really closed is proved independently, later, by the
+                    //   half-created port existing and its idle host exiting.
+                    check(
+                        `session-failure mode (cleanup fault ${fault.id}): the injected error was raised at ${fault.site} before the call it replaces, and the step's own handler caught it`,
+                        Boolean(raised) &&
+                            raised.fault === fault.id &&
+                            raised.site === fault.site &&
+                            raised.message === fault.message &&
+                            Boolean(enteredMine) &&
+                            enteredMine.site === fault.site,
+                        JSON.stringify({
+                            raised: raised || null,
+                            expectedMessage: fault.message,
+                            expectedSite: fault.site,
+                            enteredMine: enteredMine || null
+                        })
+                    );
+                    check(
+                        `session-failure mode (cleanup fault ${fault.id}): the other cleanup step was still reached (the absorbed fault did not abort the identity-guarded sequence; whether the finally closed the port is asserted separately by the host-exit check)`,
+                        Boolean(enteredOther) &&
+                            enteredOther.site === otherFault.site,
+                        JSON.stringify({
+                            enteredOther: enteredOther || null,
+                            expectedOtherSite: otherFault.site,
+                            enteredMine: enteredMine || null
+                        })
+                    );
+                    const originalId =
+                        "harness: injected createCastSession failure";
+                    // The same reader the non-cleanup failure modes use: the
+                    // cleanup error identifier is additional here, because on
+                    // this path a handler that caught the CLEANUP error instead
+                    // of the original one is exactly the failure being ruled out.
+                    const route = await readCallerRouteEvidence(
+                        originalId,
+                        fault.message
+                    );
+                    const caught = route.caught;
+                    const expectedOuter = route.expected;
+                    const caughtMarker = route.expectedMarker;
+                    const message = caughtMarker && caughtMarker.message;
+                    const fromOriginal = route.expectedSawFailure;
+                    const fromCleanup =
+                        typeof message === "string" &&
+                        message.includes(fault.message);
+                    console.log(
+                        `cleanup fault (${fault.id}/${args.requestSource}): what the outer handler caught:`,
+                        JSON.stringify({
+                            expectedOuter,
+                            caught: Object.keys(caught),
+                            message: message || null
+                        })
+                    );
+                    check(
+                        `session-failure mode (cleanup fault ${fault.id}/${args.requestSource}): ${expectedOuter} caught the ORIGINAL request failure, not the cleanup error`,
+                        Boolean(caughtMarker) &&
+                            caughtMarker.handler === expectedOuter &&
+                            fromOriginal &&
+                            !fromCleanup,
+                        JSON.stringify({
+                            expectedOuter,
+                            caught: caughtMarker || null,
+                            caughtHandlers: Object.keys(caught),
+                            originalIdentifier: originalId,
+                            cleanupIdentifier: fault.message
+                        })
+                    );
+                    const otherOuter = route.other;
+                    const otherCaughtOriginal = route.otherSawFailure;
+                    check(
+                        `session-failure mode (cleanup fault ${fault.id}/${args.requestSource}): the other route's handler (${otherOuter}) did NOT receive this failure, so only the labelled caller ran`,
+                        Boolean(caughtMarker) &&
+                            fromOriginal &&
+                            !otherCaughtOriginal,
+                        JSON.stringify({
+                            expectedOuter,
+                            otherOuter,
+                            caughtHandlers: Object.keys(caught),
+                            messages: route.messages,
+                            originalIdentifier: originalId
+                        })
+                    );
+                }
                 // The discriminator is IDLENESS, not "a new connection appeared":
                 // the background also opens short-lived version-probe hosts
                 // (bridge:/getInfo -> raw:<version>) which answer and exit, and

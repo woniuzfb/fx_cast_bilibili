@@ -242,7 +242,11 @@ filtered until some later successful load, a device-down or a bridge reconnect.
 
 - `--create-failure-*`: the queued-selection start (the auto-cast provocation above)
   announces and then fails. Pre-fix nothing releases the gate; post-fix the failing
-  start releases its own.
+  start releases its own. `--request-source selector` moves the same failure to the
+  `main:requestSession` handler's caller instead: the popup still mounts late (that
+  is what makes the route deterministic), but nothing suppresses `popup:init`, so
+  its port matches the selector `requestSession` already opened, its auto-cast
+  timer is cleared, and the outer handler - not `triggerCast` - consumes the error.
 - `--interleave-*`: the `requestSession` start announces and is held, then a second
   start (the popup's own `action:castCurrentTab`, sent from the popup page with the
   popup's window focused - what a real click there does) announces a newer
@@ -287,14 +291,161 @@ What these modes do NOT cover, and must not be read as closed:
 - failures AFTER `createCastSession` has partly run (bridge connected,
   `instance.session` set, the `bridge:createCastSession` post throwing): the
   injection point is the top of `createCastSession`, so nothing past that is
-  covered.
+  covered. What IS covered past it is the reverse case - a cleanup step throwing
+  while the p2 failure is being handled (`--cleanup-fault`, below).
+
+### When the cleanup itself fails (`--cleanup-fault`)
+
+```sh
+node test/integration/sessionHarness.js --create-failure-fixed --fail-stage p2 \
+    --request-source queued --cleanup-fault removeListener
+node test/integration/sessionHarness.js --create-failure-fixed --fail-stage p2 \
+    --request-source selector --cleanup-fault actionState
+```
+
+`--fail-stage p2` fails the start AFTER the bridge port exists and after
+`instance.session` and both listeners were installed, so the failure reaches the
+cleanup that removes the partial session. That cleanup is best-effort by
+construction - each step has its own `catch`, and the two steps that close the
+port sit in a `finally` - and the question this mode asks is whether a cleanup
+step that THROWS changes either of the two things that matter:
+
+1. the half-created port is still closed (so no idle native host survives), and
+2. the error that reaches the caller is still the ORIGINAL failure.
+
+`--cleanup-fault` injects a throw into one cleanup step, on top of the original
+p2 failure. The values are the two steps that have their own `catch`:
+
+| value | the injected step | what the fault proves |
+| --- | --- | --- |
+| `removeListener` | `onMessage.removeListener` for the partial session's message listener | the `try` that removes the message listener exited immediately (the action-state reset in the SAME `try` was never reached), and the `finally` still closed the port |
+| `actionState` | `updateActionState(Default, tabId)` | the message listener WAS removed first, and that step's own `catch` kept the cleanup going to the `finally` |
+
+The cleanup is deliberately meant to fail without replacing the original error,
+which is why "the page saw one error" cannot be the evidence: BOTH errors would
+end up in the same outer `catch`. So the injected error and the original one
+carry different stable identifiers, and the instrumented copy records the
+message that the outer handler ACTUALLY caught. Which handler that is depends on
+the caller, because the two callers consume the error in different code:
+
+- `--request-source selector`: the `main:requestSession` handler logs it and
+  posts `cast:sessionRequestCancelled` to the page;
+- `--request-source queued`: `triggerCast()` catches what `loadSender()`
+  rethrows and only logs (asserted on its own handler marker).
+
+The label is asserted, not trusted, at two strengths. A run checks the marker
+written immediately before the production Roku branch of `main:requestSession`
+(`selector` requires it, `queued` requires its absence) - supporting evidence
+only, because its absence is a bounded "not seen" observation. The authoritative
+checks read what each caller's own `catch` received: the labelled caller's handler
+must hold the ORIGINAL failure and the other route's handler must not. They run for
+every `--create-failure-*` run (both labels, every stage) and, with the cleanup
+error identifier added, for `--cleanup-fault`.
+
+Both caller assertions - the authoritative one above and the supporting
+Roku-branch one - run only in the single-caller failure matrix
+(`--create-failure-*`, with or without `--cleanup-fault`), which is the only place
+where `--request-source` is a caller-ownership claim. `--interleave-*` starts both
+callers in one run on purpose: its requestSession start walks the Roku branch, so a
+single-caller "the marker must be absent" demand would fail the harness's own
+assumption instead of the product (interleave asserts its own two-start facts:
+which start announced, whose release was refused). The success modes
+(`--auto-cast-*`, `--media-before-generation`, `--generation-advance`,
+`--startup-synthesis`, the default run) never claimed single-caller ownership, so
+the default `queued` label must not impose it on them either.
+
+The late mount is shared by every failure/gap mode and both labels
+(`deferPopup = gapMode || failureMode`). For `--interleave-*` (default `queued`) the
+flag's value and the code it guards are unchanged, so the previously measured
+interleave runs are not affected; `--interleave-* --request-source selector` is a
+new combination and has not been run.
+
+This is not decoration - before it existed, 3 of 4 runs labelled `selector` were
+in fact served by the popup's auto-cast: the popup was mounted EARLY, so its port
+connected before `requestSession` had a selector, its auto-cast replaced the
+selector, and the click resolved the replacement. Every one of those runs then
+failed the outer-handler assertion for a reason that had nothing to do with the
+cleanup. The fix for that is the LATE mount above, not the choice of handle: at
+click time there is exactly ONE `/ui/popup/` handle (the sender page is served
+over http by this harness, so it cannot collide with the UI's URL), and the run
+asserts that count instead of assuming it. An attempt to identify the handle by
+the tab id recorded in `__fxHarnessSelectorOpened` was wrong and is documented in
+the harness: that id is the tab the selection is FOR (the sender), not the tab
+hosting the UI, so it matched nothing and the run collapsed without a click.
+
+Only `--fail-stage p2` reaches the two cleanup steps instrumented here, so any
+other combination is rejected at argument-parsing time instead of arming a fault
+that can never fire and then reading its absence as "the cleanup was not
+reached".
+
+The stage distinction is narrower than "p0/p1 never reach the cleanup": `p1` and
+`p2` enter `createCastSession`'s internal `catch`/`finally` and close the port they
+own. `p0` fires before `bridge.connect()` and before that internal `try` exists, so
+it never enters it, owns no port, and propagates directly to its caller (which is
+where the announcement is released and the page is settled). What `p0` and `p1`
+both fail to reach is the pair of steps instrumented below, because both sit inside
+`if (opts.instance.session === session)`: at `p0` no session object exists at all,
+and at `p1` the assignment `opts.instance.session = session` has not run yet, so
+the identity guard is false.
+
+How the injection is wired: each cleanup step is preceded by an awaited gate
+(`await __fxHarnessCleanupGate(id, message, site)`) INSIDE the same `try` block
+as the step it replaces, so the throw lands in exactly the `catch` that the
+production code has for that step. The gate reads the run-bound control straight
+out of storage on every call and returns unless both the run id and the step id
+match, so an unarmed run - and the OTHER step of an armed one - executes the
+production call unchanged. The gate's placement is deliberate: a gate injected
+before a synchronous call is equivalent to the call itself throwing, which is why
+no `storage.onChanged` cache is involved (an earlier version cached the control
+in the background global and deadlocked, because the cached event never arrived).
+
+Two consequences are asserted rather than assumed: the armed step's entry marker
+is written (and awaited) BEFORE the gate throws - so "the step was reached" is
+positive evidence, not something inferred from a missing fault marker - and the
+step that was NOT armed still ran to its own entry marker in the same run, which
+is what proves the run did not simply fail earlier.
+
+A non-cleanup `--create-failure-*` run carries the same route assertions (two
+checks: the labelled caller's handler received the injected failure, the other
+route's handler did not), which is what makes the settlement numbers quoted per
+`--request-source` trustworthy.
+
+Measured, both faults and both callers (each cleanup run is the p2 matrix plus
+seven checks): the injected error was raised at its site and caught by that step's
+own handler, the other cleanup step was still reached, the half-created port
+existed and left no idle native host behind, the next cast built its own session
+host, the load generation stayed monotonic, the pending gate was still released,
+and the labelled caller - and only it - received the ORIGINAL failure. The two
+callers differ exactly where they should: the queued route fills
+`caught: ["loadSender", "triggerCast"]` with `requestSessionHandler` empty, the
+selector route fills `caught: ["requestSessionHandler"]` with `triggerCast` empty.
+
+Two layers of evidence are kept apart on purpose, because they prove different
+things:
+
+- "the other cleanup step was still reached" proves the identity-guarded cleanup
+  sequence continued past the fault that the step's own production `catch`
+  absorbed. It says nothing about the `finally`;
+- "the half-created port existed and its idle host exited" proves the `finally`
+  really closed the port, and that the port-closing steps did not run earlier by
+  accident.
+
+Which caller ran is likewise asserted in two strengths. The Roku-branch marker of
+`main:requestSession` is supporting evidence (its presence is positive proof of
+the selector route; its absence is a bounded "not seen" observation). The
+authoritative evidence is the outer `catch` markers: the labelled caller's handler
+must hold the ORIGINAL error, and the other route's handler must not hold it. The
+queued route legitimately fills BOTH `loadSender` and `triggerCast` (the former
+rethrows into the latter), so `loadSender` is deliberately unconstrained.
 
 ### Page settlement: who settled the page, and how often
 
 `--request-source selector|queued` chooses which caller drives the session start.
-`queued` keeps the auto-cast provocation (a replacement selector owns the session,
-so `loadSender` does); `selector` keeps the popup mounting early so the click
-resolves the requestSession selector and the main handler owns it. Combined with
+`queued` keeps the auto-cast provocation - the popup mounts late AND its first
+`popup:init` is suppressed, so a replacement selector owns the session and
+`loadSender` does; `selector` mounts the popup equally late but suppresses nothing,
+so the popup binds to the selector `requestSession` already opened and the main
+handler owns the session. Combined with
 `--fail-stage`, each caller can be asked at each checkpoint what the PAGE saw:
 
 - the SDK callback timeline (`sessionCallbacks`, with each callback's type and error
@@ -333,8 +484,7 @@ Validated end to end (real processes, real sockets):
 
 Not yet implemented: **the session half**. The red/green test the harness is for
 (session media crossing session host → extension → discovery host) needs a
-session to exist, which in production is created by a page-driven cast
-(`chrome.cast.requestSession` → receiver selector → `castManager.startSession`).
+session to exist, which in production is created by a page-driven cast (`chrome.cast.requestSession` → receiver selector → `castManager.startSession`).
 That requires page automation (Selenium; `selenium-webdriver` is installed,
 geckodriver is not but Selenium Manager can fetch it, and network is available).
 Two candidate drivers, to be chosen deliberately:
