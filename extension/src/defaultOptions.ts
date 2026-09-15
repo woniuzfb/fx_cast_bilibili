@@ -82,6 +82,24 @@ export interface Options {
     bilibiliDefaultsVersion: number;
     /** Show Bilibili debug overlay and verbose traces. */
     bilibiliDebugEnabled: boolean;
+    /**
+     * Chromecast DASH startup compatibility: pad a Bilibili DASH remux playlist
+     * in front of the real segments (a 32s pad runway) and start the receiver on
+     * that padded timeline.
+     *
+     * This is a workaround for receiver behaviour, not a protocol requirement,
+     * and it is not a proven requirement of any firmware: padded starts have been
+     * observed to work where unpadded ones did not, and failures still occur with
+     * it on. ON, the bridge emits the runway and reports a presentation start, and
+     * the sender shifts LOAD onto it and maps receiver positions back to page
+     * time. OFF, the pre-compatibility timeline returns exactly: no pads, LOAD at
+     * the seek target, offset 0.
+     *
+     * Turn it off to compare behaviour, or as the first thing to try when
+     * diagnosing a playback or seeking problem. Roku and CCTV never take this
+     * path either way.
+     */
+    chromecastDashStartupPadding: boolean;
     /** Show verbose CCTV relay diagnostics. */
     cctvDebugEnabled: boolean;
     /** Enable Voice Edge BLE remote event consumption. */
@@ -153,6 +171,7 @@ export default {
 
     bilibiliDefaultsVersion: 1,
     bilibiliDebugEnabled: false,
+    chromecastDashStartupPadding: true,
     cctvDebugEnabled: false,
     bleRemoteEnabled: true,
     bleRemoteUrl: "http://127.0.0.1:5002/ble-remote/events",

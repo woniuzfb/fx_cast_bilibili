@@ -536,6 +536,65 @@ async function seekAndPrime(MediaSender, target = 50) {
     return { h, requestId: started.requestId, target };
 }
 
+/**
+ * H: the seek transaction must END when the receiver's new session declares the
+ * media dead.
+ *
+ * From a real run: the reload created a new media session, it went BUFFERING and
+ * then IDLE/ERROR about a second later, and the sender kept the page held for
+ * the whole 120s deadline afterwards — the page stayed paused, every control was
+ * held, and the log repeated once per second until the user gave up. A
+ * transaction that cannot succeed has to be abandoned immediately.
+ */
+async function runDeadSessionFailsFast(MediaSender) {
+    const { h, requestId, target } = await seekAndPrime(MediaSender);
+    if (!requestId) {
+        skip(
+            "H: a new session reporting IDLE/ERROR ends the seek transaction",
+            "the harness could not start a seek reload"
+        );
+        return;
+    }
+    const priming = h.sender.dashSeekSourcePriming;
+    check(
+        "H: the seek transaction is open right after priming (the state this case starts from)",
+        Boolean(priming) && priming.requestId === requestId,
+        JSON.stringify({ priming })
+    );
+
+    // The receiver's NEW session reports the media error only it can report.
+    const previousMediaSessionId = priming?.previousMediaSessionId;
+    const erroredMediaSessionId =
+        previousMediaSessionId === undefined ? 2 : previousMediaSessionId + 1;
+    const errorMedia = h.setReceiverState(
+        PlayerState.IDLE,
+        0,
+        erroredMediaSessionId
+    );
+    errorMedia.idleReason = "ERROR";
+    h.tick();
+
+    check(
+        "H: a new session reporting IDLE/ERROR ends the seek transaction at once",
+        h.sender.dashSeekSourcePriming === undefined,
+        JSON.stringify({ priming: h.sender.dashSeekSourcePriming })
+    );
+    check(
+        "H: the page is released from the hold instead of waiting out the 120s deadline",
+        h.sender.describePageHold().holding === false,
+        JSON.stringify({ hold: h.sender.describePageHold() })
+    );
+
+    // The transaction is gone, so ordinary reconciliation applies to what follows.
+    h.setReceiverState(PlayerState.BUFFERING, target, erroredMediaSessionId);
+    h.tick();
+    check(
+        "H: the sender keeps reconciling after the failure (no stuck transaction)",
+        h.sender.dashSeekSourcePriming === undefined,
+        JSON.stringify({ priming: h.sender.dashSeekSourcePriming })
+    );
+}
+
 /** B: the core gap - the old receiver's PAUSED must not stall the primed page. */
 async function runPrimedPausedGap(MediaSender) {
     const { h, requestId, target } = await seekAndPrime(MediaSender);
@@ -899,6 +958,7 @@ async function main() {
     await runNewMediaReleases(MediaSender);
     await runDeadline(MediaSender);
     await runInitialCastNoPrime(MediaSender);
+    await runDeadSessionFailsFast(MediaSender);
     await runSupersededSeekOwnership(MediaSender);
 
     console.info("");

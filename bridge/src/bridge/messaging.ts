@@ -374,6 +374,16 @@ type MessageDefinitions = {
         /** Seek remux restart: drop mid-file captured fragments so ffmpeg
          *  cannot start at the previous page position. */
         resetCaptureWindow?: boolean;
+        /** Presentation offset of the remux this request replaces. Diagnostic
+         *  only for the bridge: the pipeline replaces it with the new offset in
+         *  the ready message. */
+        presentationOffsetSeconds?: number;
+        /** Chromecast DASH startup compatibility (options page, default on):
+         *  pad the playlist with a startup runway and start the receiver on that
+         *  padded timeline. false restores the pre-compatibility timeline (no
+         *  pads, LOAD at the seek target). Absent means ON. Never applies to the
+         *  Roku path. */
+        chromecastDashStartupPadding?: boolean;
         cctvDebugEnabled?: boolean;
         userAgent?: string;
     };
@@ -398,6 +408,13 @@ type MessageDefinitions = {
          *  playlist is actually padded to (diagnostics). */
         startTime?: number;
         padBaseSeconds?: number;
+        probedKeyframeSeconds?: number;
+        /** DASH remux: where the receiver must start inside the generated
+         *  playlist, i.e. startTime expressed on the padded presentation
+         *  timeline (startTime unless a pad runway was inserted in front of the
+         *  real segments). The page keeps playing on its own clock: the shift
+         *  between the two is padBaseSeconds - probedKeyframeSeconds. */
+        presentationStartTime?: number;
         /** Full source duration reported by ffprobe when available. */
         pageDuration?: number;
         /** Synthetic DVR (CCTV live): offset of the live edge in the VOD

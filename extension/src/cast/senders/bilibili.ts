@@ -366,10 +366,31 @@ function initBilibiliSender() {
         if (!isInitial) sender?.suspendMediaElementSync();
         let mediaElement =
             document.querySelector<HTMLVideoElement>("video") ?? undefined;
-        if (mediaElement instanceof HTMLVideoElement) {
+        // Why the page is paused here, and why ONLY on the initial cast:
+        //
+        //  - Initial cast: the receiver is about to take over playback, and
+        //    pausing first is what stops the tab from playing its own audio
+        //    while the receiver selection dialog is open.
+        //  - Item/quality change (isInitial === false): the page keeps PLAYING.
+        //    It is the state source, the progress/control source, and on a Roku
+        //    cast the CAPTURE SOURCE — pausing it stalls the very relay being
+        //    rebuilt, and on a Chromecast it leaves the tab frozen while the
+        //    receiver plays on. Audio is taken instead of playback (the updated
+        //    element is muted), which is all the pause was ever needed for.
+        //
+        // The receiver side of the same boundary is the item-transition window:
+        // the OLD session keeps reporting PAUSED/IDLE while the new one loads,
+        // and that staleness must not reach the page (see
+        // MediaSender#beginDashItemTransition).
+        if (mediaElement instanceof HTMLVideoElement && isInitial) {
             mediaElement.pause();
             debug("source paused while receiver selection is pending", {
                 currentTime: mediaElement.currentTime
+            });
+        } else if (mediaElement instanceof HTMLVideoElement) {
+            debug("page playback left alone across the item change", {
+                currentTime: mediaElement.currentTime,
+                paused: mediaElement.paused
             });
         } else {
             mediaElement = undefined;
@@ -388,6 +409,10 @@ function initBilibiliSender() {
         const opts: MediaSenderOpts = {
             mediaUrl: media.mediaUrl,
             mediaTitle: media.title,
+            // The page's own key for this video. It is what lets a seek made
+            // while this item loads be told apart from a seek left over from the
+            // previous video (see MediaSender#adoptMediaIdentity).
+            mediaIdentity: media.key,
             mediaContentType: media.contentType,
             mediaElement,
             isVideo: true,
@@ -525,6 +550,19 @@ function initBilibiliSender() {
             // identity is unchanged, and updateMedia's transactional callback
             // swap keeps the installed stop handler matching.
             thisSender = sender;
+            // The item changed under a live session: open the transition window
+            // BEFORE the reload, so the OLD media session's stale PAUSED/IDLE or
+            // previous-item position cannot reach the page while the new stream
+            // is prepared, and take audio ownership of the NEW element — the page
+            // keeps playing, so an unmuted tab would play over the receiver (on
+            // Roku the receiving device is fed by this very page, on Chromecast
+            // the same media plays on both).
+            //
+            // Both calls are no-ops where they do not apply (the transition
+            // window is Chromecast-DASH only; the mute is idempotent), and the
+            // sender restores the element's own muted state on stop.
+            sender.beginDashItemTransition();
+            sender.prepareUpdatedMediaElement(mediaElement);
             await sender.updateMedia(opts);
         }
         return true;

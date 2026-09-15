@@ -717,5 +717,12 @@
     },
     "errorBridgeLiveHlsUnsupported": {
         "message": "已安裝的本機橋接程式不支援直播 HLS 中繼。請重新建置並安裝 fx_cast_bilibili 本機橋接程式，然後重新啟動。"
+    },
+    "optionsChromecastDashStartupPadding": {
+        "message": "Chromecast DASH 啟動相容模式",
+        "description": "為 Bilibili DASH 投放於真實媒體前插入啟動緩衝（pad）時間軸。"
+    },
+    "optionsChromecastDashStartupPaddingDescription": {
+        "message": "改善部分 Chromecast 接收端的 DASH 起播相容性。排查播放或跳轉問題時可關閉。"
     }
 }

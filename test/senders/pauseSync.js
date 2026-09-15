@@ -307,6 +307,17 @@ function runPositionAuthority(MediaSender) {
         );
     }
     {
+        // Bilibili DASH remux on a Chromecast: the page owns POSITION here too.
+        //
+        // The receiver plays the same content through the bridge's remux, so the
+        // two clocks diverge by however much the relay lags. Writing the
+        // receiver's position onto the page used to move the element out from
+        // under the user's own progress bar, and — because that write fires a
+        // `seeked` event indistinguishable from the user dragging the bar — it
+        // became another remux restart, which produced a fresh receiver position,
+        // which wrote again. The correction is now an OBSERVATION that never
+        // reaches the page. (Ordinary, single-clock media still mirrors; that is
+        // asserted where it is reachable, in the non-remux cases of this file.)
         const sender = makeSender(MediaSender, KIND.BILIBILI_CHROMECAST, {
             pageTime: 100,
             pagePaused: false
@@ -314,8 +325,8 @@ function runPositionAuthority(MediaSender) {
         sender.setReceiverState(PlayerState.PLAYING, 130);
         sender.tick();
         check(
-            "Bilibili on Chromecast: the same drift IS corrected (position sync still active there)",
-            sender.element.currentTime === 130,
+            "Bilibili on Chromecast: the receiver's drift does NOT move the page position (it is observed, not written)",
+            sender.element.currentTime === 100,
             JSON.stringify({ pageTime: sender.element.currentTime, receiverTime: 130 })
         );
     }
@@ -342,11 +353,11 @@ function runSupplyContinuity(MediaSender) {
         for (let i = 0; i < 200; i++) sender.tick();
         check(
             "long pause: nothing is armed that a resume would need, and no polling starts",
-            sender.sender.dashSyncHold === false &&
+            sender.sender.describePageHold().holding === false &&
                 sender.sender.dashTightenSync === false &&
                 sender.sent.length === 0,
             JSON.stringify({
-                dashSyncHold: sender.sender.dashSyncHold,
+                pageHold: sender.sender.describePageHold(),
                 dashTightenSync: sender.sender.dashTightenSync,
                 getStatusMessages: sender.sent.length
             })

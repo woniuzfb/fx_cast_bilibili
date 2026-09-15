@@ -58,7 +58,14 @@ import {
     endBilibiliPageCapture
 } from "./bilibiliPageCapture";
 
-async function logRokuDebug(message: string, data: unknown) {
+/**
+ * Diagnostic logging for media-session traffic, gated on the debug options.
+ *
+ * Named after what it logs, not after a device: the DASH remux traces below are
+ * Chromecast-path (the Roku remux reports its own timeline), so a "Roku" prefix
+ * only ever misled. Anything device-specific labels the device explicitly.
+ */
+async function logMediaDebug(message: string, data: unknown) {
     try {
         const opts = await options.getAll();
         if (!opts.cctvDebugEnabled && !opts.bilibiliDebugEnabled) return;
@@ -914,6 +921,26 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             ) {
                 armCctvPageCaptureIngest(tabId, message.data.requestId);
             }
+            // The remux this request produced states its own timeline now: from
+            // here the receiver reports positions in the NEW presentation. The
+            // shift is recorded against the media it belongs to (the media's own
+            // customData states it too, and remains the source of truth) so a
+            // later status that drops customData is still converted correctly —
+            // and so a generation the receiver no longer reports on can never
+            // donate its runway to the next one.
+            if (
+                message.data.mode === "dash-remux" &&
+                typeof message.data.presentationStartTime === "number" &&
+                instance.session
+            ) {
+                const offset =
+                    Number(message.data.presentationStartTime) -
+                    Number(message.data.startTime);
+                deviceManager.setDashPresentationOffset(
+                    instance.session.deviceId,
+                    Number.isFinite(offset) && offset > 0 ? offset : 0
+                );
+            }
             break;
         }
 
@@ -1056,13 +1083,16 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             break;
 
         case "main:dashRemuxDebug": {
-            // GATED like every other Roku debug relay in this file: the bridge
-            // emits one of these per remuxed segment (and per response), so an
-            // ungated `logger.info` fills the background console during ordinary
-            // playback even with both debug options off. `cctvDebugEnabled`
-            // covers the live-relay path and `bilibiliDebugEnabled` the DASH
-            // remux path.
-            void logRokuDebug(`DASH remux ${message.data.event}`, {
+            // GATED like every other debug relay in this file: the bridge emits
+            // one of these per remuxed segment (and per response), so an ungated
+            // `logger.info` fills the background console during ordinary playback
+            // even with both debug options off. `cctvDebugEnabled` covers the
+            // live-relay path and `bilibiliDebugEnabled` the DASH remux path.
+            //
+            // No device prefix: this event is the DASH remux the extension sends
+            // to a Chromecast (the Roku remux reports its own timeline through
+            // the session), so naming a device here would only mislead.
+            void logMediaDebug(`DASH remux ${message.data.event}`, {
                 requestId: message.data.requestId,
                 details: message.data.details
             });
@@ -1088,7 +1118,7 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
             // and never reached the background console, making the Roku
             // consume/register flow invisible.
             const { deviceId, event, ...rest } = message.data;
-            void logRokuDebug(
+            void logMediaDebug(
                 `Roku session media [${deviceId}] ${event}`,
                 rest
             );
@@ -1192,6 +1222,12 @@ async function handleContentMessage(instance: CastInstance, message: Message) {
                     instance.session.deviceId
                 );
             }
+            // No transitional offset to carry over from the request: a media
+            // generation states its own shift when its bridge reports ready, and
+            // the shift is remembered against THAT media (see
+            // setDashPresentationOffset). Carrying the previous remux's value
+            // across the rebuild is exactly how a stale runway reached a report it
+            // did not describe.
 
             // CCTV live relay (initial cast AND every recovery rebuild): start the
             // page TS capture session for this tab. The endpoint is armed only when

@@ -853,5 +853,12 @@
     },
     "errorBridgeLiveHlsUnsupported": {
         "message": "Установленный нативный мост не поддерживает реле прямого HLS-эфира. Пересоберите, переустановите и перезапустите нативный мост fx_cast_bilibili."
+    },
+    "optionsChromecastDashStartupPadding": {
+        "message": "Chromecast DASH startup compatibility",
+        "description": "Adds a startup pad runway in front of the Bilibili DASH remux for Chromecast."
+    },
+    "optionsChromecastDashStartupPaddingDescription": {
+        "message": "Improves DASH startup compatibility on some Chromecast receivers. Disable it when diagnosing playback or seeking problems."
     }
 }

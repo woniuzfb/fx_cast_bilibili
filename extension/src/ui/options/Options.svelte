@@ -448,6 +448,16 @@
 
         <div class="form__footer">
             <Option
+                id="chromecastDashStartupPadding"
+                label={_("optionsChromecastDashStartupPadding")}
+                description={_(
+                    "optionsChromecastDashStartupPaddingDescription"
+                )}
+                type="checkbox"
+                bind:checked={opts.chromecastDashStartupPadding}
+                inline
+            />
+            <Option
                 id="bilibiliDebugEnabled"
                 label={_("optionsBilibiliDebugEnabled")}
                 description={_("optionsBilibiliDebugEnabledDescription")}

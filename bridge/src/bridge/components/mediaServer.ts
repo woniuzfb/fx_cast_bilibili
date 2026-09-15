@@ -324,6 +324,23 @@ export async function startMediaServer(
     });
 }
 
+/**
+ * Additional DASH hosts accepted for this process, from
+ * `FX_CAST_BILIBILI_ALLOWED_HOSTS` (comma-separated hostnames). Unset in every
+ * normal run, so the static suffix list below is the whole policy; the
+ * bridge-remux harness sets it so a fixture URL can drive the real server
+ * without a CDN. Same shape as the FX_CAST_BILIBILI_FFMPEG override: an
+ * explicit, per-process escape hatch, never user data.
+ */
+function extraAllowedHosts(): string[] {
+    const raw = process.env.FX_CAST_BILIBILI_ALLOWED_HOSTS;
+    if (!raw) return [];
+    return raw
+        .split(",")
+        .map(host => host.trim().toLowerCase())
+        .filter(Boolean);
+}
+
 function remoteHostAllowed(value: string): boolean {
     try {
         const { protocol, hostname } = new URL(value);
@@ -338,11 +355,13 @@ function remoteHostAllowed(value: string): boolean {
             // myqcloud / …) that a static suffix list can never fully cover. The
             // live relay validates those per-session via LiveRelayTrust instead.
         ];
+        const host = hostname.toLowerCase();
         return (
             protocol === "https:" &&
-            suffixes.some(
-                suffix => hostname === suffix || hostname.endsWith(`.${suffix}`)
-            )
+            (suffixes.some(
+                suffix => host === suffix || host.endsWith(`.${suffix}`)
+            ) ||
+                extraAllowedHosts().includes(host))
         );
     } catch {
         return false;
@@ -392,7 +411,8 @@ async function startDashRemuxServer(
     port: number,
     startTime = 0,
     rokuDashPrebuffer = false,
-    rokuTranscodePreset?: string
+    rokuTranscodePreset?: string,
+    chromecastDashStartupPadding?: boolean
 ) {
     if (!remoteHostAllowed(videoUrl) || !remoteHostAllowed(audioUrl)) {
         messaging.sendMessage({
@@ -1564,25 +1584,75 @@ async function startDashRemuxServer(
         .slice(2, 8)}`;
     const publicMediaPath = `s/${generation}/index.m3u8`;
     // Pad entries cover [0, padBaseSeconds) so the receiver's playlist-derived
-    // timeline matches the real video timeline: currentTime/duration displays
-    // and seek math stay in absolute video time even though ffmpeg only
-    // produces segments from startTime onward. Pads are never requested in
-    // practice (playback always starts at startTime and every seek restarts
-    // the remux), but a valid file must exist in case one is fetched.
+    // presentation timeline lines up with the real video: the pads stand in for
+    // the media that precedes the remux's first segment (ffmpeg's input seek
+    // starts AT the keyframe, so the segment timeline starts there, not at 0).
+    // Pads are never requested once playback has started (playback begins at
+    // presentationStartTime and every seek restarts the remux), but a valid file
+    // must exist because a receiver's reader/scheduler may probe entries around
+    // the current position.
     //
     // ffmpeg's input seek lands on the keyframe at/before startTime, so the
-    // first real segment actually starts at that keyframe. Padding to the
-    // keyframe (instead of startTime) lets the receiver seek INTO the first
-    // segment and begin at exactly startTime, instead of replaying the
-    // keyframe..startTime range with the clock already at startTime. The exact
-    // keyframe position is probed with ffprobe below (padBaseSeconds falls
-    // back to startTime when the probe fails).
+    // first real segment starts at that keyframe. Padding to the keyframe (not
+    // to startTime) lets the receiver seek INTO the first segment and begin at
+    // exactly startTime, instead of replaying the keyframe..startTime range with
+    // the clock already at startTime. The keyframe position is probed with
+    // ffprobe below. When the probe fails, padBaseSeconds and contentBaseSeconds
+    // both stay at startTime, which (with the minimum below) still yields a
+    // padded presentation on the Chromecast path.
+    //
+    // The pad base is max(keyframe, CHROMECAST_MIN_PAD_SECONDS) on the Chromecast
+    // path and the keyframe on the Roku path, and only the resulting shift of
+    // (padBaseSeconds - contentBaseSeconds) is handed to the receiver, as
+    // presentationStartTime.
     const padSegmentSeconds = 4;
+    // Minimum pad runway for a non-Roku (Chromecast) remux: 8 x 4s = 32s.
+    //
+    // A Chromecast has been OBSERVED to fail a start whose playlist opens
+    // directly on the real media (an opening cast padded to a keyframe of 0, i.e.
+    // to no pads at all), while a mid-video cast padded to its keyframe (~1431s
+    // of pads) played. The minimum gives the opening cast the same timeline
+    // SHAPE — pad entries in front of the real segments. It is a compatibility
+    // improvement, not a proven firmware requirement: starts still fail with it
+    // on, so treat it as one factor rather than the cause.
+    //
+    // EVERY cast gets it, a start of exactly 0 included: whether the page
+    // reports 0 or 0.2s must not decide between two different playlist shapes.
+    //
+    // The minimum only ever raises the pad base, never lowers it
+    // (padBaseSeconds = max(keyframe, 32s)), so every cast whose probed keyframe
+    // is already past 32s — the working mid-video case — keeps exactly the
+    // playlist and LOAD position it has today.
+    //
+    // This is a WORKAROUND for receiver behaviour, not a protocol requirement, so
+    // the extension's options page can turn it off
+    // (chromecastDashStartupPadding). Off means the pre-compatibility timeline
+    // exactly: pad to the keyframe, LOAD at startTime, offset 0, and no pad
+    // segment generated up front. The Roku path has never used the minimum.
+    const useStartupPadding =
+        !rokuDashPrebuffer && chromecastDashStartupPadding !== false;
+    const CHROMECAST_MIN_PAD_SECONDS = 32;
     let padBaseSeconds = normalizedStartTime;
+    // Real content starts at the probed keyframe. padBaseSeconds is how far the
+    // playlist's pad runway extends, and the two differ only in the opening
+    // window described above. Their difference is the offset between the
+    // receiver's presentation clock and the page's video time:
+    //   presentationTime = pageTime + (padBaseSeconds - contentBaseSeconds)
+    // It is 0 for Roku and for every cast whose keyframe is past the minimum, so
+    // the existing no-offset mapping is preserved wherever it works today.
+    let contentBaseSeconds = normalizedStartTime;
+    // The keyframe the probe actually reported, when it reported one: undefined
+    // means contentBaseSeconds is the startTime fallback rather than a probe
+    // result. Published separately so the two can be told apart in a log.
+    let probedKeyframeSeconds: number | undefined;
     // Always run the probe, even from time zero: it also supplies the optional
     // full source duration used when the page media element has no duration yet.
     let keyframeResolved = false;
     let probedDuration: number | undefined;
+    // Starts the pad generator, which is assigned further below (it needs
+    // ffmpegPath, which is resolved after the probe arguments are built).
+    let requestPadSegment: ((baseSeconds: number) => void) | undefined =
+        undefined;
 
     // Roku-only DASH presentation. Chromecast never sets rokuDashPrebuffer, so
     // its EVENT playlist and streaming-file serving stay unchanged.
@@ -1834,6 +1904,10 @@ async function startDashRemuxServer(
     // read a packet window around startTime and take the last keyframe at or
     // before it. Runs in parallel with the remux; falls back to startTime on
     // any failure.
+    //
+    // The Roku path never probes: its pad base is the start of the captured
+    // segment the page's own player is on, and the capture request handler sets
+    // keyframeResolved (with padBaseSeconds) when it serves that segment.
     if (!keyframeResolved && !rokuDashPrebuffer) {
         const ffprobePath = ffmpegPath.replace(/ffmpeg$/, "ffprobe");
         let probeStdout = "";
@@ -1867,9 +1941,28 @@ async function startDashRemuxServer(
                 keyframe >= 0 &&
                 keyframe <= normalizedStartTime
             ) {
-                padBaseSeconds = keyframe;
+                // ffmpeg's input seek lands on this keyframe, so this is where
+                // the real segments start: the content base of the timeline.
+                // Only a real probe result is published as such (see
+                // probedKeyframeSeconds below).
+                probedKeyframeSeconds = keyframe;
+                contentBaseSeconds = keyframe;
+                // With startup padding, every Chromecast cast is padded to at
+                // least the minimum runway, a start at exactly 0 included:
+                // whether the page reports 0 or 0.2s must not decide between two
+                // different playlist shapes. Without it (option off, or Roku's
+                // independent prebuffer path) the base is the keyframe — the
+                // pre-compatibility timeline.
+                padBaseSeconds = useStartupPadding
+                    ? Math.max(keyframe, CHROMECAST_MIN_PAD_SECONDS)
+                    : keyframe;
             }
             keyframeResolved = true;
+            // The probe's own pad request: on the Roku path this is the only one
+            // (its pad base is the probed keyframe), and on the Chromecast path
+            // the generator has already been started in parallel and this is a
+            // no-op. A zero base emits no pad entries and needs no segment.
+            requestPadSegment?.(padBaseSeconds);
         };
         const probeTimeout = setTimeout(() => {
             probeProcess.kill("SIGKILL");
@@ -1916,13 +2009,34 @@ async function startDashRemuxServer(
             finishProbe();
         });
     }
-    // Generate the 4s black/silent pad segment in parallel. It backs the pad
-    // playlist entries that cover [0, startTime) and is essentially never
-    // fetched, so a tiny resolution keeps this cheap.
+    // Generate the 4s black/silent pad segment. It backs every pad playlist
+    // entry (they all reuse this one file, whatever the pad base is), so a tiny
+    // resolution keeps this cheap.
+    //
+    // Started IMMEDIATELY on the Chromecast path, in parallel with the keyframe
+    // probe and the remux, because a non-Roku presentation is always padded to
+    // at least CHROMECAST_MIN_PAD_SECONDS and the file's content does not depend
+    // on the resolved base. Waiting for the probe first would put pad generation
+    // on the critical path between ffprobe and readiness for no benefit.
+    //
+    // The Roku path has no minimum: there the pad base is the probed keyframe,
+    // and the probe's own request starts the generator (the first request wins,
+    // so the order between the two never matters). A request whose base is zero
+    // needs no segment at all: no pad entries are emitted, which also satisfies
+    // the readiness gate immediately.
     let padReady: Promise<boolean> | undefined;
-    let padReadyResult = normalizedStartTime <= 0.05;
+    let padReadyResult = false;
     let padFailed = false;
-    if (normalizedStartTime > 0.05) {
+    let padRequested = false;
+    requestPadSegment = (baseSeconds: number) => {
+        if (padRequested) return;
+        padRequested = true;
+        // A base of zero emits no pad entries, so there is no segment to build
+        // and the starter's readiness gate is already satisfied above it.
+        if (!(baseSeconds > 0.05)) {
+            padReadyResult = true;
+            return;
+        }
         padReady = new Promise<boolean>(resolve => {
             const padProcess = spawn(
                 ffmpegPath,
@@ -1973,6 +2087,14 @@ async function startDashRemuxServer(
             );
             padProcess.on("error", () => finishPad(false));
         });
+    };
+    // With startup padding, the pad segment is started NOW, alongside the probe
+    // and the remux, rather than after the probe — the file's content does not
+    // depend on the resolved base, so waiting would only add latency. Off, the
+    // probe's own request (below) still starts it when the resolved base needs
+    // one, exactly as before.
+    if (useStartupPadding) {
+        requestPadSegment(CHROMECAST_MIN_PAD_SECONDS);
     }
     const remuxProcess = spawn(ffmpegPath, args, {
         stdio: ["ignore", "ignore", "pipe"]
@@ -2137,9 +2259,11 @@ async function startDashRemuxServer(
         const rokuDashSegmentMatch = /^segment-(\d+)\.ts$/.exec(filename);
         const filePath = path.join(tempDir, filename);
         try {
-            if (filename === "pad.ts" && padReady) {
-                // Pad generation runs in parallel with the remux; wait briefly if
-                // the receiver somehow requests a pad before it is ready.
+            if (filename === "pad.ts" && padReady && !padReadyResult) {
+                // Pad generation runs alongside the keyframe probe and the remux;
+                // wait briefly if the receiver requests a pad before it exists.
+                // (A presentation with no pad entries never creates the promise,
+                // and then there is nothing to wait for.)
                 const ready = await Promise.race([
                     padReady,
                     new Promise<boolean>(resolve =>
@@ -2340,7 +2464,30 @@ async function startDashRemuxServer(
                             localAddress: address,
                             mode: "dash-remux",
                             startTime: normalizedStartTime,
+                            // The position the receiver must start at, in the
+                            // PLAYLIST's presentation timeline. The playlist pads
+                            // [0, padBaseSeconds) and the real segments begin at
+                            // contentBaseSeconds, so everything after the pads is
+                            // shifted by their difference:
+                            //   presentation = padBase + (page - contentBase)
+                            // A zero shift (Roku, startup padding off, and every
+                            // cast whose probed keyframe is past the minimum pad)
+                            // keeps the value equal to startTime: the mapping the
+                            // pre-compatibility behaviour already used.
+                            presentationStartTime:
+                                padBaseSeconds +
+                                Math.max(
+                                    0,
+                                    normalizedStartTime - contentBaseSeconds
+                                ),
                             padBaseSeconds,
+                            // Only a real probe result is reported: when the
+                            // probe fails, contentBaseSeconds stays at startTime
+                            // and publishing that as a probed keyframe would hide
+                            // the fallback from the logs.
+                            ...(probedKeyframeSeconds !== undefined
+                                ? { probedKeyframeSeconds }
+                                : {}),
                             ...(probedDuration !== undefined
                                 ? { pageDuration: probedDuration }
                                 : {})
@@ -5363,7 +5510,11 @@ export async function startRemoteMediaServer(
     userAgent?: string,
     cctvDebugEnabled = false,
     rokuDashPrebuffer = false,
-    rokuTranscodePreset?: string
+    rokuTranscodePreset?: string,
+    /** Options page: false restores the pre-compatibility timeline (no startup
+     *  pad runway, LOAD at the seek target). Undefined means ON. Only consulted
+     *  on the non-Roku DASH remux path. */
+    chromecastDashStartupPadding?: boolean
 ) {
     if (hlsLive) {
         await startLiveHlsRelayServer(
@@ -5387,7 +5538,8 @@ export async function startRemoteMediaServer(
             port,
             startTime,
             rokuDashPrebuffer,
-            rokuTranscodePreset
+            rokuTranscodePreset,
+            chromecastDashStartupPadding
         );
         return;
     }

@@ -35,35 +35,58 @@ export function intentForPlaybackState(
 }
 
 /**
- * The action the play/pause affordance should offer right now: the opposite of
- * an outstanding command's intent (the user asked for that state, so the next
- * click undoes it), otherwise whatever the observed state implies.
+ * The action the play/pause affordance should offer right now.
  *
- * `undefined` means "no meaningful play/pause action" (IDLE with no command),
- * which disables the affordance.
+ * ## The owner of this answer
+ *
+ * The OUTSTANDING INTENT owns what the button offers only while the receiver has
+ * not been seen to disagree. As soon as an observation contradicts the pending
+ * command, the OBSERVED state takes over — immediately, not when the receiver
+ * watchdog finally terminates the command.
+ *
+ * Measured on a real session: with a PAUSE still pending, a press of PLAY on the
+ * physical Roku remote left the popup offering PLAY for several seconds, because
+ * the pending intent kept owning the affordance while the device was already
+ * playing. The command legitimately stays active through that window (the
+ * coordinator only PUBLISHES an `opposite` sample so its own deadline can still
+ * conclude it), which is exactly why the affordance must not read the command
+ * lifecycle alone.
+ *
+ * The decision is taken from the CURRENT observed state rather than from the
+ * recorded `lastObservation` classification. The classification records the
+ * sample that was accepted when the contradiction was first noticed; `status` is
+ * the same object the timeline and the buffering shimmer read, so the button
+ * cannot disagree with what the popup is displaying. (In practice the window in
+ * which the two answers differ is short, because a sample that MATCHES the intent
+ * terminates the command. The point is that the affordance reads the OBSERVATION
+ * rather than a stored classification whose lifetime is a coordinator detail.)
+ *
+ * A pending receiver dispatch does NOT change this answer: `receiverPending` is
+ * published separately (see `isPlaybackReceiverPending`) and is what the pending
+ * indicator renders, so the button can show the truth while the spinner shows
+ * that work is still outstanding.
+ *
+ * `undefined` means "no meaningful play/pause action" (IDLE with no usable
+ * observation), which disables the affordance.
  */
 export function nextPlaybackIntentFor(
     device: ReceiverDevice,
     status?: MediaStatus
 ): PlaybackIntent | undefined {
     const view = device.playbackCommand;
-    if (view?.lifecycle === "active") {
-        /**
-         * A sample that CONTRADICTS the pending command means the receiver has
-         * already moved the other way (the physical remote, another sender):
-         * the affordance must follow what was OBSERVED. Offering the inverse of
-         * an outstanding request is only right while the receiver has not been
-         * seen to disagree - otherwise the popup kept showing PLAY while the
-         * device was playing, until the receiver watchdog terminated the command
-         * seconds later (measured: the coordinator stays active on `opposite`,
-         * and this derivation was the only reason the button lagged).
-         */
-        if (view.lastObservation === "opposite") {
-            return view.intent;
-        }
-        return view.intent === "PLAY" ? "PAUSE" : "PLAY";
+    const observed = intentForPlaybackState(status?.playerState);
+    if (view?.lifecycle !== "active") return observed;
+    if (view.lastObservation === "opposite") {
+        // The receiver contradicted the pending command: what it is doing now
+        // decides the affordance. The fallback only covers an observation that
+        // classified as opposite against a status whose player state offers no
+        // action at all (e.g. IDLE arrived in the same tick), where the user's
+        // outstanding request is still the better answer than nothing.
+        return observed ?? view.intent;
     }
-    return intentForPlaybackState(status?.playerState);
+    // No contradiction on record: the user's request is still the target, so the
+    // button offers the action that undoes it.
+    return view.intent === "PLAY" ? "PAUSE" : "PLAY";
 }
 
 /** The intent of the device's outstanding command, if any. */

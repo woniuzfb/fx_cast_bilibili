@@ -14,6 +14,16 @@ import type Session from "../sdk/Session";
 import type Media from "../sdk/media/Media";
 
 import cast, { ensureInit, type CastPort } from "../export";
+import {
+    bindPresentationMedia,
+    createDashPresentation,
+    identityPresentation,
+    normalizeContentId,
+    type DashPresentation
+} from "../dashPresentation";
+import PlaybackCoordinator, {
+    type PlaybackIntentOrigin
+} from "./playbackCoordinator";
 
 const logger = new Logger("fx_cast_bilibili [media sender]");
 
@@ -48,6 +58,15 @@ const BRIDGE_MEDIA_SERVER_READY_TIMEOUT_MS = 90_000;
  * so measurement can replace this reasoning.
  */
 const DASH_SEEK_PRIME_MAX_MS = BRIDGE_MEDIA_SERVER_READY_TIMEOUT_MS + 30_000;
+
+/**
+ * How long an item/quality transition may hold the receiver's authority off the
+ * page. Same budget as a seek's priming: it covers the bridge reconnect, the
+ * remux restart and the receiver's LOAD, and it is only the backstop — the
+ * window normally closes on the new session's first real position (or on a
+ * rejected load).
+ */
+const DASH_ITEM_TRANSITION_MAX_MS = DASH_SEEK_PRIME_MAX_MS;
 
 /**
  * Read options directly in an injected sender. The shared options singleton
@@ -86,6 +105,13 @@ export interface MediaSenderOpts {
     }>;
     mediaElement?: HTMLMediaElement;
     mediaTitle?: string;
+    /**
+     * The page's own key for the media (its BV/CID pair). Carried so an explicit
+     * seek can name the media it was asked for: a seek an item load coalesced is
+     * served when THAT item's media is live, and dropped if the page has already
+     * moved to a different video.
+     */
+    mediaIdentity?: string;
     mediaContentType?: string;
     isVideo?: boolean;
     /**
@@ -153,11 +179,7 @@ const PAGE_EVENT_WINDOW_MS = 2000;
  * valid boundary for attributing a `pause`/`play` event.
  */
 export type PlaybackDispatchResult = {
-    outcome:
-        | "no-media"
-        | "receiver-only"
-        | "transition"
-        | "page-sync-failed";
+    outcome: "no-media" | "receiver-only" | "transition" | "page-sync-failed";
     at: number;
     armedAt?: number;
 };
@@ -171,6 +193,8 @@ export default class MediaSender {
         userAgent?: string;
     }>;
     private mediaTitle?: string;
+    /** The page's key for the media being played, when the caller supplies one. */
+    private mediaIdentity?: string;
     private mediaContentType = "";
     private isVideo = false;
     private isLive = false;
@@ -182,6 +206,21 @@ export default class MediaSender {
     };
     private forwardPageControls = true;
     private syncMediaPosition = true;
+    /**
+     * The play/pause state the USER last asked for, so a reload cannot change it.
+     *
+     * `loadRequest.autoplay` used to be a hard `true`, so a seek while the popup
+     * was holding a pause started playback nobody asked for - the position
+     * transaction silently editing the playback intent, which is exactly the
+     * ownership split this refactor keeps apart. Written only where a user intent
+     * is known: a play/pause the extension dispatches to the receiver (the popup
+     * route and a BLE button both land in `dispatchToReceiver` or the
+     * already-at-target branch), and a gesture-gated page play/pause the user made
+     * in the site's own player. Deliberately NOT written by a receiver report (a
+     * LOAD's own autoplay is what makes it play) and NOT by the seek hold, which
+     * pauses the receiver because a rebuild is coming.
+     */
+    private desiredPlayback: "playing" | "paused" = "playing";
     private gestureGatedControls = false;
     private autoRecoverOnIdle = false;
     private preserveSourcePlayback = false;
@@ -250,18 +289,11 @@ export default class MediaSender {
      * receiver. The bridge pads the playlist up to the seek target, so the
      * receiver timeline stays in absolute video time (no offset mapping).
      */
-    /**
-     * While a DASH seek reload is in flight, the old media session reports
-     * stale positions/states. Hold receiver->page sync so the sync loop can't
-     * yank the page back (which would also queue bogus follow-up seeks).
-     */
-    private dashSyncHold = false;
-    private dashSeekTarget?: number;
     private dashSeekRunning = false;
     /**
-     * Incremented on every loadMedia call. A receiver load callback only
-     * releases dashSyncHold when it belongs to the latest load, so an older
-     * in-flight reload can't resume sync while a newer seek is still loading.
+     * Incremented on every loadMedia call. Used to drop a load callback that
+     * belongs to a superseded generation, so an older in-flight reload cannot
+     * resume sync while a newer seek is still loading.
      */
     private dashLoadId = 0;
     /**
@@ -324,6 +356,37 @@ export default class MediaSender {
         target: number;
         previousMediaSessionId?: number;
         /** The current-loadId LOAD callback resolved. */
+        loadResolved: boolean;
+        startedAt: number;
+        deadline: number;
+    };
+
+    /**
+     * Item-transition window: the page navigation (BV/p change, quality reload)
+     * replaced the media the receiver is playing, and the receiver's NEW media
+     * has not reported its position yet.
+     *
+     * While it is open the OLD media session's stale reports must not steer the
+     * page: its PAUSED would stop the very player that has to keep supplying the
+     * new item's state and controls, and its position would drag the page back
+     * into the previous video. Play/pause from the receiver is therefore ignored
+     * during the window (BUFFERING still self-heals, see reconcilePlaybackState)
+     * and position reconciliation is skipped until the new session's first real
+     * position arrives — which is also what closes the window.
+     *
+     * Unlike the seek-scoped priming this is not about a capture generation: the
+     * LOAD is issued with the page's current position as the start, so the page
+     * needs no correction when it lands.
+     */
+    private dashItemTransition?: {
+        loadId: number;
+        previousMediaSessionId?: number;
+        /**
+         * The current-loadId LOAD callback resolved. It is the identity evidence
+         * when there was no previous session to compare against: without it, any
+         * PLAYING report — including one from a session that predates this load —
+         * would count as "the new media took over" and close the window early.
+         */
         loadResolved: boolean;
         startedAt: number;
         deadline: number;
@@ -500,6 +563,7 @@ export default class MediaSender {
         this.mediaUrlResolver = opts.mediaUrlResolver;
         this.mediaElement = opts.mediaElement;
         this.mediaTitle = opts.mediaTitle;
+        this.adoptMediaIdentity(opts);
         this.mediaContentType = opts.mediaContentType ?? "";
         this.isVideo = opts.isVideo ?? false;
         this.isLive = opts.isLive ?? false;
@@ -519,17 +583,74 @@ export default class MediaSender {
         });
     }
 
+    /**
+     * The page element a previous item/quality change took audio ownership of,
+     * and its muted state before that. Tracked here (not by the page sender) so
+     * the restore on stop covers the CURRENT element: the site's player rebuilds
+     * its <video> on navigation, and restoring only the element captured at the
+     * original selection would leave the new one muted forever.
+     */
+    private ownedMediaElement?: HTMLMediaElement;
+    private ownedMediaElementMuted?: boolean;
+
+    /**
+     * Take audio ownership of a NEW page element after an item/quality change.
+     *
+     * This is the updateMedia counterpart of the initial selection's
+     * "pause + mute": the page must keep PLAYING (it is the state source, the
+     * control source and — on Roku — the capture source), so only the audio is
+     * taken, and idempotently. The previous element's muted state is restored
+     * first if the site replaced the element, and ownership moves to the new one
+     * so stop() restores the right element.
+     */
+    prepareUpdatedMediaElement(element?: HTMLMediaElement) {
+        if (!(element instanceof HTMLMediaElement)) return;
+        if (this.ownedMediaElement && this.ownedMediaElement !== element) {
+            if (
+                this.ownedMediaElementMuted !== undefined &&
+                this.ownedMediaElement.isConnected
+            ) {
+                this.ownedMediaElement.muted = this.ownedMediaElementMuted;
+            }
+            this.ownedMediaElement = undefined;
+            this.ownedMediaElementMuted = undefined;
+        }
+        if (!this.ownedMediaElement) {
+            this.ownedMediaElement = element;
+            this.ownedMediaElementMuted = element.muted;
+        }
+        element.muted = true;
+        this.debug?.("updated media element muted; page playback untouched", {
+            currentTime: element.currentTime,
+            paused: element.paused,
+            originalMuted: this.ownedMediaElementMuted
+        });
+    }
+
+    /** Give the page element's audio state back (stop). */
+    private restoreOwnedMediaElement() {
+        if (
+            this.ownedMediaElement &&
+            this.ownedMediaElementMuted !== undefined &&
+            this.ownedMediaElement.isConnected
+        ) {
+            this.ownedMediaElement.muted = this.ownedMediaElementMuted;
+        }
+        this.ownedMediaElement = undefined;
+        this.ownedMediaElementMuted = undefined;
+    }
+
     stop(stopReceiver = true) {
         if (this.stopped) return;
         this.stopped = true;
         this.dashLoadId++;
-        this.dashSeekTarget = undefined;
         this.capturePrimeTarget = undefined;
-        this.dashSyncHold = false;
-        this.dashTightenSync = false;
-        this.pendingDashSeekPrime = undefined;
         this.dashSeekLoadIdentity = undefined;
         this.clearDashSeekSourcePriming("stopped");
+        this.clearDashItemTransition();
+        // Every pending intent is void once the cast is gone: no transaction
+        // survives a stop, and no orphaned "seeking" phase can hold the page.
+        this.playbackCoordinator.reset("stopped");
         this.suspendMediaElementSync();
         this.clearRecoveryActivityWatchdog();
         this.clearRecoveryRetry();
@@ -557,6 +678,7 @@ export default class MediaSender {
         if (stopReceiver) this.session?.stop();
         this.session = undefined;
         this.media = undefined;
+        this.restoreOwnedMediaElement();
         this.mediaElement = undefined;
         this.syncElementEnabled = false;
         this.forwardPageControls = false;
@@ -572,37 +694,428 @@ export default class MediaSender {
         return this.activeMediaServerRequestId === requestId;
     }
 
+    /** Record the play/pause state the user asked for. */
+    private noteDesiredPlayback(action: "play" | "pause") {
+        this.desiredPlayback = action === "play" ? "playing" : "paused";
+    }
+
     /** Route a trusted BLE action through page-to-receiver synchronization. */
     controlFromBleRemote(
         action: "seek_backward" | "seek_forward" | "pause" | "play",
         seekBackwardSeconds: number,
         seekForwardSeconds: number
     ) {
-        if (!this.session || !this.onBleRemoteAction) {
-            this.debug?.("BLE remote ignored: sender controls are not ready", {
-                action
-            });
-            return false;
+        if (!this.session) return false;
+        if (this.onBleRemoteAction) {
+            return this.onBleRemoteAction(
+                action,
+                seekBackwardSeconds,
+                seekForwardSeconds
+            );
         }
-        return this.onBleRemoteAction(
+        // The page-event closure is detached for the duration of a reload
+        // (`suspendMediaElementSync`), deliberately: the site's own page events
+        // must not steer the receiver while a new item loads. A BLE command is NOT
+        // a page event though — it comes from the physical remote — and routing it
+        // through that closure dropped it entirely, so of a racing pair (popup seek
+        // 5:00, then BLE skip to 0:00) the OLDER intent won because the newer one
+        // never became an intent at all.
+        //
+        // A BLE PLAY/PAUSE is not a skip either, and must not reach the skip
+        // arithmetic below: its delta only branches on `seek_backward`, so play and
+        // pause both fell into the `forward` case and became a forward seek during
+        // every reload window. With the page transition impossible here (there are
+        // no page controls to drive), the correct behaviour is the closure's
+        // receiver-only branch, in the same order: the user's intent first, then
+        // the receiver.
+        if (action === "play" || action === "pause") {
+            const media = this.currentReceiverMedia();
+            if (!media) {
+                this.debug?.("BLE play/pause ignored: no cast media", {
+                    action
+                });
+                return false;
+            }
+            this.noteDesiredPlayback(action);
+            this.debug?.(
+                "BLE playback command with the page controls detached",
+                {
+                    action
+                }
+            );
+            const onError = (err: unknown) =>
+                this.debug?.("BLE playback command failed", { action, err });
+            if (action === "pause") {
+                media.pause(undefined, undefined, onError);
+            } else {
+                media.play(undefined, undefined, onError);
+            }
+            return true;
+        }
+        if (!this.isDashRemux) return false;
+        const seek = this.bleSeekTarget(
             action,
             seekBackwardSeconds,
             seekForwardSeconds
         );
+        if (seek.kind === "no-op") return true;
+        if (seek.kind === "unsupported") {
+            this.debug?.("BLE remote ignored: no page position to skip from", {
+                action
+            });
+            return false;
+        }
+        this.debug?.("BLE remote seek with the page controls detached", {
+            action,
+            target: seek.target
+        });
+        this.seekDashRemux(seek.target, "ble");
+        return true;
     }
 
-    /** Seek a DASH remux session by restarting the remux at the target. */
-    seekDashRemux(target: number) {
-        if (!this.isDashRemux || !this.session) return;
-        if (!Number.isFinite(target) || target < 0) return;
-        this.debug?.("dash seek requested", target);
+    /**
+     * Adopt the media key the caller supplied, retiring any pending seek that
+     * named a DIFFERENT media.
+     *
+     * The page's key is the only thing that can tell "the seek the user made while
+     * this item was loading" from "a seek left over from the previous video": both
+     * are plain page positions by the time they reach the coordinator, and without
+     * the key, serving a leftover intent on the next item's media would start
+     * playback at a position nobody asked for. A quality change passes the SAME key
+     * (one video, one item), so a pending seek survives it.
+     */
+    private adoptMediaIdentity(opts: MediaSenderOpts) {
+        if (opts.mediaIdentity === undefined) return;
+        if (opts.mediaIdentity !== this.mediaIdentity) {
+            this.playbackCoordinator.noteMediaIdentity(opts.mediaIdentity);
+        }
+        this.mediaIdentity = opts.mediaIdentity;
+    }
+
+    /** The media the receiver is currently playing (newest session entry). */
+    private currentReceiverMedia() {
+        const sessionMedia = this.session?.media;
+        return sessionMedia && sessionMedia.length
+            ? sessionMedia[sessionMedia.length - 1]
+            : this.media;
+    }
+
+    /**
+     * Where a BLE skip lands, from the page's own position.
+     *
+     * ONE implementation, used by the page-event closure (which owns the arm and
+     * the page-write path for a non-remux receiver) and by
+     * `controlFromBleRemote`'s direct path above. Two copies of this arithmetic
+     * would be two answers to "where does this skip go".
+     *
+     * The parameter type is the SEEK actions only, on purpose: the delta below has
+     * no branch for play/pause, so accepting them here is what turned a BLE
+     * play/pause into a forward skip. Narrowing it is the compiler enforcing that
+     * contract, not documentation of it.
+     */
+    private bleSeekTarget(
+        action: "seek_backward" | "seek_forward",
+        seekBackwardSeconds: number,
+        seekForwardSeconds: number
+    ):
+        | { kind: "seek"; target: number }
+        | { kind: "no-op"; target: number }
+        | { kind: "unsupported" } {
+        const element = this.mediaElement;
+        if (!(element instanceof HTMLMediaElement)) {
+            return { kind: "unsupported" };
+        }
+        const backwardSeconds = Math.max(1, Number(seekBackwardSeconds) || 30);
+        const forwardSeconds = Math.max(1, Number(seekForwardSeconds) || 30);
+        const delta =
+            action === "seek_backward" ? -backwardSeconds : forwardSeconds;
+        const current = element.currentTime;
+        if (!Number.isFinite(current) || current < 0) {
+            return { kind: "unsupported" };
+        }
+        const duration = Number(element.duration);
+        const target = Math.max(
+            0,
+            Number.isFinite(duration)
+                ? Math.min(duration, current + delta)
+                : current + delta
+        );
+        return Math.abs(target - current) <= 0.01
+            ? { kind: "no-op", target }
+            : { kind: "seek", target };
+    }
+
+    /**
+     * Is a transaction currently driving the page?
+     *
+     * The ONE place that answers this. The coordinator owns the transaction
+     * phase, and the two capture-side windows that outlive a LOAD (the seek's
+     * source priming and an item transition) are ORed in here rather than at each
+     * call site — previously the answer was assembled from a combination of
+     * `dashSyncHold`, `dashTightenSync`, `dashSeekSourcePriming` and
+     * `dashItemTransition` wherever it was needed, so a site that read three of
+     * the four behaved differently from a site that read all of them.
+     *
+     * `dashSyncHold` is GONE (not merely derived): it had become an alias of the
+     * coordinator's own transaction, covering only ONE of the three conditions
+     * here, and every reader now asks this method instead — so a live priming or
+     * item-transition window can no longer be invisible to the mirror hold.
+     *
+     * ORDERING MATTERS AS MUCH AS UNIFICATION. Because this predicate includes the
+     * item-transition window, a caller that returns on it BEFORE giving that window
+     * a chance to close makes the window's own release unreachable — it holds
+     * itself alive until its backstop expires. See the tick in
+     * addMediaElementListeners, where window advancement runs first.
+     *
+     * Still NOT unified: `dashTightenSync`/`dashTightenDeadline` remain separate
+     * mechanical state (post-load settle position + GET_STATUS polling), and the
+     * priming window is not yet a member of the coordinator's transaction.
+     */
+    private isHoldingPage(): boolean {
+        return this.pageHoldState().holding;
+    }
+
+    /**
+     * The ONE derivation of the page hold, and which condition causes it.
+     *
+     * Both entry points read THIS, so the boolean and its explanation cannot list
+     * different conditions. `isHoldingPage()` is what decisions use;
+     * `describePageHold()` exposes the same computation for diagnostics, where
+     * knowing WHICH window holds the page is the whole point — a single boolean
+     * cannot distinguish the coordinator's own transaction from a capture window
+     * that outlived it.
+     */
+    private pageHoldState(): {
+        holding: boolean;
+        coordinatorTransaction: boolean;
+        seekPriming: boolean;
+        itemTransition: boolean;
+    } {
+        const coordinatorTransaction = this.playbackCoordinator.isHoldingPage();
+        const seekPriming = this.dashSeekSourcePriming !== undefined;
+        const itemTransition = this.dashItemTransition !== undefined;
+        return {
+            holding: coordinatorTransaction || seekPriming || itemTransition,
+            coordinatorTransaction,
+            seekPriming,
+            itemTransition
+        };
+    }
+
+    /**
+     * Bind the receiver's media session id to the adapter, but ONLY on evidence
+     * that the media belongs to this generation.
+     *
+     * ## Why the LOAD callback is not evidence
+     *
+     * The callback's Media argument can be the STALE previous session: the
+     * receiver answers a reload with the old item's INTERRUPTED status, and
+     * `Session#loadMedia` resolves with the last entry of the session's media
+     * stack. The old code bound that argument, so a reload taught the adapter the
+     * PREVIOUS media session id — and since the adapter refuses what it cannot
+     * describe, the receiver's real reports were then dropped, silently: not
+     * converted, not observed, page unchanged. It also starved the item-transition
+     * release, which needs a real position from the NEW session.
+     *
+     * ## The evidence
+     *
+     * Stage 1 (in loadMedia): the generation binds its OWN declared content id,
+     * the URI the bridge built. No receiver evidence needed — the sender chose it.
+     *
+     * Stage 2 (here): a media session may be added only when BOTH hold —
+     *
+     *   - the LOAD this adapter was built for has been accepted, and
+     *   - the session's media STATES this generation's content id, i.e.
+     *     `normalizeContentId` agrees with the declared one (compared normalized,
+     *     because the sender appends a per-remux cache-busting query).
+     *
+     * The `previousMediaSessionId` half of the item-transition rule is checked in
+     * the tick, not here: this method may legitimately be called again for the
+     * same generation, and refusing a NEW session is the failure mode it exists to
+     * prevent.
+     *
+     * Content identity is REQUIRED. When a report (or the harness) carries no
+     * contentId there is nothing to check the session id against, so nothing is
+     * bound: an unverifiable session id is exactly the guess this replaces.
+     */
+    private confirmReceiverMediaIdentity() {
+        const declared = this.dashPresentationContentId;
+        if (declared === undefined) return;
+        const boundMedia = this.latestBoundMedia();
+        if (!boundMedia) return;
+        const reportedContentId = boundMedia.media?.contentId;
+        const matchesDeclared =
+            reportedContentId !== undefined &&
+            normalizeContentId(reportedContentId) ===
+                normalizeContentId(declared);
+        if (!matchesDeclared) {
+            this.debug?.(
+                "presentation identity NOT confirmed: the media does not state this generation's content",
+                {
+                    generationId: this.dashPresentation.generationId,
+                    declaredContentId: normalizeContentId(declared),
+                    reportedContentId: normalizeContentId(reportedContentId),
+                    mediaSessionId: boundMedia.mediaSessionId
+                }
+            );
+            return;
+        }
+        const identity = {
+            contentId: reportedContentId,
+            mediaSessionId: boundMedia.mediaSessionId
+        };
+        if (this.dashPresentation.describes(identity)) return;
+        bindPresentationMedia(this.dashPresentation, identity);
+        this.debug?.("presentation identity confirmed", {
+            generationId: this.dashPresentation.generationId,
+            contentId: normalizeContentId(reportedContentId),
+            mediaSessionId: identity.mediaSessionId,
+            offsetSeconds: this.dashPresentation.offsetSeconds
+        });
+    }
+
+    /**
+     * Can the presentation adapter describe the media the receiver is reporting on
+     * right now?
+     *
+     * False means every receiver position for this generation is being DROPPED —
+     * not converted, not observed. That is a silent failure by nature: the page
+     * looks correct because nothing writes it, so it is indistinguishable from the
+     * receiver never reporting. Callers use it to tell "the page is right" from
+     * "the page is never updated".
+     */
+    canConvertReceiverPosition(): boolean {
+        const boundMedia = this.latestBoundMedia();
+        if (!boundMedia) return false;
+        return this.dashPresentation.describes({
+            contentId: boundMedia.media?.contentId,
+            mediaSessionId: boundMedia.mediaSessionId
+        });
+    }
+
+    /** The content id this generation declared, for diagnostics. */
+    describeDeclaredContentId() {
+        return this.dashPresentationContentId;
+    }
+
+    /**
+     * One read-only view of the presentation identity, for debug output and tests
+     * alike.
+     *
+     * A single descriptor instead of one getter per field (and instead of a
+     * `*ForTest` accessor, which invites the next test hook to be a writer): the
+     * question these callers actually have is "is the receiver on the media this
+     * generation declared", which is a property of the pair, not of either id.
+     */
+    describePresentationIdentity() {
+        const bound = this.latestBoundMedia();
+        const declaredContentId = this.dashPresentationContentId;
+        const reportedContentId = bound?.media?.contentId;
+        return {
+            declaredContentId,
+            reportedContentId,
+            reportedSessionId: bound?.mediaSessionId,
+            describesCurrentMedia:
+                declaredContentId !== undefined &&
+                reportedContentId === declaredContentId
+        };
+    }
+
+    /** Read-only view of the page hold, for diagnostics. Never a decision input. */
+    describePageHold() {
+        return this.pageHoldState();
+    }
+
+    /**
+     * Move the page's own clock, as the EXTENSION.
+     *
+     * Every programmatic write to `mediaElement.currentTime` goes through here,
+     * for two reasons: the coordinator is told the write is ours (so the
+     * `seeked` event it causes is not read as a user seeking — that confusion is
+     * what turned a drift correction into another remux restart), and the
+     * receiver's presentation clock never enters the page's timeline.
+     *
+     * `origin` is the intent this write serves, when it serves one: a seek's
+     * hold carries its intent id, so the load that follows can be attributed to
+     * exactly that intent.
+     */
+    private writePageTime(
+        element: HTMLMediaElement,
+        pageSeconds: number,
+        options: { intentId?: number; origin?: PlaybackIntentOrigin } = {}
+    ): boolean {
+        if (!Number.isFinite(pageSeconds)) return false;
+        const target = Math.max(0, pageSeconds);
+        if (Math.abs(element.currentTime - target) <= 0.1) return false;
+        this.playbackCoordinator.notePageWrite(
+            options.origin ?? "sync-write",
+            options.intentId
+        );
+        element.currentTime = target;
+        return true;
+    }
+
+    /**
+     * The only entry point that may restart the remux.
+     *
+     * Every origin funnels through here — the popup's seek, the page's own
+     * progress bar, a BLE skip, an item/quality change, one recovery retry — and
+     * the coordinator decides whether a restart actually happens:
+     *
+     *  - it refuses anything that is not an explicit seek intent (origin
+     *    `receiver-status` / `sync-write` / `page-autonomous`), so a status
+     *    report or one of our own page writes can never reach this point;
+     *  - it coalesces requests that arrive while a restart is already in
+     *    flight, so two rapid seeks produce ONE remux generation instead of two;
+     *  - it stamps every accepted request with an `intentId`, which is what the
+     *    page write and the load callback below are attributed to.
+     */
+    seekDashRemux(
+        target: number,
+        origin: PlaybackIntentOrigin = "popup"
+    ): boolean {
+        if (!this.isDashRemux || !this.session) return false;
+        if (!Number.isFinite(target) || target < 0) return false;
+
+        const request = this.playbackCoordinator.requestSeek(
+            origin,
+            target,
+            this.mediaIdentity
+        );
+        if (!request.accepted) {
+            // Not an intent (a status report, or one of our own writes asking
+            // where playback is). Recorded in the coordinator's view and
+            // dropped here: this is the branch that breaks the feedback loop.
+            this.debug?.("dash seek refused: not an explicit intent", {
+                origin,
+                target,
+                reason: request.reason,
+                coordinator: this.playbackCoordinator.describe()
+            });
+            return false;
+        }
+        if (!request.restart) {
+            // A restart is already running: the running transaction retargets to
+            // this (newer) intent. Starting a second generation here is what
+            // produced duplicate reloads on rapid seeks.
+            this.debug?.("dash seek coalesced onto the running transaction", {
+                origin,
+                target: request.targetPageSeconds,
+                intentId: request.intentId,
+                coordinator: this.playbackCoordinator.describe()
+            });
+            return true;
+        }
+        this.debug?.("dash seek accepted", {
+            origin,
+            target: request.targetPageSeconds,
+            intentId: request.intentId
+        });
         // Pause the receiver immediately so the user sees a hold, not the
         // previous stream, while the remux generation is rebuilt. The page
         // source is primed later (see primeCaptureSource) so capture bytes
         // land in the NEW generation.
-        this.onDashSeekStart?.(target);
-        this.dashSeekTarget = target;
-        this.dashSyncHold = true;
+        this.onDashSeekStart?.(request.targetPageSeconds);
         // …but debounce the expensive remux restart so rapid seek clicks (popup
         // ±5s button) coalesce into a single reload once clicking stops.
         if (this.dashSeekDebounceId !== undefined) {
@@ -612,6 +1125,12 @@ export default class MediaSender {
             this.dashSeekDebounceId = undefined;
             void this.runDashSeek();
         }, MediaSender.DASH_SEEK_DEBOUNCE_MS);
+        return true;
+    }
+
+    /** The coordinator's view, for diagnostics and tests. */
+    getPlaybackCoordinator() {
+        return this.playbackCoordinator;
     }
 
     private dashSeekDebounceId?: number;
@@ -635,6 +1154,95 @@ export default class MediaSender {
      * force a full status until the deadline, so reconciliation self-heals.
      */
     private dashTightenDeadline = 0;
+    /**
+     * Shift between the receiver's presentation clock and the page's video time
+     * for the CURRENT DASH remux: receiverTime = pageTime + offset.
+     *
+     * Held as an immutable adapter built from THIS load's bridge reply (see
+     * cast/dashPresentation), never as a mutable number: a number written by one
+     * generation could be applied to the next generation's reports, which is
+     * exactly how a stale 32s runway moved the page. The adapter answers for the
+     * media it was built for and refuses anything else.
+     *
+     * Usually the identity, because the bridge pads the playlist up to the seek
+     * target. It is non-zero only when the bridge inserts a pad runway in front
+     * of the real segments (an opening cast inside the first pad window, see
+     * CHROMECAST_MIN_PAD_SECONDS in the bridge): the receiver then starts at
+     * padBase + (startTime - keyframe) and every receiver position it reports is
+     * that much ahead of the page. The page stays authoritative — the offset is
+     * removed before any receiver position is used as a page value.
+     */
+    private dashPresentation: DashPresentation = identityPresentation("none");
+
+    /**
+     * The contentId THIS generation declared when it built its media.
+     *
+     * The sender chooses it, so it is known before the LOAD is even sent and does
+     * not depend on any receiver report. It is the evidence a media session id is
+     * confirmed against: a session may only be bound to the adapter if the media
+     * it is reported through carries this content id (see
+     * confirmReceiverMediaIdentity).
+     */
+    private dashPresentationContentId?: string;
+
+    /**
+     * The single owner of "what is playback supposed to be doing".
+     *
+     * Every seek intent enters through it, it holds exactly one phase, and its
+     * `requestSeek` refuses anything that is not an explicit intent — which is
+     * the structural reason a receiver status report can no longer restart the
+     * remux.
+     */
+    private readonly playbackCoordinator = new PlaybackCoordinator();
+
+    /**
+     * Receiver presentation time -> page video time for the current remux.
+     *
+     * The ONLY crossing between the two clocks on this side. Everything that
+     * touches the page element, the page's position, or a seek target uses page
+     * time; everything that talks to the receiver uses presentation time.
+     *
+     * `media` identifies the generation the report is about. A report from media
+     * this adapter does not describe is refused (`undefined`) rather than
+     * converted, so the caller has to decide consciously instead of silently
+     * applying a stale shift.
+     */
+    private dashPageTimeFromReceiver(
+        presentationTime: number,
+        media?: { contentId?: string; mediaSessionId?: number }
+    ): number | undefined {
+        if (media && !this.dashPresentation.describes(media)) {
+            // NOT silent. A refusal means this position is neither converted nor
+            // observed, so every symptom it produces looks like "the page simply
+            // did not move" and is indistinguishable from the receiver never having
+            // reported at all. One line per distinct identity (the sync tick runs
+            // twice a second) so a real session can be diagnosed from the log.
+            const signature = `${media.contentId}|${media.mediaSessionId}`;
+            if (this.lastRefusedPresentationSignature !== signature) {
+                this.lastRefusedPresentationSignature = signature;
+                this.debug?.(
+                    "receiver position refused: media is not this generation's",
+                    {
+                        generationId: this.dashPresentation.generationId,
+                        declaredContentId: normalizeContentId(
+                            this.dashPresentationContentId
+                        ),
+                        reportedContentId: normalizeContentId(media.contentId),
+                        reportedMediaSessionId: media.mediaSessionId,
+                        statusBindings:
+                            this.dashPresentation.describeBindings(),
+                        loadId: this.dashLoadId,
+                        activeRequestId: this.activeMediaServerRequestId
+                    }
+                );
+            }
+            return undefined;
+        }
+        return this.dashPresentation.receiverToPage(presentationTime);
+    }
+
+    /** Last (contentId|mediaSessionId) refused, so the trace logs it once. */
+    private lastRefusedPresentationSignature?: string;
 
     /**
      * Page-clock-master mode: the page owns POSITION (no receiver->page drift
@@ -699,8 +1307,8 @@ export default class MediaSender {
                     failed?.outcome === "no-media"
                         ? "No active cast media"
                         : failed?.outcome === "page-sync-failed"
-                          ? "Page transition could not be started"
-                          : "Page playback route rejected"
+                        ? "Page transition could not be started"
+                        : "Page playback route rejected"
             };
         }
         const dispatch = dispatchSink.dispatch;
@@ -760,9 +1368,9 @@ export default class MediaSender {
         if (
             target !== undefined &&
             Number.isFinite(target) &&
-            Math.abs(mediaElement.currentTime - target) > 0.1
+            this.writePageTime(mediaElement, target, { origin: "sync-write" })
         ) {
-            mediaElement.currentTime = target;
+            this.debug?.("primed page capture position", { target });
         }
         if (mediaElement.paused) {
             void mediaElement.play().catch(err => {
@@ -832,7 +1440,156 @@ export default class MediaSender {
         }
     }
 
-    /** End the seek-scoped priming, with the reason in the trace. */
+    /**
+     * Open the item-transition window (see dashItemTransition). Called by the
+     * page sender right before it reloads the receiver for a new item/quality.
+     *
+     * The coordinator records the same moment as a GENERATION boundary, which is
+     * the structural half of the same idea: the item change invalidates every
+     * previous generation's events by identity, so the transition window below
+     * only has to cover what identity alone cannot — the receiver's own startup
+     * sequencing within the new generation.
+     */
+    beginDashItemTransition() {
+        if (!this.isDashRemux || this.preserveSourcePlayback) return;
+        const now = Date.now();
+        // The generation boundary is opened INSIDE the same guard as the window:
+        // on the page-clock-master path (Roku capture) the page owns position and
+        // the receiver's reports are already reconciled by identity, so there is
+        // no boundary to open and nothing to hold.
+        this.playbackCoordinator.beginItemChange();
+        this.dashItemTransition = {
+            loadId: this.dashLoadId,
+            previousMediaSessionId: this.latestBoundMedia()?.mediaSessionId,
+            loadResolved: false,
+            startedAt: now,
+            deadline: now + DASH_ITEM_TRANSITION_MAX_MS
+        };
+        // The reload restarts the remux generation; the previous stream's
+        // liveness/progress sample must not be judged as a stall while the new
+        // one is being prepared.
+        this.lastRelaySegmentRequestAt = 0;
+        this.prebufferProgressMediaTime = undefined;
+        this.prebufferProgressObservedAt = now;
+        this.debug?.("DASH item transition window opened", {
+            previousMediaSessionId:
+                this.dashItemTransition.previousMediaSessionId,
+            maxMs: DASH_ITEM_TRANSITION_MAX_MS
+        });
+    }
+
+    /**
+     * Close the item-transition window, with the reason in the trace.
+     *
+     * Closing the window settles the coordinator; it does NOT serve a pending
+     * seek. This method runs from `deadline`, `load-rejected` and the new
+     * session's first position report as well as from a successful load, and only
+     * the last of those is a point where the page controls are known to be
+     * attached (`onDashSeekStart` is re-installed by `addMediaElementListeners`,
+     * which a reload detaches). Serving from here could therefore start a
+     * generation whose hold is silently dropped - the page would stay where the
+     * previous step left it while the receiver played the new target. The one
+     * safe point is the end of the LOAD success callback; a REJECTED item load
+     * keeps the intent for a later successful load or the next user action, and
+     * never runs it without page controls (see `serveSeekPendingFromItemChange`).
+     */
+    private clearDashItemTransition(reason?: string) {
+        const transition = this.dashItemTransition;
+        if (!transition) return;
+        this.dashItemTransition = undefined;
+        // The new item's media is live: the generation boundary the item change
+        // opened is settled, so the coordinator stops holding the page.
+        this.playbackCoordinator.markItemSettled();
+        if (reason) {
+            this.debug?.("DASH item transition window closed", {
+                reason,
+                elapsedMs: Date.now() - transition.startedAt,
+                previousMediaSessionId: transition.previousMediaSessionId
+            });
+        }
+    }
+
+    /**
+     * Is the transition window still open? Never past its deadline: a reload
+     * that never produces a playable session must not hold the receiver's
+     * authority forever.
+     */
+    private dashItemTransitionActive() {
+        const transition = this.dashItemTransition;
+        if (!transition) return false;
+        if (Date.now() >= transition.deadline) {
+            this.clearDashItemTransition("deadline");
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Serve an explicit seek that an item/quality change coalesced and could not
+     * run itself.
+     *
+     * While the item change holds the load, `requestSeek` records the intent and
+     * reports `restart: false`, so no debounce is armed and nothing would ever
+     * apply it. Once the item's own media is live the outstanding intent is
+     * served by the ordinary loop, whose plan and hold are the usual ones for its
+     * target. A no-op when nothing is outstanding, when a transaction is already
+     * running (its own loop will retarget), or on the page-clock-master path,
+     * where the page primed the capture instead.
+     *
+     * The ONLY caller is the end of the LOAD success callback - after the page
+     * controls have been re-attached, so the generation this starts can park the
+     * page at its target. A REJECTED item load leaves the intent in place: it is
+     * neither run without page controls nor dropped, and the next successful load
+     * (or the next explicit seek, which supersedes it) decides what happens to it.
+     */
+    private serveSeekPendingFromItemChange() {
+        if (!this.isDashRemux || !this.session || this.stopped) return;
+        if (this.preserveSourcePlayback || this.dashSeekRunning) return;
+        const intent = this.playbackCoordinator.peekIntent();
+        if (!intent) return;
+        this.debug?.("serving the seek an item change coalesced", {
+            intentId: intent.intentId,
+            origin: intent.origin,
+            target: intent.targetPageSeconds
+        });
+        void this.runDashSeek();
+    }
+
+    /**
+     * One line per CHANGED transition tick, so a failed handoff shows exactly
+     * what the receiver was reporting when it stopped: which session is bound,
+     * what state it claims, where it says it is, and how far the window has run.
+     * (A transition on a stuck receiver is otherwise invisible between the
+     * "window opened" and "window closed" lines.)
+     */
+    private traceItemTransition(boundMedia: {
+        playerState: string;
+        mediaSessionId?: number;
+        getEstimatedTime?: () => number;
+    }) {
+        const transition = this.dashItemTransition;
+        if (!transition) return;
+        const rawEstimatedTime = boundMedia.getEstimatedTime?.();
+        const signature = `${boundMedia.mediaSessionId}|${
+            boundMedia.playerState
+        }|${Math.round(rawEstimatedTime ?? -1)}|${transition.loadResolved}`;
+        if (this.lastItemTransitionTrace === signature) return;
+        this.lastItemTransitionTrace = signature;
+        this.debug?.("DASH item transition tick", {
+            previousMediaSessionId: transition.previousMediaSessionId,
+            boundMediaSessionId: boundMedia.mediaSessionId,
+            playerState: boundMedia.playerState,
+            rawEstimatedTime,
+            loadResolved: transition.loadResolved,
+            elapsedMs: Date.now() - transition.startedAt
+        });
+    }
+    private lastItemTransitionTrace?: string;
+
+    /** Open the transition window (see dashItemTransition). Called right before
+     *  the sender reloads the receiver for a new item/quality. */
+    /**
+     * End the seek-scoped priming, with the reason in the trace. */
     private clearDashSeekSourcePriming(reason: string) {
         const priming = this.dashSeekSourcePriming;
         if (!priming) return;
@@ -867,6 +1624,31 @@ export default class MediaSender {
             : priming.loadResolved;
     }
 
+    /**
+     * Has the receiver declared this seek's new media dead?
+     *
+     * The seek reload produced a new session (so the id is not the previous one)
+     * and that session reports IDLE with a real error. The page has been held
+     * playing for a transaction that can no longer succeed, so it has to end now
+     * rather than at the deadline. Only the NEW session counts: the previous one
+     * going idle on its way out is the normal shape of a reload.
+     */
+    private isDashSeekPrimingDead(boundMedia: {
+        playerState: string;
+        mediaSessionId?: number;
+        idleReason?: string | null;
+    }) {
+        const priming = this.dashSeekSourcePriming;
+        if (!priming) return false;
+        if (boundMedia.playerState !== cast.media.PlayerState.IDLE) {
+            return false;
+        }
+        if (boundMedia.idleReason !== cast.media.IdleReason.ERROR) return false;
+        return priming.previousMediaSessionId === undefined
+            ? priming.loadResolved
+            : boundMedia.mediaSessionId !== priming.previousMediaSessionId;
+    }
+
     /** Temporarily detach page controls before a programmatic page pause. */
     suspendMediaElementSync() {
         this.removeMediaElementListeners?.();
@@ -890,6 +1672,7 @@ export default class MediaSender {
         this.mediaUrlResolver = opts.mediaUrlResolver;
         this.rokuMediaResolver = opts.rokuMediaResolver;
         this.mediaTitle = opts.mediaTitle;
+        this.adoptMediaIdentity(opts);
         this.mediaContentType = opts.mediaContentType ?? "";
         this.mediaElement = opts.mediaElement;
         this.remoteProxy = opts.remoteProxy;
@@ -1131,6 +1914,17 @@ export default class MediaSender {
             : undefined;
         // Every load supersedes the previous transaction's hold.
         this.clearDashSeekSourcePriming("new-load");
+        // An item/quality transition survives into this load: its window is
+        // about the RECEIVER's old session still reporting, which is exactly
+        // what happens while the new LOAD is in flight. Re-anchor it to this
+        // load's id and to the session bound right now.
+        if (this.dashItemTransition) {
+            this.dashItemTransition.loadId = loadId;
+            this.dashItemTransition.loadResolved = false;
+            this.dashItemTransition.previousMediaSessionId =
+                this.latestBoundMedia()?.mediaSessionId ??
+                this.dashItemTransition.previousMediaSessionId;
+        }
         // Consume the lazy URL resolver (CCTV live capture) before anything
         // touches this.mediaUrl. One-shot: reloads (seeks, auto-recovery) reuse
         // the resolved URL — the bridge rebuilds its relay from it directly.
@@ -1172,6 +1966,13 @@ export default class MediaSender {
                       : 0)
                 : 0
             : 0;
+        // This load's own bridge decides the presentation timeline (it is a
+        // property of the generated playlist), so the previous generation's
+        // adapter is retired before asking. A load that never reaches the bridge
+        // ready message leaves the identity adapter in place, which can only
+        // refuse unrelated media — never apply a stale runway.
+        this.dashPresentation = identityPresentation(`load:${loadId}`);
+        this.dashPresentationContentId = undefined;
 
         if (this.remoteProxy) {
             const port = await getOption("localMediaServerPort");
@@ -1275,6 +2076,37 @@ export default class MediaSender {
             if (Number.isFinite(result.startTime)) {
                 bridgeStartTime = Number(result.startTime);
             }
+            if (
+                this.isDashRemux &&
+                Number.isFinite(result.presentationStartTime) &&
+                Number(result.presentationStartTime) >= 0
+            ) {
+                // The bridge pads in front of the real segments only when the
+                // remux starts inside its first pad window; the pair it reports
+                // (page start, presentation start) is the whole mapping between
+                // the receiver's presentation clock and the page's video time.
+                // Frozen into an adapter for THIS generation: it cannot be
+                // mutated later, so it cannot leak onto the next media.
+                this.dashPresentation = createDashPresentation({
+                    generationId: requestId,
+                    pageStart: dashStartTime,
+                    receiverStart: Number(result.presentationStartTime),
+                    // The generation declares its own content id up front: it is
+                    // the URI the bridge built for THIS load (and the value the
+                    // MediaInfo below is constructed with), so binding it needs no
+                    // evidence from the receiver at all.
+                    contentIds: [mediaUrl.href]
+                });
+                this.dashPresentationContentId = mediaUrl.href;
+                this.debug?.("DASH presentation identity", {
+                    generationId: requestId,
+                    pageStart: dashStartTime,
+                    presentationStartTime: Number(result.presentationStartTime),
+                    padBaseSeconds: result.padBaseSeconds,
+                    probedKeyframeSeconds: result.probedKeyframeSeconds,
+                    offsetSeconds: this.dashPresentation.offsetSeconds
+                });
+            }
             if (this.isHlsDvr) {
                 // Segment cadence from the relay (drives the liveness timeout).
                 if (
@@ -1376,7 +2208,18 @@ export default class MediaSender {
                 // report.
                 ...(Number.isFinite(dashStartTime)
                     ? { dashStart: dashStartTime }
-                    : {})
+                    : {}),
+                // The generation's own presentation shift, stated by the media
+                // (0 unless the bridge inserted a pad runway). A consumer that
+                // needs to turn one of this media's receiver positions into page
+                // time reads it here; it is the same number the sender's adapter
+                // was built from, and it belongs to THIS media only.
+                //
+                // ALWAYS written, 0 included: the field's presence is what tells
+                // a reader "this media states its own shift", so an explicit 0
+                // (startup padding off, or a mid-video restart) can never be
+                // filled in from a value left by the previous remux.
+                presentationOffsetSeconds: this.dashPresentation.offsetSeconds
             };
         } else if (this.isHlsDvr && bridgePageDuration !== undefined) {
             // Synthetic DVR (CCTV): the popup needs the synthesized duration for
@@ -1483,7 +2326,11 @@ export default class MediaSender {
         }
 
         const loadRequest = new cast.media.LoadRequest(mediaInfo);
-        loadRequest.autoplay = true;
+        // A reload carries the user's playback intent across, it does not invent
+        // one: a seek while paused loads paused (at the new position), and every
+        // other case - an initial cast, an item change, a recovery rebuild -
+        // inherits whatever the user last asked for.
+        loadRequest.autoplay = this.desiredPlayback === "playing";
         loadRequest.activeTrackIds = activeTrackIds;
 
         if (this.isHlsDvr) {
@@ -1510,15 +2357,20 @@ export default class MediaSender {
                 currentTime: loadRequest.currentTime
             });
         } else if (this.mediaElement instanceof HTMLMediaElement) {
-            // DASH remux streams are padded up to dashStartTime, so the initial
-            // position is expressed in absolute video time.
+            // The bridge's presentation clock is what the receiver must be
+            // loaded at. It equals the page position (dashStartTime) unless the
+            // bridge inserted a pad runway in front of the real segments, in
+            // which case the whole timeline — LOAD position included — sits that
+            // much later: the receiver walks over the pads and lands in the real
+            // media at the page's position. That crossing is the adapter's job,
+            // and only the adapter's.
             const initialTime =
                 this.isDashRemux &&
                 this.preserveSourcePlayback &&
                 startTimeOverride === undefined
                     ? this.mediaElement.currentTime
                     : this.isDashRemux
-                    ? dashStartTime
+                    ? this.dashPresentation.pageToReceiver(dashStartTime)
                     : this.mediaElement.currentTime;
             if (Number.isFinite(initialTime)) {
                 loadRequest.currentTime = initialTime;
@@ -1528,7 +2380,10 @@ export default class MediaSender {
                 sourcePaused: this.mediaElement.paused,
                 continuousSync: this.syncElementEnabled,
                 sourceAuthoritative: this.preserveSourcePlayback,
-                remuxStartTime: this.isDashRemux ? dashStartTime : undefined
+                remuxStartTime: this.isDashRemux ? dashStartTime : undefined,
+                presentationOffset: this.isDashRemux
+                    ? this.dashPresentation.offsetSeconds
+                    : undefined
             });
         } else if (
             bridgeStartTime !== undefined &&
@@ -1544,7 +2399,6 @@ export default class MediaSender {
             // No active session: nothing will bind new media, so a DASH seek
             // reload would leave receiver->page sync held (and the tighten
             // polling) forever.
-            this.dashSyncHold = false;
             this.dashTightenSync = false;
             this.debug?.("loadMedia skipped: no cast session");
             return;
@@ -1580,12 +2434,40 @@ export default class MediaSender {
                 }
                 this.debug?.("receiver media loaded");
                 this.media = media;
-                if (loadId === this.dashLoadId) this.dashSyncHold = false;
+                // A LOAD the coordinator did not start (the initial cast, a
+                // quality change, a recovery rebuild, an item transition) still
+                // has to leave it with a settled phase: `markLoadSettled` below
+                // only clears a phase this coordinator's own transaction set, so
+                // without this the phase would be left at whatever a previous
+                // operation put there. Nothing here releases a hold — those are
+                // owned by the capture-side windows (see isHoldingPage).
+                if (!this.playbackCoordinator.isTransactionActive()) {
+                    this.playbackCoordinator.markItemSettled();
+                }
+                // The LOAD this adapter belongs to has been accepted, so a media
+                // session carrying THIS generation's declared content may be bound
+                // to it. The callback's own Media object is deliberately NOT the
+                // evidence: it can be the stale previous session, which is exactly
+                // why binding it taught the adapter the OLD identity and made it
+                // refuse the new one — a refusal that drops the position silently.
+                // See confirmReceiverMediaIdentity.
+                this.confirmReceiverMediaIdentity();
                 // Load identity for the priming release check: the callback's own
                 // Media object can be the stale previous session (see
                 // addMediaElementListeners), so this is a signal, not proof.
                 if (this.dashSeekSourcePriming?.loadId === loadId) {
                     this.dashSeekSourcePriming.loadResolved = true;
+                }
+                if (this.dashItemTransition?.loadId === loadId) {
+                    this.dashItemTransition.loadResolved = true;
+                    this.debug?.("item transition: LOAD callback resolved", {
+                        loadId,
+                        callbackMediaSessionId: media?.mediaSessionId,
+                        sessionMediaIds: this.session?.media?.map(
+                            item => item.mediaSessionId
+                        ),
+                        callbackPlayerState: media?.playerState
+                    });
                 }
                 if (this.mediaElement instanceof HTMLMediaElement) {
                     // Silence only the local tab. This assignment happens before
@@ -1626,12 +2508,34 @@ export default class MediaSender {
                         "page control sync disabled; receiver controlled via popup"
                     );
                 }
+                // Last, and only now: a seek this load coalesced is served with
+                // the page controls attached again, so that generation's hold can
+                // park the page at its target. `loadCurrentItem` detaches them
+                // (`suspendMediaElementSync`) for the reload, which leaves
+                // `onDashSeekStart` undefined until the line above re-attaches it
+                // — a hold issued before that would be silently dropped and the
+                // page would stay wherever the previous step left it.
+                this.serveSeekPendingFromItemChange();
             },
             err => {
                 if (this.stopped || loadId !== this.dashLoadId) return;
-                this.debug?.("receiver media load rejected", err);
+                // The whole rejection context in one line: a bare SDK error has
+                // no identity, so it cannot be told apart from the PREVIOUS
+                // session's INTERRUPTED arriving late.
+                this.debug?.("receiver media load rejected", {
+                    loadId,
+                    requestId: this.activeMediaServerRequestId,
+                    code: (err as { code?: string })?.code,
+                    description: (err as { description?: string })?.description,
+                    error: err instanceof Error ? err.message : String(err),
+                    itemTransition: Boolean(this.dashItemTransition),
+                    seekPriming: Boolean(this.dashSeekSourcePriming),
+                    loadedAt: loadRequest.currentTime,
+                    sessionMediaIds: this.session?.media?.map(
+                        item => item.mediaSessionId
+                    )
+                });
                 if (loadId === this.dashLoadId) {
-                    this.dashSyncHold = false;
                     // A rejected LOAD arrives via this callback — loadMedia never
                     // throws for it — so this is the only place a failed seek reload
                     // clears the tighten. Otherwise it would linger until its
@@ -1642,6 +2546,11 @@ export default class MediaSender {
                     if (this.dashSeekSourcePriming?.loadId === loadId) {
                         this.clearDashSeekSourcePriming("load-rejected");
                     }
+                    // …nor an item-transition window: with no new session coming,
+                    // holding the receiver's authority off would be permanent.
+                    if (this.dashItemTransition?.loadId === loadId) {
+                        this.clearDashItemTransition("load-rejected");
+                    }
                     if (this.dashSeekLoadIdentity?.loadId === loadId) {
                         this.dashSeekLoadIdentity = undefined;
                     }
@@ -1649,6 +2558,22 @@ export default class MediaSender {
                 logger.error("Failed to load media", err);
             }
         );
+    }
+
+    /**
+     * One-shot holds waiting for the page to arrive at a seek target.
+     *
+     * Held on the sender, not in the listener closure, because the closure is
+     * rebuilt on every load while the element (and the arrival it is waiting for)
+     * outlives it.
+     */
+    private pageArrivalHold?: () => void;
+
+    /** Drop any pending arrival hold (the element it belonged to is gone). */
+    private cancelPageArrivalHolds() {
+        const hold = this.pageArrivalHold;
+        this.pageArrivalHold = undefined;
+        hold?.();
     }
 
     private addMediaElementListeners(mediaElement: HTMLMediaElement) {
@@ -1739,6 +2664,7 @@ export default class MediaSender {
                     receiverDispatchStartedAt: Date.now()
                 });
             }
+            this.noteDesiredPlayback(action);
             const onError = (err: unknown) => {
                 sendError(`${action} receiver`)(err);
                 reportProgress(command, {
@@ -1866,6 +2792,7 @@ export default class MediaSender {
                 dispatchToReceiver(pagePlay.page, media, "play", true);
                 return;
             }
+            this.noteDesiredPlayback("play");
             media.play(undefined, undefined, sendError("play"));
         };
         const onPause = () => {
@@ -1905,6 +2832,7 @@ export default class MediaSender {
                 dispatchToReceiver(pagePause.page, media, "pause", true);
                 return;
             }
+            this.noteDesiredPlayback("pause");
             media.pause(undefined, undefined, sendError("pause"));
         };
         // While the bridge re-prepares the stream for a DASH seek, pause the
@@ -1928,20 +2856,51 @@ export default class MediaSender {
                 );
                 return;
             }
-            if (!mediaElement.paused) {
+            // WRITE FIRST, FREEZE AFTER. A page player fetches and decodes the
+            // target range only while it is PLAYING, so pausing the element
+            // before the write is a position that never arrives: the element
+            // reports `seeking` and then sits on the OLD position until something
+            // plays it again - on a cast that is the receiver's PLAYING, which is
+            // why the page appeared to jump to the target only once the receiver
+            // started. The hold is about where the page ENDS UP (frozen at the
+            // target), not about freezing it before it can get there.
+            //
+            // Tagged with the intent that owns the write, so the `seeked` it
+            // causes is attributed to the coordinator rather than read as a
+            // second, independent user seek.
+            const wrote = this.writePageTime(mediaElement, target, {
+                origin: "sync-write",
+                intentId: this.playbackCoordinator.peekIntent()?.intentId
+            });
+            const freeze = () => {
+                if (mediaElement.paused) return;
                 suppressPause++;
                 mediaElement.pause();
+            };
+            if (!wrote) {
+                // Already at the target (the write was a no-op): nothing to wait
+                // for, freeze where it is.
+                freeze();
+                return;
             }
-            if (Math.abs(mediaElement.currentTime - target) > 0.1) {
-                suppressSeek++;
-                mediaElement.currentTime = target;
+            if (mediaElement.paused) {
+                // Already frozen and unable to fetch the target: there is no hold
+                // to add (the position lands when the page plays again).
+                return;
             }
+            const onPageArrived = () => {
+                mediaElement.removeEventListener("seeked", onPageArrived);
+                this.pageArrivalHold = undefined;
+                freeze();
+            };
+            // Registered on the sender so a rebuilt listener set can drop it: the
+            // element it belongs to may be replaced while it waits.
+            this.pageArrivalHold = () =>
+                mediaElement.removeEventListener("seeked", onPageArrived);
+            mediaElement.addEventListener("seeked", onPageArrived);
         };
         this.primePageCaptureAt = (target: number) => {
-            if (Math.abs(mediaElement.currentTime - target) > 0.1) {
-                suppressSeek++;
-                mediaElement.currentTime = target;
-            }
+            this.writePageTime(mediaElement, target, { origin: "sync-write" });
             if (mediaElement.paused) {
                 suppressPlay++;
                 void mediaElement.play().catch(err => {
@@ -1956,6 +2915,24 @@ export default class MediaSender {
 
         const onSeeked = () => {
             if (!this.syncMediaPosition) return;
+            // Origin first: is this event the acknowledgement of a write WE
+            // just made? A drift correction, a seek hold and a capture prime all
+            // move the element, and the element then reports the change back as
+            // `seeked`. Reading that as "the user asked to seek here" is what
+            // turned one correction into another remux restart — and, with the
+            // receiver's own report feeding the correction, into a loop.
+            const ownWrite = this.playbackCoordinator.consumePageWrite();
+            if (ownWrite) {
+                this.debug?.(
+                    "ignored page seek: acknowledgement of our own write",
+                    {
+                        origin: ownWrite.origin,
+                        intentId: ownWrite.intentId,
+                        pageTime: mediaElement.currentTime
+                    }
+                );
+                return;
+            }
             if (suppressSeek > 0) {
                 suppressSeek--;
                 return;
@@ -1966,9 +2943,24 @@ export default class MediaSender {
             // gesture-adjacent `seeking` legitimizes exactly one `seeked`.
             const seekArmed = Date.now() < seekArmedUntil;
             seekArmedUntil = 0;
-            const fromBleRemote = consumeBleArm("seek");
-            if (!fromBleRemote && !seekArmed && !fromGesture()) {
-                this.debug?.("ignored autonomous page seek");
+            // Exactly two things may carry a seek intent out of the page: a BLE
+            // (touch-remote) skip, and the arm the gesture-adjacent `seeking`
+            // installed above. `consumeBleArm` returns a RECORD, not a flag -
+            // testing it directly made this gate dead, so every page `seeked`
+            // (the site's own buffering/quality/navigation seeks included)
+            // restarted the remux with origin `ble`, killing the generation the
+            // receiver had just been loaded on.
+            //
+            // A bare pointerdown is deliberately NOT a third source: `fromGesture`
+            // would re-open this gate for whatever the page does in the next
+            // 1.5s, which is precisely the autonomous event this gate exists to
+            // refuse. The narrow authorization is the `seeking` arm, which only
+            // a gesture-adjacent `seeking` can install.
+            const fromBleRemote = consumeBleArm("seek").ble;
+            if (!fromBleRemote && !seekArmed) {
+                this.debug?.("ignored autonomous page seek", {
+                    pageTime: mediaElement.currentTime
+                });
                 return;
             }
             if (fromBleRemote) {
@@ -1988,11 +2980,23 @@ export default class MediaSender {
                 // The receiver cannot seek inside the sequentially-remuxed HLS:
                 // segments past the ffmpeg download frontier return 404 and the
                 // receiver buffers forever. Restart the remux at the target instead.
-                this.debug?.(
-                    "page control: seek (dash remux restart)",
-                    mediaElement.currentTime
-                );
-                this.seekDashRemux(mediaElement.currentTime);
+                //
+                // This is the ONE page-originated intent that may restart the
+                // remux, and it reaches the coordinator through the single entry
+                // point with its origin stated, so the trace can tell a user's
+                // seek apart from anything else that moved the element.
+                //
+                // A transaction already owns the page here: the user's seek is
+                // recorded as an intent (the running transaction retargets to it,
+                // newest wins) but must not start a SECOND bridge generation —
+                // which is exactly the duplicate-reload shape this refactor
+                // removes.
+                const target = mediaElement.currentTime;
+                this.debug?.("page control: seek (dash remux restart)", {
+                    target,
+                    holding: this.isHoldingPage()
+                });
+                this.seekDashRemux(target, fromBleRemote ? "ble" : "page");
                 return;
             }
             const request = new cast.media.SeekRequest();
@@ -2037,6 +3041,7 @@ export default class MediaSender {
                         outcome: "receiver-only",
                         at: Date.now()
                     });
+                    this.noteDesiredPlayback(action);
                     if (action === "pause") {
                         media.pause(undefined, undefined, sendError("pause"));
                     } else {
@@ -2121,9 +3126,9 @@ export default class MediaSender {
                         outcome: "page-sync-failed",
                         at: Date.now()
                     });
-                    sendError(
-                        action === "pause" ? "page pause" : "page play"
-                    )(error);
+                    sendError(action === "pause" ? "page pause" : "page play")(
+                        error
+                    );
                     return false;
                 }
                 return true;
@@ -2181,20 +3186,27 @@ export default class MediaSender {
                 boundMedia.seek(request, undefined, sendError("BLE DVR seek"));
                 return true;
             }
-            const duration = Number(mediaElement.duration);
-            const target = Math.max(
-                0,
-                Number.isFinite(duration)
-                    ? Math.min(duration, mediaElement.currentTime + delta)
-                    : mediaElement.currentTime + delta
+            // Where the skip lands: the same helper the direct path uses, so the
+            // closure and `controlFromBleRemote` cannot disagree.
+            const seek = this.bleSeekTarget(
+                action,
+                seekBackwardSeconds,
+                seekForwardSeconds
             );
-            if (Math.abs(target - mediaElement.currentTime) <= 0.01) {
+            if (seek.kind === "unsupported") {
+                this.debug?.("BLE remote seek ignored: no page position", {
+                    action
+                });
+                return true;
+            }
+            if (seek.kind === "no-op") {
                 this.debug?.("BLE remote seek already at boundary", {
                     action,
                     currentTime: mediaElement.currentTime
                 });
                 return true;
             }
+            const target = seek.target;
             this.debug?.("BLE remote synchronized seek", {
                 action,
                 from: mediaElement.currentTime,
@@ -2202,14 +3214,14 @@ export default class MediaSender {
                 dashRemux: this.isDashRemux
             });
             if (this.isDashRemux) {
-                // Enter the existing DASH seek transaction synchronously. It sets
-                // dashSyncHold and suppresses the local page seek before the periodic
-                // receiver sync can overwrite the requested target.
-                this.seekDashRemux(target);
+                // A BLE skip is an explicit user intent: it enters the single
+                // seek entry point with its own origin, so the restart it causes
+                // is attributable and coalesces with any other seek in flight.
+                this.seekDashRemux(target, "ble");
                 return true;
             }
             bleSeekArmedUntil = now + BLE_SEEK_ARM_WINDOW_MS;
-            mediaElement.currentTime = target;
+            this.writePageTime(mediaElement, target, { origin: "sync-write" });
             return true;
         };
 
@@ -2228,9 +3240,11 @@ export default class MediaSender {
          * Roku UI, another controller) and not only through commands that already
          * went through the page.
          */
-        const reconcilePlaybackState = (
-            boundMedia: { playerState: string; mediaSessionId?: number }
-        ) => {
+        const reconcilePlaybackState = (boundMedia: {
+            playerState: string;
+            mediaSessionId?: number;
+            idleReason?: string | null;
+        }) => {
             // DASH seek transaction first, and BEFORE every early return below:
             // a tick that would otherwise be a no-op still has to end the hold
             // (satisfied / superseded / expired), and neither the release test
@@ -2244,12 +3258,49 @@ export default class MediaSender {
                 } else if (this.isDashSeekPrimingSatisfied(boundMedia)) {
                     this.clearDashSeekSourcePriming("new-media-playing");
                     seekPriming = undefined;
+                } else if (this.isDashSeekPrimingDead(boundMedia)) {
+                    // The new session is up and the receiver itself declares the
+                    // media dead: the transaction has failed, and holding the
+                    // receiver's authority off until the 120s deadline would
+                    // leave the page paused and every control held while the
+                    // receiver sits on an error screen.
+                    this.clearDashSeekSourcePriming("new-media-error");
+                    seekPriming = undefined;
                 } else if (Date.now() >= seekPriming.deadline) {
                     // Clearing is enough: this same call now falls through to the
                     // ordinary reconciliation below (no recursion needed).
                     this.clearDashSeekSourcePriming("deadline");
                     seekPriming = undefined;
                 }
+            }
+
+            /**
+             * Item/quality transition, evaluated BEFORE the local-state early
+             * return below: with the page already playing and the OLD session
+             * also reporting PLAYING, an equal-state tick would otherwise skip
+             * this function entirely — and with it the window's own
+             * identity/expiry accounting. Same ordering rule the seek priming
+             * above follows.
+             *
+             * The media the receiver is reporting on is the PREVIOUS item until
+             * the new session shows up, so its PAUSED (and its IDLE at the end of
+             * the old stream) must not stop the page that is already playing the
+             * new item. A receiver PAUSED that arrives AFTER the window closes is
+             * a real user pause and still stops the page.
+             */
+            const itemTransition = this.dashItemTransitionActive();
+            if (itemTransition) {
+                this.traceItemTransition(boundMedia);
+            }
+            if (
+                itemTransition &&
+                boundMedia.playerState === cast.media.PlayerState.PAUSED
+            ) {
+                this.debug?.(
+                    "receiver PAUSED ignored during the item transition",
+                    { mediaSessionId: boundMedia.mediaSessionId }
+                );
+                return;
             }
 
             const localState = mediaElement.paused
@@ -2322,7 +3373,6 @@ export default class MediaSender {
                 // its own (Roku remote, Roku UI, another controller), so the page
                 // must follow the receiver's state here too. Skipping it left the
                 // Bilibili page playing while the Roku was paused.
-                this.dashSyncHold = false;
                 this.dashTightenSync = false;
                 const boundMedia = currentMedia();
                 if (
@@ -2347,15 +3397,19 @@ export default class MediaSender {
                 return;
             }
             const boundMedia = currentMedia();
+            // One answer to "is a transaction driving the page?" — the same one
+            // the mirror-hold below uses, so the log cannot describe a different
+            // state from the decision it explains.
+            const holdingPage = this.isHoldingPage();
             // While a DASH seek reload is settling, log the sync inputs once per
             // second so it's visible exactly where reconciliation is stuck.
             if (
-                (this.dashSyncHold || this.dashTightenSync) &&
+                (holdingPage || this.dashTightenSync) &&
                 Date.now() - lastSyncDebugAt > 1000
             ) {
                 lastSyncDebugAt = Date.now();
                 this.debug?.("post-seek sync state", {
-                    hold: this.dashSyncHold,
+                    hold: holdingPage,
                     tighten: this.dashTightenSync,
                     playerState: boundMedia?.playerState,
                     estimatedTime: boundMedia?.getEstimatedTime(),
@@ -2531,10 +3585,80 @@ export default class MediaSender {
                 }
             }
 
+            const rawEstimatedTime = boundMedia.getEstimatedTime();
+            // Confirm the media session this report comes through, before anything
+            // interprets it: the receiver can create a further media session for
+            // this generation AFTER the LOAD callback settled, and an identity the
+            // adapter cannot describe is refused — dropped silently rather than
+            // converted or observed. Idempotent and evidence-gated (see the method).
+            this.confirmReceiverMediaIdentity();
+            // ---- window ADVANCEMENT comes before the generic hold -------------
+            //
+            // `isHoldingPage()` includes this very window, so running the hold
+            // guard first made the release below UNREACHABLE: the transition kept
+            // itself alive merely by existing, the receiver's new session never had
+            // its position read, and the window stayed open until its 120s
+            // backstop — swallowing the receiver's authority over the page for two
+            // minutes. Every window that can contribute to the hold must therefore
+            // get the chance to END before anything asks "is something holding the
+            // page?".
+            //
+            // The item/quality transition: until the receiver's NEW session reports
+            // a position, every position it has belongs to the PREVIOUS item, so
+            // applying one would drag the page back into the old video (a different
+            // duration, a different timeline). The first real position of the new
+            // session closes the window, and ordinary reconciliation resumes — the
+            // LOAD was issued at the page's own position, so there is nothing to
+            // correct at that moment.
+            if (this.dashItemTransitionActive()) {
+                const transition = this.dashItemTransition;
+                // Identity: the window closes only on a session this LOAD produced,
+                // and BOTH halves are required.
+                //
+                //  - `loadResolved` alone proves nothing: the LOAD callback can
+                //    return the PREVIOUS session's Media object (the receiver
+                //    answers a reload with the old item's INTERRUPTED status), so a
+                //    PLAYING report at that moment would release the window onto the
+                //    old item's timeline.
+                //  - A different mediaSessionId alone proves nothing either: the
+                //    receiver can have advanced past the old session while the new
+                //    media is still being accepted.
+                //
+                // A transition with no recorded previous session is NOT treated as
+                // "any session will do" — that reading is what let an old session
+                // close its own replacement. It declines to close early instead; the
+                // new session's first real position still arrives.
+                const loadBelongsToTransition =
+                    transition !== undefined && transition.loadResolved;
+                const sessionAdvanced =
+                    transition?.previousMediaSessionId !== undefined &&
+                    typeof boundMedia.mediaSessionId === "number" &&
+                    boundMedia.mediaSessionId !==
+                        transition.previousMediaSessionId;
+                const hasRealPosition =
+                    Number.isFinite(rawEstimatedTime) &&
+                    rawEstimatedTime >= 0 &&
+                    boundMedia.playerState === cast.media.PlayerState.PLAYING;
+                if (
+                    loadBelongsToTransition &&
+                    sessionAdvanced &&
+                    hasRealPosition
+                ) {
+                    this.clearDashItemTransition("new-media-position");
+                } else {
+                    reconcilePlaybackState(boundMedia);
+                    return;
+                }
+            }
+
             // A DASH seek reload is restarting the remux and rebinding the media
             // session; the old session's position/state is stale and must not be
-            // mirrored onto the page.
-            if (this.dashSyncHold) return;
+            // mirrored onto the page. `isHoldingPage()` covers the coordinator
+            // transaction AND the two capture-side windows that outlive a LOAD
+            // (the seek's source priming and an item transition) — a page hold
+            // that only noticed the coordinator's own phase let a still-live
+            // priming window mirror the PREVIOUS generation's position.
+            if (this.isHoldingPage()) return;
             // In gesture-gated mode, mirror the receiver's position/state onto the
             // local <video> so the page's progress bar and play state faithfully
             // follow the receiver. But right after a real user interaction, back
@@ -2577,7 +3701,6 @@ export default class MediaSender {
                 });
             }
 
-            const rawEstimatedTime = boundMedia.getEstimatedTime();
             // Chromecast HLS reports currentTime=-1 while its event timeline is
             // being established. Skip only position reconciliation for that
             // sentinel. Playback-state reconciliation below must still run, or the
@@ -2591,28 +3714,71 @@ export default class MediaSender {
                 Number.isFinite(rawEstimatedTime) &&
                 rawEstimatedTime >= 0
             ) {
-                const estimatedTime = rawEstimatedTime;
-                const drift = Math.abs(
-                    mediaElement.currentTime - estimatedTime
+                // The receiver's clock -> page time, through the generation's
+                // own adapter. `undefined` means this report is about media this
+                // sender does not own (a previous generation's session still
+                // broadcasting): it is not converted at all, because any number
+                // produced from it would belong to a timeline that no longer
+                // exists.
+                const estimatedTime = this.dashPageTimeFromReceiver(
+                    rawEstimatedTime,
+                    {
+                        contentId: boundMedia.media?.contentId,
+                        mediaSessionId: boundMedia.mediaSessionId
+                    }
                 );
-                // After a DASH seek reload, do a one-shot tight correction (the same
-                // 0.25s tolerance the paused-state correction gets) so the page snaps
-                // to the receiver's actual start position. Otherwise the loose 0.75s
-                // playing tolerance would leave a residual offset forever.
-                //
-                // Only evaluate once the receiver is actually PLAYING: the
-                // PAUSED/BUFFERING reports right after LOAD just echo the requested
-                // start position, which would consume the flag while the page is
-                // parked at the same value — without correcting anything.
-                if (this.dashTightenSync) {
-                    if (
+                if (estimatedTime !== undefined) {
+                    // Record what the receiver says. This is an OBSERVATION: it
+                    // feeds the trace and the popup's display, and it has no path
+                    // back into a seek. That separation is what stops the
+                    // receiver's own reports from restarting the remux.
+                    this.playbackCoordinator.observeReceiverPosition({
+                        pageSeconds: estimatedTime,
+                        playerState: boundMedia.playerState,
+                        mediaSessionId: boundMedia.mediaSessionId
+                    });
+                    const drift = Math.abs(
+                        mediaElement.currentTime - estimatedTime
+                    );
+                    // DASH remux: the page IS the position authority.
+                    //
+                    // The receiver plays the SAME content through a different
+                    // capture path, so the two clocks diverge by however much the
+                    // bridge's relay lags — and writing the receiver's position
+                    // onto the page moves the element out from under the user's
+                    // own progress bar for no gain. Worse, that write fires a
+                    // `seeked` event, which used to be indistinguishable from the
+                    // user dragging the bar: the correction became another remux
+                    // restart, which produced a fresh receiver position, which
+                    // corrected again. Observing instead of writing breaks that
+                    // loop at its source.
+                    if (this.isDashRemux) {
+                        if (drift > 1) {
+                            this.debug?.(
+                                "page/receiver drift (observed only)",
+                                {
+                                    drift,
+                                    pageTime: mediaElement.currentTime,
+                                    receiverPageTime: estimatedTime,
+                                    playerState: boundMedia.playerState,
+                                    offsetSeconds:
+                                        this.dashPresentation.offsetSeconds
+                                }
+                            );
+                        }
+                    } else if (
+                        this.dashTightenSync &&
                         boundMedia.playerState ===
-                        cast.media.PlayerState.PLAYING
+                            cast.media.PlayerState.PLAYING
                     ) {
+                        // Non-remux media is a single clock: the receiver's
+                        // position IS the page's, so the post-load settle may
+                        // still snap the element onto it.
                         this.dashTightenSync = false;
                         if (drift > 0.25) {
-                            if (!gated) suppressSeek++;
-                            mediaElement.currentTime = estimatedTime;
+                            this.writePageTime(mediaElement, estimatedTime, {
+                                origin: "sync-write"
+                            });
                             this.debug?.("post-seek sync snap", {
                                 drift,
                                 estimatedTime,
@@ -2624,26 +3790,23 @@ export default class MediaSender {
                                 estimatedTime
                             });
                         }
-                    }
-                } else {
-                    const driftLimit =
-                        boundMedia.playerState ===
-                        cast.media.PlayerState.PLAYING
-                            ? 0.75
-                            : 0.25;
-                    if (drift > driftLimit) {
-                        // In gated mode these programmatic writes are filtered by the
-                        // gesture gate in onSeeked (no recent gesture), so no suppress
-                        // counter is needed — avoiding the counter drift that used to
-                        // swallow real seeks.
-                        if (!gated) suppressSeek++;
-                        mediaElement.currentTime = estimatedTime;
-                        if (drift > 1) {
-                            this.debug?.("corrected local playback drift", {
-                                drift,
-                                estimatedTime,
-                                playerState: boundMedia.playerState
+                    } else if (!this.dashTightenSync) {
+                        const driftLimit =
+                            boundMedia.playerState ===
+                            cast.media.PlayerState.PLAYING
+                                ? 0.75
+                                : 0.25;
+                        if (drift > driftLimit) {
+                            this.writePageTime(mediaElement, estimatedTime, {
+                                origin: "sync-write"
                             });
+                            if (drift > 1) {
+                                this.debug?.("corrected local playback drift", {
+                                    drift,
+                                    estimatedTime,
+                                    playerState: boundMedia.playerState
+                                });
+                            }
                         }
                     }
                 }
@@ -2673,6 +3836,9 @@ export default class MediaSender {
             this.onDashSeekStart = undefined;
             this.primePageCaptureAt = undefined;
             this.onBleRemoteAction = undefined;
+            // Any hold still waiting for the page's arrival dies with the
+            // listener set that armed it.
+            this.cancelPageArrivalHolds();
             if (this.gestureGatedControls) {
                 window.removeEventListener("pointerdown", markGesture, true);
                 window.removeEventListener("pointerup", markGesture, true);
@@ -2694,17 +3860,42 @@ export default class MediaSender {
      * Process queued DASH seek targets one at a time (latest wins while a
      * reload is already running). Each seek restarts the bridge remux at the
      * target and reloads the receiver with a keyframe-padded playlist.
+     *
+     * The target comes from the COORDINATOR, not from a second queue field: the
+     * coordinator already holds exactly one outstanding intent and already
+     * coalesces newer requests onto it, so reading it here is what makes "two
+     * rapid seeks, one remux generation" true rather than hoped for.
      */
     private async runDashSeek() {
         if (this.dashSeekRunning) return;
+        const intent = this.playbackCoordinator.peekIntent();
+        if (!intent) return;
+        if (
+            !this.playbackCoordinator.beginTransaction(
+                intent.intentId,
+                "seeking"
+            )
+        ) {
+            // A newer request superseded this intent before the transaction
+            // started; the newer one owns the work now.
+            this.debug?.("dash seek skipped: superseded before it started", {
+                intentId: intent.intentId
+            });
+            return;
+        }
         this.dashSeekRunning = true;
         try {
-            while (this.dashSeekTarget !== undefined) {
-                const target = this.dashSeekTarget;
-                this.dashSeekTarget = undefined;
-                // Re-assert the hold for every reload: a failed previous iteration
-                // clears it, and a stale load callback may have released it early.
-                this.dashSyncHold = true;
+            // One iteration per remux generation. The loop is driven by the
+            // coordinator's outstanding intent, not by a constant: a seek that
+            // arrives while the previous generation is rebuilding RETARGETS this
+            // transaction (the coordinator's newest-intent-wins rule), so the loop
+            // runs again instead of a second transaction starting.
+            for (
+                let target = this.playbackCoordinator.getTransactionTarget();
+                target !== undefined;
+                target = this.playbackCoordinator.getTransactionTarget()
+            ) {
+                const activeIntent = this.playbackCoordinator.peekIntent();
                 // Page-clock-master (Roku capture): never snap the page to
                 // the receiver after reload — the page was primed to `target`
                 // and is the position authority. Chromecast still tightens.
@@ -2715,6 +3906,15 @@ export default class MediaSender {
                 } else {
                     this.dashTightenSync = false;
                 }
+                // The page hold follows the target THIS iteration serves, not
+                // the click that opened the transaction: a burst retargets the
+                // loop, and without this the page stayed parked where the FIRST
+                // click put it while the receiver played the newest target — the
+                // page and the receiver then disagreed in the other direction.
+                // Idempotent when the page is already there (writePageTime
+                // refuses a no-op write), so the accepting click's own hold and
+                // this one do not double up.
+                this.onDashSeekStart?.(target);
                 // Seek -> load handoff (see pendingDashSeekPrime): the priming
                 // transaction this seek may create is scoped to the load it is
                 // about to start, and the session bound right now is the one whose
@@ -2728,19 +3928,32 @@ export default class MediaSender {
                 };
                 try {
                     await this.loadMedia(target);
+                    this.playbackCoordinator.markLoadSettled(
+                        activeIntent?.intentId
+                    );
                 } catch (err) {
-                    this.dashSyncHold = false;
-                    // Don't snap to the stale position of a failed reload.
                     this.dashTightenSync = false;
                     // A failed reload leaves no transaction behind - but only ITS
                     // OWN: this iteration may have been superseded while it awaited.
                     this.clearDashSeekTransaction(seekId, "seek-load-failed");
                     this.debug?.("dash seek reload failed", String(err));
                     logger.error("DASH seek reload failed", err);
+                } finally {
+                    // This iteration is done with its target. Consuming it AFTER
+                    // the load is what lets a seek that arrived while the remux
+                    // was rebuilding be seen by the loop below and retarget this
+                    // same transaction, instead of being swallowed or starting a
+                    // second bridge generation.
+                    if (activeIntent) {
+                        this.playbackCoordinator.consumeIntent(
+                            activeIntent.intentId
+                        );
+                    }
                 }
             }
         } finally {
             this.dashSeekRunning = false;
+            this.playbackCoordinator.endTransaction("seek-settled");
         }
     }
 
@@ -2764,6 +3977,11 @@ export default class MediaSender {
         mode?: "proxy" | "dash-remux";
         startTime?: number;
         padBaseSeconds?: number;
+        /** Probed keyframe the real segments start at (diagnostics). */
+        probedKeyframeSeconds?: number;
+        /** Position to LOAD the receiver at, on the padded presentation
+         *  timeline the bridge just generated. */
+        presentationStartTime?: number;
         /** Synthetic-DVR live edge at start: baseSeconds in the VOD timeline. */
         liveEdgeBaseSeconds?: number;
         /** Wall-clock ms when liveEdgeBaseSeconds was captured. */
@@ -2780,6 +3998,13 @@ export default class MediaSender {
                   await getOption("rokuTranscodePreset")
               )
             : undefined;
+        // Chromecast DASH startup compatibility (a pad runway in front of the
+        // real segments). Read per remux start so toggling it applies to the next
+        // LOAD — including seek-driven rebuilds — without re-casting. Ignored on
+        // every path that does not take the Chromecast DASH remux branch.
+        const chromecastDashStartupPadding = rokuDashPrebuffer
+            ? false
+            : (await getOption("chromecastDashStartupPadding")) !== false;
         return new Promise((resolve, reject) => {
             if (!this.port) return reject("Cast bridge unavailable");
 
@@ -2880,7 +4105,8 @@ export default class MediaSender {
                     resetCaptureWindow,
                     cctvDebugEnabled,
                     userAgent,
-                    rokuTranscodePreset
+                    rokuTranscodePreset,
+                    chromecastDashStartupPadding
                 }
             });
         });

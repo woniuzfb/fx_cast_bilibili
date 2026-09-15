@@ -448,6 +448,11 @@ type BridgeMessageDefinitions = {
          *  cannot start at the previous page position. First play / overflow
          *  omit this so already-buffered ranges stay usable. */
         resetCaptureWindow?: boolean;
+        /** Chromecast DASH startup compatibility (options page, default on):
+         *  pad the generated playlist with a startup runway and start the
+         *  receiver on that padded timeline. false restores the old timeline
+         *  exactly. Ignored on the Roku path. */
+        chromecastDashStartupPadding?: boolean;
         /** Enables verbose bridge relay logging and LAN debug playlist endpoints. */
         cctvDebugEnabled?: boolean;
         /** User-Agent for the bridge's upstream CDN requests (live relay). The
@@ -469,6 +474,13 @@ type BridgeMessageDefinitions = {
          *  playlist is actually padded to (diagnostics). */
         startTime?: number;
         padBaseSeconds?: number;
+        probedKeyframeSeconds?: number;
+        /** DASH remux: where the receiver must start inside the generated
+         *  playlist, i.e. startTime expressed on the padded presentation
+         *  timeline (startTime unless a pad runway was inserted in front of the
+         *  real segments). The page keeps playing on its own clock: the shift
+         *  between the two is padBaseSeconds - probedKeyframeSeconds. */
+        presentationStartTime?: number;
         /** Full source duration reported by ffprobe when available. */
         pageDuration?: number;
         /** Synthetic DVR (CCTV live): offset of the live edge in the VOD

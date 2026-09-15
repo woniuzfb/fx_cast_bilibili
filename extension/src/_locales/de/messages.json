@@ -648,5 +648,12 @@
     },
     "errorBridgeLiveHlsUnsupported": {
         "message": "Die installierte native Bridge unterstützt das Live-HLS-Relay nicht. Erstellen Sie die native fx_cast_bilibili-Bridge neu, installieren Sie sie erneut und starten Sie sie neu."
+    },
+    "optionsChromecastDashStartupPadding": {
+        "message": "Chromecast DASH startup compatibility",
+        "description": "Adds a startup pad runway in front of the Bilibili DASH remux for Chromecast."
+    },
+    "optionsChromecastDashStartupPaddingDescription": {
+        "message": "Improves DASH startup compatibility on some Chromecast receivers. Disable it when diagnosing playback or seeking problems."
     }
 }

@@ -17,6 +17,64 @@ import { PlayerState, RepeatMode } from "../cast/sdk/media/enums";
 
 import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
 import type { PlaybackCommandProgress } from "../../../shared/playbackCommand";
+import { declaredPresentationOffset, normalizeContentId } from "../cast/dashPresentation";
+
+/**
+ * Marks a status object as already converted to page time, and reports whether
+ * it already was.
+ *
+ * The property is non-enumerable so it cannot leak into a serialized status
+ * (the popup's samples, log snapshots) or be echoed by anything that copies own
+ * keys, while still travelling with the object through the merge.
+ */
+function markDashTimeConverted(status: object): boolean {
+    const marker = status as { __fxcastPageTime?: true };
+    if (marker.__fxcastPageTime === true) return true;
+    Object.defineProperty(status, "__fxcastPageTime", {
+        value: true,
+        enumerable: false,
+        configurable: true
+    });
+    return false;
+}
+
+/**
+ * A CCTV live relay never takes the DASH remux timeline path: its customData is
+ * {hlsDvr: true} with no dashStart and no presentation offset, and its receiver
+ * positions are on the synthetic VOD clock, not shifted by any pad runway. This
+ * guard (and its log) exists because a media carrying both flags would mean the
+ * two senders' metadata is being crossed, and silently adding dashStart to a
+ * live position would be invisible in the popup.
+ */
+function isHlsDvrCustomData(customData: { hlsDvr?: unknown }) {
+    if (customData.hlsDvr !== true) return false;
+    logger.error(
+        "CCTV live media reached the DASH remux timeline path; skipping the remux conversion",
+        { customData }
+    );
+    return true;
+}
+
+/**
+ * The identities a DASH remux media generation reports under, as map keys.
+ *
+ * Both are namespaced by device so one device's media can never answer for
+ * another's, and the content key strips the cache-busting query the sender
+ * appends per remux restart (otherwise the media would not match its own id).
+ */
+function dashSessionKey(deviceId: string, mediaSessionId: number): string {
+    return `${deviceId}|session:${mediaSessionId}`;
+}
+
+function dashContentKey(
+    deviceId: string,
+    contentId: unknown
+): string | undefined {
+    const normalized = normalizeContentId(contentId);
+    return normalized === undefined
+        ? undefined
+        : `${deviceId}|content:${normalized}`;
+}
 
 import {
     currentRokuMediaIdentities,
@@ -27,7 +85,24 @@ import {
     terminateAllPlaybackCommands
 } from "./playbackCommand";
 
-async function logRokuDebug(message: string, data: unknown) {
+/**
+ * Name the device the way the user sees it, for log lines.
+ *
+ * These traces originally said "Roku ..." for every device, because the merge
+ * path started as Roku-only. The same code now also carries Chromecast statuses,
+ * and a log that calls a Chromecast a Roku sends debugging down the wrong path
+ * (the two have different session, timeline and capture semantics), so the label
+ * is derived from the device instead of assumed.
+ */
+export function deviceDebugLabel(device: ReceiverDevice | undefined) {
+    if (device?.deviceType === "roku") return "Roku";
+    const model = String(device?.modelName ?? "").trim();
+    if (!model) return "Cast";
+    // "Chromecast", "Chromecast Ultra", "Google Nest Mini", ...
+    return model;
+}
+
+async function logMediaDebug(message: string, data: unknown) {
     try {
         const opts = await options.getAll();
         if (!opts.cctvDebugEnabled && !opts.bilibiliDebugEnabled) return;
@@ -92,15 +167,29 @@ export default new (class extends TypedEventTarget<EventMap> {
         string,
         { ownerId: string; media: MediaInfo }
     >();
-    /** Last authoritative extension-side Roku media snapshot logged per device. */
+    /** Last authoritative extension-side media snapshot logged per device. */
     private lastRokuMergedMediaDebug = new Map<string, string>();
-    private rokuMediaTraceSequence = 0;
+    /**
+     * The presentation shift of the DASH remux generation each device currently
+     * reports on, keyed by that MEDIA's identities (see dashSessionKey /
+     * dashContentKey), never by the device alone.
+     *
+     * The media's own `customData.presentationOffsetSeconds` is the source of
+     * truth; this map exists because a periodic MEDIA_STATUS broadcast often
+     * carries only the stream's media snapshot with no customData, and a report
+     * with no shift to apply must not be guessed at. Entries for a device are
+     * replaced whenever that device's media states a new generation, so the table
+     * tracks one generation per device instead of growing.
+     */
+    private dashPresentationByMedia = new Map<string, number>();
+    /** Monotonic sequence for the per-device media traces (any device type). */
+    private mediaTraceSequence = 0;
     /** New Roku LOAD generation. Old ECP status is blocked until the real LOAD
      * media is registered and the next remote sample belongs to that LOAD. */
     private pendingRokuMediaLoads = new Set<string>();
     private rokuRealMediaReady = new Set<string>();
 
-    private traceRokuMedia(
+    private traceDeviceMedia(
         deviceId: string,
         event: string,
         data: Record<string, unknown> = {}
@@ -108,18 +197,21 @@ export default new (class extends TypedEventTarget<EventMap> {
         const device = this.receiverDevices.get(deviceId);
         const stored = this.rokuSessionMedia.get(deviceId);
         const displayed = device?.mediaStatus;
-        void logRokuDebug(`Roku media trace [${deviceId}] ${event}`, {
-            sequence: ++this.rokuMediaTraceSequence,
-            storedOwnerId: stored?.ownerId,
-            storedContentId: stored?.media.contentId,
-            displayedPlayerState: displayed?.playerState,
-            displayedCurrentTime: displayed?.currentTime,
-            displayedMediaSessionId: displayed?.mediaSessionId,
-            displayedContentId: displayed?.media?.contentId,
-            displayedDuration: displayed?.media?.duration,
-            displayedCustomData: displayed?.media?.customData,
-            ...data
-        });
+        void logMediaDebug(
+            `${deviceDebugLabel(device)} media trace [${deviceId}] ${event}`,
+            {
+                sequence: ++this.mediaTraceSequence,
+                storedOwnerId: stored?.ownerId,
+                storedContentId: stored?.media.contentId,
+                displayedPlayerState: displayed?.playerState,
+                displayedCurrentTime: displayed?.currentTime,
+                displayedMediaSessionId: displayed?.mediaSessionId,
+                displayedContentId: displayed?.media?.contentId,
+                displayedDuration: displayed?.media?.duration,
+                displayedCustomData: displayed?.media?.customData,
+                ...data
+            }
+        );
     }
 
     /**
@@ -162,6 +254,154 @@ export default new (class extends TypedEventTarget<EventMap> {
         };
     }
 
+    /**
+     * Receiver position -> page position for a Bilibili DASH remux.
+     *
+     * Both device families report an ABSOLUTE position, but on different clocks,
+     * and the difference is exactly the pad runway the bridge inserted:
+     *
+     *   Chromecast  the player's own clock over the generated playlist, which is
+     *               `page + presentationOffset` (it was loaded there).
+     *   Roku        the emulated session composes page time already, with an
+     *               offset of 0 by construction (its pad base IS its keyframe).
+     *
+     * So the mapping is one subtraction either way, and the media's own stated
+     * offset is the only input. `dashStart` must NOT be added: it is already
+     * inside both numbers.
+     *
+     * The offset comes from the media THIS report is about, through the media's
+     * own identity — never from a device-level value that a later media could
+     * inherit. Periodic MEDIA_STATUS broadcasts often carry only the stream's
+     * own media snapshot, so when a report drops `customData` the offset is taken
+     * from the identity map below, which is keyed the same way: by this device's
+     * mediaSessionId and by the media's base contentId. A report whose media is
+     * in neither place is NOT converted — guessing would move the popup by a
+     * whole runway, which is exactly the failure this replaces.
+     *
+     * Returns undefined when there is nothing to map — the media is not a DASH
+     * remux, it is the CCTV live relay, the identity is unknown, or the position
+     * is unusable — in which case the caller leaves the status as reported.
+     */
+    private adjustDashCurrentTime(
+        device: ReceiverDevice,
+        media: MediaInfo | undefined,
+        receiverTime: unknown,
+        mediaSessionId: unknown
+    ): number | undefined {
+        const customData =
+            media?.customData && typeof media.customData === "object"
+                ? (media.customData as {
+                      dashRemux?: unknown;
+                      dashStart?: unknown;
+                      hlsDvr?: unknown;
+                  })
+                : undefined;
+        if (customData?.dashRemux !== true) return undefined;
+        if (isHlsDvrCustomData(customData)) return undefined;
+
+        const identity = {
+            deviceId: device.id,
+            mediaSessionId:
+                typeof mediaSessionId === "number" ? mediaSessionId : undefined,
+            contentId: media?.contentId
+        };
+        // The media's own statement wins and refreshes the identity map, so a
+        // later report that dropped customData still resolves to the same shift.
+        const declaredOffset = declaredPresentationOffset(customData);
+        if (declaredOffset !== undefined) {
+            this.rememberDashPresentation(identity, declaredOffset);
+        }
+        const presentationOffset =
+            declaredOffset ?? this.recallDashPresentation(identity);
+        if (presentationOffset === undefined) {
+            void logMediaDebug("DASH current time NOT mapped (unknown identity)", {
+                deviceId: device.id,
+                deviceLabel: deviceDebugLabel(device),
+                rawStatusCurrentTime: Number(receiverTime ?? 0),
+                mediaSessionId: identity.mediaSessionId,
+                mediaContentId: identity.contentId
+            });
+            return undefined;
+        }
+
+        const raw = Number(receiverTime ?? 0);
+        if (!Number.isFinite(raw)) return undefined;
+        const pageTime = Math.max(0, raw - presentationOffset);
+        void logMediaDebug("DASH current time mapped", {
+            deviceId: device.id,
+            deviceLabel: deviceDebugLabel(device),
+            rawStatusCurrentTime: raw,
+            mediaDashStart: Number(customData?.dashStart),
+            declaredOffset,
+            mediaSessionId: identity.mediaSessionId,
+            chosenOffset: presentationOffset,
+            publishedCurrentTime: pageTime
+        });
+        return pageTime;
+    }
+
+    /**
+     * Record the presentation shift stated by ONE media generation, keyed by the
+     * identities that generation reports under.
+     *
+     * Keyed by media, not by device: a device-level slot is what allowed a
+     * previous remux's 32s runway to be subtracted from the next remux's
+     * position. A generation whose media streams and ids are known can be looked
+     * up from a report that carries either.
+     */
+    private rememberDashPresentation(
+        identity: {
+            deviceId: string;
+            mediaSessionId?: number;
+            contentId?: string;
+        },
+        offsetSeconds: number
+    ) {
+        const normalized =
+            Number.isFinite(offsetSeconds) && offsetSeconds > 0
+                ? offsetSeconds
+                : 0;
+        const records: Array<[string, number]> = [];
+        const sessionKey =
+            identity.mediaSessionId === undefined
+                ? undefined
+                : dashSessionKey(identity.deviceId, identity.mediaSessionId);
+        if (sessionKey) records.push([sessionKey, normalized]);
+        const contentKey = dashContentKey(identity.deviceId, identity.contentId);
+        if (contentKey) records.push([contentKey, normalized]);
+        // Only KEEP one adapter identity per device and per generation: the maps
+        // are bounded by clearing this device's entries first, so a long
+        // multi-item session cannot accumulate a table of dead media.
+        for (const key of this.dashPresentationByMedia.keys()) {
+            if (key.startsWith(`${identity.deviceId}|`)) {
+                this.dashPresentationByMedia.delete(key);
+            }
+        }
+        for (const [key, value] of records) {
+            this.dashPresentationByMedia.set(key, value);
+        }
+    }
+
+    private recallDashPresentation(identity: {
+        deviceId: string;
+        mediaSessionId?: number;
+        contentId?: string;
+    }): number | undefined {
+        const sessionKey =
+            identity.mediaSessionId === undefined
+                ? undefined
+                : dashSessionKey(identity.deviceId, identity.mediaSessionId);
+        if (sessionKey !== undefined) {
+            const found = this.dashPresentationByMedia.get(sessionKey);
+            if (found !== undefined) return found;
+        }
+        const contentKey = dashContentKey(identity.deviceId, identity.contentId);
+        if (contentKey !== undefined) {
+            return this.dashPresentationByMedia.get(contentKey);
+        }
+        return undefined;
+    }
+
     /** Log only the final media state consumed by the popup, after session/relay
      * metadata has been merged into the device status. */
     private logRokuMergedMedia(
@@ -188,7 +428,12 @@ export default new (class extends TypedEventTarget<EventMap> {
         const key = JSON.stringify(snapshot);
         if (this.lastRokuMergedMediaDebug.get(deviceId) === key) return;
         this.lastRokuMergedMediaDebug.set(deviceId, key);
-        void logRokuDebug(`Roku merged media [${deviceId}]`, snapshot);
+        void logMediaDebug(
+            `${deviceDebugLabel(
+                this.receiverDevices.get(deviceId)
+            )} merged media [${deviceId}]`,
+            snapshot
+        );
     }
 
     beginRokuMediaLoad(deviceId: string) {
@@ -211,7 +456,7 @@ export default new (class extends TypedEventTarget<EventMap> {
         this.pendingRokuMediaLoads.add(deviceId);
         this.rokuRealMediaReady.delete(deviceId);
         this.rokuSessionMedia.delete(deviceId);
-        this.traceRokuMedia(deviceId, "load-generation-began");
+        this.traceDeviceMedia(deviceId, "load-generation-began");
 
         const device = this.receiverDevices.get(deviceId);
         if (!device?.mediaStatus) return;
@@ -232,7 +477,7 @@ export default new (class extends TypedEventTarget<EventMap> {
     cancelRokuMediaLoad(deviceId: string) {
         this.pendingRokuMediaLoads.delete(deviceId);
         this.rokuRealMediaReady.delete(deviceId);
-        this.traceRokuMedia(deviceId, "load-generation-cancelled");
+        this.traceDeviceMedia(deviceId, "load-generation-cancelled");
     }
 
     /** Stores (or clears, with null) a Roku session's LOAD media. */
@@ -241,7 +486,7 @@ export default new (class extends TypedEventTarget<EventMap> {
         ownerId: string,
         media: MediaInfo | null
     ) {
-        this.traceRokuMedia(deviceId, "session-media-input", {
+        this.traceDeviceMedia(deviceId, "session-media-input", {
             inputOwnerId: ownerId,
             inputIsClear: media === null,
             inputContentId: media?.contentId,
@@ -329,7 +574,7 @@ export default new (class extends TypedEventTarget<EventMap> {
             media: mergedMedia
         };
         device.mediaStatus = status;
-        this.traceRokuMedia(deviceId, "session-media-published", {
+        this.traceDeviceMedia(deviceId, "session-media-published", {
             inputOwnerId: ownerId,
             inputWasOptimistic:
                 (
@@ -458,6 +703,35 @@ export default new (class extends TypedEventTarget<EventMap> {
     /** Gets a device by ID. */
     getDeviceById(deviceId: string) {
         return this.receiverDevices.get(deviceId);
+    }
+
+    /**
+     * Note that a device's CURRENT media generation carries this presentation
+     * offset: how far its reported position sits ahead of the page's video time.
+     *
+     * Scoped to the media the device is reporting on right now, never to the
+     * device: a device-level slot outlives the media it was set for, which is how
+     * a previous remux's runway came to be subtracted from the next remux's
+     * position. It is only a memo of the media's own statement (the media's
+     * `customData.presentationOffsetSeconds` remains the source of truth and
+     * overwrites this on sight), for the reports that arrive without customData.
+     */
+    setDashPresentationOffset(deviceId: string, seconds: unknown) {
+        const device = this.receiverDevices.get(deviceId);
+        // A device that is not in the list needs no entry: the offset only ever
+        // converts a position this device reports, and a discovery reconnect that
+        // re-adds the device is followed by a fresh LOAD, which states its own.
+        if (!device) return;
+        const status = device.mediaStatus;
+        if (!status?.media) return;
+        this.rememberDashPresentation(
+            {
+                deviceId,
+                mediaSessionId: status.mediaSessionId,
+                contentId: status.media.contentId
+            },
+            Number(seconds)
+        );
     }
 
     /** Sends an NS_RECEIVER message to a given device. */
@@ -685,7 +959,7 @@ export default new (class extends TypedEventTarget<EventMap> {
             case "main:rokuStatusMediaDebug": {
                 // Intentionally retain the message path for future architecture
                 // work, but hide this process-local snapshot from the console.
-                // "Roku merged media" is the authoritative extension-side view.
+                // "<device> merged media" is the authoritative extension-side
                 break;
                 // Always-on and flattened: Firefox collapses nested
                 // MediaInformation / customData as `{…}` in the preview,
@@ -705,7 +979,7 @@ export default new (class extends TypedEventTarget<EventMap> {
                 // fxcastSession marker or client-host fallback) and whether
                 // the session media actually got registered for the popup.
                 const { deviceId, event, ...rest } = message.data;
-                void logRokuDebug(
+                void logMediaDebug(
                     `Roku session media [${deviceId}] ${event}`,
                     rest
                 );
@@ -812,15 +1086,19 @@ export default new (class extends TypedEventTarget<EventMap> {
                 if (!device) break;
                 if (this.pendingRokuMediaLoads.has(deviceId)) {
                     if (!this.rokuRealMediaReady.has(deviceId)) {
-                        this.traceRokuMedia(deviceId, "remote-status-blocked", {
-                            inputPlayerState: status.playerState,
-                            inputCurrentTime: status.currentTime
-                        });
+                        this.traceDeviceMedia(
+                            deviceId,
+                            "remote-status-blocked",
+                            {
+                                inputPlayerState: status.playerState,
+                                inputCurrentTime: status.currentTime
+                            }
+                        );
                         break;
                     }
                     this.pendingRokuMediaLoads.delete(deviceId);
                     this.rokuRealMediaReady.delete(deviceId);
-                    this.traceRokuMedia(
+                    this.traceDeviceMedia(
                         deviceId,
                         "first-real-load-status-accepted",
                         {
@@ -829,7 +1107,7 @@ export default new (class extends TypedEventTarget<EventMap> {
                         }
                     );
                 }
-                this.traceRokuMedia(deviceId, "remote-status-input", {
+                this.traceDeviceMedia(deviceId, "remote-status-input", {
                     inputPlayerState: status.playerState,
                     inputCurrentTime: status.currentTime,
                     inputMediaSessionId: status.mediaSessionId,
@@ -850,24 +1128,7 @@ export default new (class extends TypedEventTarget<EventMap> {
                               status.media?.duration
                           )
                         : undefined;
-                if (mergedSessionMedia) {
-                    status.media = mergedSessionMedia;
-                    const customData =
-                        mergedSessionMedia.customData &&
-                        typeof mergedSessionMedia.customData === "object"
-                            ? (mergedSessionMedia.customData as {
-                                  dashRemux?: unknown;
-                                  dashStart?: unknown;
-                              })
-                            : undefined;
-                    if (customData?.dashRemux === true) {
-                        const dashStart = Number(customData.dashStart);
-                        if (Number.isFinite(dashStart)) {
-                            status.currentTime =
-                                dashStart + (status.currentTime ?? 0);
-                        }
-                    }
-                }
+                if (mergedSessionMedia) status.media = mergedSessionMedia;
 
                 if (device.mediaStatus) {
                     // Periodic MEDIA_STATUS broadcasts can carry a
@@ -915,7 +1176,37 @@ export default new (class extends TypedEventTarget<EventMap> {
                     device.mediaStatus = status;
                 }
 
-                this.traceRokuMedia(deviceId, "remote-status-published");
+                // Receiver position -> page position, on the MERGED status.
+                //
+                // It has to be here, after the merge, because the merge is what
+                // gives a stream-derived report the LOAD-time metadata: periodic
+                // MEDIA_STATUS broadcasts often carry only the stream's own media
+                // snapshot, so `currentTime` arrives as the padded clock while
+                // `customData` is absent from THAT payload. Converting the
+                // incoming status instead meant every later report bypassed the
+                // conversion and the popup jumped a whole pad runway forward once
+                // playback started.
+                //
+                // The shift is resolved from the MEDIA's identity (see
+                // adjustDashCurrentTime), so a report from a previous generation
+                // is left unconverted rather than moved by a runway that was never
+                // its own.
+                //
+                // Idempotent by marker: the conversion mutates the status it is
+                // given, and a status can pass through here more than once.
+                if (!markDashTimeConverted(device.mediaStatus)) {
+                    const adjusted = this.adjustDashCurrentTime(
+                        device,
+                        device.mediaStatus.media,
+                        device.mediaStatus.currentTime,
+                        device.mediaStatus.mediaSessionId
+                    );
+                    if (adjusted !== undefined) {
+                        device.mediaStatus.currentTime = adjusted;
+                    }
+                }
+
+                this.traceDeviceMedia(deviceId, "remote-status-published");
                 this.logRokuMergedMedia(
                     deviceId,
                     device.mediaStatus,

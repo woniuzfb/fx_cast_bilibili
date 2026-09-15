@@ -77,6 +77,7 @@
         optimisticRelayMedia?: boolean;
         pageDuration?: number;
         dashStart?: number;
+        presentationOffsetSeconds?: number;
     } => {
         const customData = status.media?.customData;
         return customData && typeof customData === "object"
@@ -87,6 +88,7 @@
                   optimisticRelayMedia?: boolean;
                   pageDuration?: number;
                   dashStart?: number;
+                  presentationOffsetSeconds?: number;
               })
             : {};
     })();
@@ -117,7 +119,13 @@
     $: {
         const nextTimeline = updatePopupMediaTimeline(timeline, {
             mediaId,
-            currentTime: device.mediaStatus?.currentTime,
+            // ALREADY page time: deviceManager is the single place that converts
+            // a receiver position out of its presentation timeline (see
+            // dashPageTime there). Converting again here subtracted the pad
+            // runway twice, which put the popup 32s behind playback — and every
+            // control that reads this timeline (the pause button included) then
+            // looked like a position change and restarted the remux.
+            currentTime: device.mediaStatus?.currentTime ?? 0,
             duration: reportedDuration,
             now: Date.now(),
             // Raw contentId (cache-buster intact) flags DASH remux reloads that

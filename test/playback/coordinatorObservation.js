@@ -228,6 +228,76 @@ async function runScenario(mod, PlayerState, clock, label, observedState) {
     return { label, device, afterDispatch, afterObservation, afterWatchdog };
 }
 
+/**
+ * The receiver moved a SECOND time, back to the state the command asked for.
+ *
+ * Measured shape:
+ *
+ *   PAUSE pending, receiver seen PLAYING  (opposite recorded -> button PAUSE)
+ *   receiver then seen PAUSED             (-> button becomes PLAY again)
+ *
+ * Worth pinning as a SEQUENCE, with one caveat stated rather than implied: the
+ * second sample MATCHES the intent, so the coordinator terminates the command on
+ * it and the affordance then derives from the observed state on the ordinary
+ * terminal path. This row therefore does not separate "follows the live
+ * observation" from "follows the recorded classification" — it asserts the end
+ * result of the whole sequence, so a change that left a matched command active
+ * without updating the affordance would fail here.
+ */
+async function runReturnScenario(mod, PlayerState, clock) {
+    const device = makeDevice(PlayerState);
+    mod.setPlaybackDeviceLookup(id => (id === device.id ? device : undefined));
+    mod.configurePlaybackCommands({
+        onViewChanged: () => {},
+        deviceRouteAttempt: () => true
+    });
+    const generation = mod.nextRokuLoadGeneration(device.id);
+    mod.setRokuMediaIdentityFields(device.id, {
+        contentId: "harness-content",
+        ownerId: "session:harness",
+        loadGeneration: generation
+    });
+
+    await mod.dispatchPlaybackCommand(
+        device,
+        "PAUSE",
+        mediaStatus(PlayerState, PlayerState.PLAYING, 10)
+    );
+    const dispatchedAt =
+        device.playbackCommand.receiverDispatchStartedAt ?? 0;
+
+    const oppositeStatus = mediaStatus(PlayerState, PlayerState.PLAYING, 12);
+    mod.acceptReceiverObservation(
+        device.id,
+        oppositeStatus,
+        { source: "ecp-poll", pollStartedAt: dispatchedAt + 1, sequence: 2 },
+        Date.now(),
+        generation
+    );
+    const atOpposite = {
+        lastObservation: device.playbackCommand.lastObservation,
+        intent: mod.nextPlaybackIntentFor(device, oppositeStatus)
+    };
+
+    // The receiver answers the pending PAUSE after all, while the SAME command is
+    // still active (the coordinator has not terminated it yet).
+    const returnedStatus = mediaStatus(PlayerState, PlayerState.PAUSED, 14);
+    mod.acceptReceiverObservation(
+        device.id,
+        returnedStatus,
+        { source: "ecp-poll", pollStartedAt: dispatchedAt + 2000, sequence: 3 },
+        Date.now(),
+        generation
+    );
+    const atReturned = {
+        lifecycle: device.playbackCommand && device.playbackCommand.lifecycle,
+        lastObservation: device.playbackCommand.lastObservation,
+        intent: mod.nextPlaybackIntentFor(device, returnedStatus)
+    };
+
+    return { device, atOpposite, atReturned };
+}
+
 async function main() {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-playback-"));
     const bundlePath = path.join(workDir, "playback.cjs");
@@ -252,6 +322,7 @@ async function main() {
         "PAUSE pending, receiver observed PLAYING (opposite)",
         states.PLAYING
     );
+    const returned = await runReturnScenario(mod, states, clock);
     clock.restore();
 
     console.log("\n=== scenario facts ===");
@@ -261,6 +332,9 @@ async function main() {
         console.log("  after sample:  ", JSON.stringify(r.afterObservation));
         console.log("  after watchdog:", JSON.stringify(r.afterWatchdog));
     }
+    console.log("\n[PAUSE pending, receiver seen PLAYING then PAUSED]");
+    console.log("  at opposite:  ", JSON.stringify(returned.atOpposite));
+    console.log("  after return: ", JSON.stringify(returned.atReturned));
 
     console.log("\n=== assertions ===");
     check(
@@ -291,6 +365,13 @@ async function main() {
                 intent: opposite.afterObservation.intent,
                 lastObservation: opposite.afterObservation.lastObservation
             })
+        );
+        check(
+            "post-fix: the whole sequence lands on the observed state - opposite offers PAUSE, the receiver answering PAUSED offers PLAY again",
+            returned.atOpposite.intent === "PAUSE" &&
+                returned.atOpposite.lastObservation === "opposite" &&
+                returned.atReturned.intent === "PLAY",
+            JSON.stringify(returned)
         );
     } else {
         check(
