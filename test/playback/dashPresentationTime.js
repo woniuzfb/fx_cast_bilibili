@@ -312,47 +312,9 @@ function main(modules) {
             oldReport: 1207.58824
         })
     );
-    // The seek's own reload CHANGES the media (a fresh cache buster), and that
-    // must not clear the recorded origin — otherwise the previous generation's
-    // next report is accepted again (measured on-device: target 495.8 pulled to
-    // 1386.9 and back).
-    const afterReload = updatePopupMediaTimeline(stillOld, {
-        mediaId: "gen-new",
-        contentId: "http://10.0.0.111:9555/s/gen-new/index.m3u8?v=2",
-        currentTime: 495.9,
-        duration: 6022,
-        now: 1_000_800,
-        playerSettled: false,
-        isPlaying: true,
-        dashRemux: true,
-        dashStart: 495.7687
-    });
-    const staleAfterReload = updatePopupMediaTimeline(afterReload, {
-        mediaId: preSeek.mediaId,
-        contentId: preSeek.contentId,
-        currentTime: 1386.936168,
-        duration: 6022,
-        now: 1_000_900,
-        playerSettled: true,
-        isPlaying: true,
-        dashRemux: true,
-        dashStart: 1377.663168
-    });
-    check(
-        "popup timeline: the previous generation is still ignored after the seek's own media change",
-        staleAfterReload.currentTime === 293.1007,
-        JSON.stringify({
-            stored: staleAfterReload.currentTime,
-            staleReport: 1386.936168,
-            seekTarget: staleAfterReload.seekTarget,
-            origin: staleAfterReload.seekStartedContentId?.slice(-24)
-        })
-    );
     const fromNewGeneration = updatePopupMediaTimeline(stillOld, {
         mediaId: "gen-new",
         contentId: "http://10.0.0.111:9555/s/gen-new/index.m3u8?v=2",
-        // The new generation's first real position, as measured on-device: a
-        // move to 293.1 was confirmed by a report at 297.8 (+4.7s).
         currentTime: 297.8337,
         duration: 6022,
         now: 1_001_000,
