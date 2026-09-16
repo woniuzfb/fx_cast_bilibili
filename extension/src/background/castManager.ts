@@ -873,7 +873,19 @@ async function handleBridgeMessage(instance: CastInstance, message: Message) {
         // LOAD media replaces this entry once consumption is observed; a
         // relay stop/error clears it (see mediaCast:mediaServerStopped /
         // mediaCast:mediaServerError below).
-        if (event === "synthetic DVR playlist constructed") {
+        // A Chromecast's popup bar comes from the receiver's own media status
+        // (published over the cast session), which never replaces this entry:
+        // writing it for a cast device left a permanent optimisticRelayMedia
+        // (and its frozen timeline) behind. Only the Roku session — which needs
+        // the early bar because its real LOAD lands seconds later — gets it.
+        const relayDeviceId = liveRelayDeviceByRequestId.get(requestId);
+        const relayIsRoku =
+            relayDeviceId !== undefined &&
+            deviceManager.getDeviceById(relayDeviceId)?.deviceType === "roku";
+        if (relayDeviceId && !relayIsRoku) {
+            deviceManager.clearOptimisticRelayMedia(relayDeviceId);
+        }
+        if (event === "synthetic DVR playlist constructed" && relayIsRoku) {
             const deviceId = liveRelayDeviceByRequestId.get(requestId);
             const totalDurationSeconds = rest.totalDurationSeconds;
             if (
@@ -1636,10 +1648,13 @@ function beginRokuSessionLoad(
     }
 
     if (rokuLoadAnnouncedSeqs.has(seq)) {
-        logger.info("Roku media load already announced for this session start", {
-            deviceId: device.id,
-            seq
-        });
+        logger.info(
+            "Roku media load already announced for this session start",
+            {
+                deviceId: device.id,
+                seq
+            }
+        );
         return undefined;
     }
 

@@ -83,6 +83,7 @@ function main(modules) {
         createDashPresentation,
         identityPresentation,
         declaredPresentationOffset,
+        estimatePopupMediaTime,
         updatePopupMediaTimeline
     } = modules;
 
@@ -241,6 +242,100 @@ function main(modules) {
         /dashPresentationByMedia/.test(backgroundSource) &&
             !/dashPresentationOffsetSeconds/.test(backgroundSource),
         "deviceManager still carries a device-level presentation offset"
+    );
+
+    // ---- the CCTV optimistic bar must stop being optimistic ---------------
+    //
+    // The live relay publishes an optimistic media entry so a Roku's bar
+    // appears before the receiver consumes the stream. A CHROMECAST's real
+    // media arrives over the cast session and never replaces that entry, so the
+    // entry's customData survived for the whole session — and with it
+    // optimisticRelayMedia, which freezes the popup's elapsed clock. Symptom:
+    // the bar showed a position and never moved again.
+    const dvrSample = {
+        mediaId: "relay:req-1",
+        currentTime: 32,
+        duration: 7232,
+        now: 1_000_000,
+        playerSettled: true,
+        isPlaying: true,
+        hlsDvr: true
+    };
+    const optimisticTimeline = updatePopupMediaTimeline(
+        { mediaId: "", currentTime: 0, updatedAt: 0, duration: 0 },
+        dvrSample
+    );
+    check(
+        "CCTV bar: a settled hlsDvr position anchors the timeline",
+        optimisticTimeline.currentTime === 32 &&
+            optimisticTimeline.updatedAt === dvrSample.now,
+        JSON.stringify(optimisticTimeline)
+    );
+    check(
+        "CCTV bar: the elapsed clock advances while the receiver plays",
+        estimatePopupMediaTime(
+            optimisticTimeline,
+            true,
+            dvrSample.now + 5000
+        ) === 37,
+        JSON.stringify({
+            at0: estimatePopupMediaTime(
+                optimisticTimeline,
+                true,
+                dvrSample.now
+            ),
+            at5: estimatePopupMediaTime(
+                optimisticTimeline,
+                true,
+                dvrSample.now + 5000
+            )
+        })
+    );
+    check(
+        "CCTV bar: the clock is FROZEN while the media is flagged optimistic (why a stale flag shows as a dead bar)",
+        estimatePopupMediaTime(
+            optimisticTimeline,
+            false,
+            dvrSample.now + 5000
+        ) === 32,
+        JSON.stringify({
+            frozen: estimatePopupMediaTime(
+                optimisticTimeline,
+                false,
+                dvrSample.now + 5000
+            )
+        })
+    );
+    // The cleanup the fix performs: the optimistic entry is dropped once the
+    // receiver's own media lands, so the popup's flag turns false and the clock
+    // runs. Asserted at the source level because the decision lives in
+    // background wiring (castManager + deviceManager), not in the timeline.
+    const castManagerSource = fs.readFileSync(
+        path.join(extensionSrc, "background/castManager.ts"),
+        "utf8"
+    );
+    const deviceManagerSource = fs.readFileSync(
+        path.join(extensionSrc, "background/deviceManager.ts"),
+        "utf8"
+    );
+    check(
+        "CCTV bar: the optimistic relay media is only registered for Roku devices",
+        /getDeviceById\(relayDeviceId\)\?\.deviceType === "roku"/.test(
+            castManagerSource
+        ) &&
+            /synthetic DVR playlist constructed" && relayIsRoku/.test(
+                castManagerSource
+            ),
+        "the optimistic bar is registered for cast devices again"
+    );
+    check(
+        "CCTV bar: a cast device's own media clears the optimistic entry",
+        /clearOptimisticRelayMedia\(device\.id\);/.test(deviceManagerSource) &&
+            /clearOptimisticRelayMedia\(deviceId: string\)/.test(
+                deviceManagerSource
+            ) &&
+            /deviceType === "roku"\) return;/.test(deviceManagerSource),
+        "nothing clears the stale optimistic entry"
     );
 }
 

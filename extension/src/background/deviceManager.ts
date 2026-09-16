@@ -499,6 +499,37 @@ export default new (class extends TypedEventTarget<EventMap> {
         );
     }
 
+    /**
+     * Drops the optimistic early session media registered for the CCTV live
+     * relay (customData.optimisticRelayMedia), leaving a real LOAD's entry
+     * alone.
+     *
+     * The optimistic entry exists so a Roku Session's popup bar appears before
+     * the Roku starts consuming the relay. A CHROMECAST's real media arrives
+     * over the cast session instead (main:receiverDeviceMediaStatusUpdated),
+     * which never touches this map — so the optimistic write stayed for the
+     * whole session, kept its customData alive through that handler's
+     * "newMedia.customData == null" preservation, and the popup froze its
+     * timeline on it (isOptimisticRelayMedia blocks the elapsed clock), which
+     * is the "progress bar never moves" symptom.
+     */
+    clearOptimisticRelayMedia(deviceId: string) {
+        // Roku keeps it: its real LOAD arrives seconds later and this entry is
+        // the only thing putting a bar on screen before then.
+        if (this.receiverDevices.get(deviceId)?.deviceType === "roku") return;
+        const state = this.rokuSessionMedia.get(deviceId);
+        if (!state) return;
+        const customData =
+            state.media.customData && typeof state.media.customData === "object"
+                ? (state.media.customData as { optimisticRelayMedia?: unknown })
+                : undefined;
+        if (customData?.optimisticRelayMedia !== true) return;
+        this.rokuSessionMedia.delete(deviceId);
+        this.traceDeviceMedia(deviceId, "optimistic-relay-media-cleared", {
+            ownerId: state.ownerId
+        });
+    }
+
     cancelRokuMediaLoad(deviceId: string) {
         this.pendingRokuMediaLoads.delete(deviceId);
         this.rokuRealMediaReady.delete(deviceId);
@@ -1221,6 +1252,12 @@ export default new (class extends TypedEventTarget<EventMap> {
                     if (status.playerState === PlayerState.IDLE) {
                         delete device.mediaStatus.media;
                     }
+                    // The receiver's OWN media is authoritative: drop the
+                    // optimistic relay entry so its customData cannot keep
+                    // freezing the popup timeline (see
+                    // clearOptimisticRelayMedia). Guarded by the device id, so a
+                    // cast device never keeps Roku session media alive.
+                    this.clearOptimisticRelayMedia(device.id);
                 } else {
                     device.mediaStatus = status;
                 }
