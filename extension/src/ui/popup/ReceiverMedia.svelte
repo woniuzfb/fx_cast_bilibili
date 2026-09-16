@@ -432,14 +432,9 @@
         const target = clampPopupSeek(position, timeline.duration);
         // Optimistic update with a confirmation window: the receiver keeps
         // reporting old-stream positions during the debounce + remux
-        // restart, and plain optimistic updates would bounce back. The media it
-        // was showing is handed over too, so those old-generation reports can be
-        // recognized instead of fighting the new progress on the bar.
+        // restart, and plain optimistic updates would bounce back.
         const seekedAt = Date.now();
-        timeline = createSeekedTimeline(timeline, target, seekedAt, {
-            contentId: timeline.contentId,
-            mediaId: timeline.mediaId
-        });
+        timeline = createSeekedTimeline(timeline, target, seekedAt);
         currentTime = target;
         dispatch("seek", { position: target });
     }

@@ -13,21 +13,6 @@ export interface PopupMediaTimeline {
     seekTarget?: number;
     seekExpiresAt?: number;
     /**
-     * The raw contentId (cache-buster intact) that was on screen when this seek
-     * started.
-     *
-     * A seek restarts the bridge remux, and the receiver keeps reporting the
-     * OLD generation's positions for a while after the new LOAD is sent (it is
-     * still playing the old playlist, and its relaunch takes seconds). Those
-     * reports are not the target and not near it, so the confirm window could
-     * not tell them apart from the new generation's: measured on-device
-     * (2026-09-17 02:25) the bar jumped 293.1 -> 1207.6 -> 297.8, i.e. the old
-     * and the new progress pulling at each other. Any report still carrying
-     * THIS generation is ignored until the seek confirms or the window expires.
-     */
-    seekStartedContentId?: string;
-    seekStartedMediaId?: string;
-    /**
      * Raw receiver contentId (with the per-remux cache-busting query intact).
      * The sender appends a fresh `?v=<timestamp>` on every DASH remux restart,
      * so a change here — while the *stripped* mediaId stays the same — means a
@@ -135,10 +120,7 @@ const NEAR_ZERO_RELEASE_MS = 3000;
 export function createSeekedTimeline(
     previous: PopupMediaTimeline,
     target: number,
-    now: number,
-    /** The media the seek was issued FROM, so its own later reports can be told
-     *  apart from the new generation's (see seekStartedContentId). */
-    startedFrom?: { contentId?: string; mediaId?: string }
+    now: number
 ): PopupMediaTimeline {
     return {
         ...previous,
@@ -146,8 +128,6 @@ export function createSeekedTimeline(
         updatedAt: now,
         seekTarget: target,
         seekExpiresAt: now + SEEK_CONFIRM_WINDOW_MS,
-        seekStartedContentId: startedFrom?.contentId,
-        seekStartedMediaId: startedFrom?.mediaId,
         // A popup-initiated seek supersedes any external reload hold: it knows
         // the exact target, so drop the target-less hold to avoid two freeze
         // modes fighting over the same reload.
@@ -262,27 +242,16 @@ export function updatePopupMediaTimeline(
             (sample.hlsDvr !== true && sample.dashRemux !== true));
     if (positionReportUsable) {
         if (seekPending) {
-            // A report from the generation the seek started from is the OLD
-            // media still playing: it can neither confirm nor correct the seek,
-            // and accepting it is exactly the "two positions pulling" flicker.
-            const fromSeekOrigin =
-                (sample.contentId !== undefined &&
-                    sample.contentId === previous.seekStartedContentId) ||
-                (sample.mediaId !== undefined &&
-                    sample.mediaId === previous.seekStartedMediaId);
             // Only a report near the target confirms the seek; older stream
             // positions are stale and must not yank the bar back.
             if (
-                !fromSeekOrigin &&
                 Math.abs(currentTime - (previous.seekTarget as number)) <=
-                    SEEK_CONFIRM_TOLERANCE_S
+                SEEK_CONFIRM_TOLERANCE_S
             ) {
                 next.currentTime = currentTime;
                 next.updatedAt = sample.now;
                 next.seekTarget = undefined;
                 next.seekExpiresAt = undefined;
-                next.seekStartedContentId = undefined;
-                next.seekStartedMediaId = undefined;
                 next.reloadHoldTime = undefined;
                 next.reloadExpiresAt = undefined;
             }
