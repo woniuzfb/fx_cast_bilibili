@@ -199,6 +199,13 @@ export default class RokuSession {
      * nothing reads - and an `expiresAt` on the object invites the reader to
      * think expiry is evaluated from it, which is not how this one works.
      */
+    /**
+     * Whether the item this session last LOADed has been observed being
+     * consumed. Until then this session cannot state a position: the only one
+     * it has is the PREVIOUS item's, which the device is still playing (see
+     * buildMediaStatus).
+     */
+    private loadedMediaConsumed = false;
     private pendingPlayerIntent?: {
         intent: "PLAY" | "PAUSE";
         requestedState: PlayerState;
@@ -533,6 +540,9 @@ export default class RokuSession {
             // Every LOAD is a new media session (mirrors the real Default
             // Media Receiver; see the mediaSessionId field note).
             this.mediaSessionId++;
+            // Not consumed until the device is seen on the new item (or the
+            // non-deferred path answers the LOAD, below).
+            this.loadedMediaConsumed = false;
             this.lastPosition = startPosition;
             this.dashClockUpdatedAt = undefined;
             this.lastLaunchAt = Date.now();
@@ -566,6 +576,7 @@ export default class RokuSession {
             } else {
                 // Non-live Roku loads have no relay-consumption deferral, so the
                 // complete media metadata can be exposed immediately.
+                this.loadedMediaConsumed = true;
                 registerRokuSessionMedia(
                     this.receiverDevice.id,
                     this.sessionId,
@@ -683,6 +694,7 @@ export default class RokuSession {
     /** Roku has started the newly launched item, or the safety fallback fired. */
     private onConsumeStarted(fallback = false) {
         if (!this.awaitingConsume) return;
+        this.loadedMediaConsumed = true;
         this.clearDeferredConsume();
         this.consumeStartedAt = fallback ? 0 : Date.now();
         this.playerState = this.deferredAutoplay
@@ -1020,16 +1032,38 @@ export default class RokuSession {
         // Preserve Bilibili's full page duration for Roku DASH; other Roku media,
         // including CCTV, retain the existing ECP-duration behavior.
         const isDashRemux = isDashRemuxMedia(this.loadedMedia);
-        const media =
-            this.loadedMedia && this.lastDuration !== undefined && !isDashRemux
-                ? { ...this.loadedMedia, duration: this.lastDuration }
-                : this.loadedMedia;
+        // A LOAD whose new item the device has not started consuming yet: the
+        // only position this session could state is the OLD item's, which the
+        // receiver is still playing. Reporting it as the CURRENT media's
+        // position is what published whole-page-time jumps during a DASH remux
+        // seek — the extension converted the previous generation's position
+        // with the new LOAD's identity for the ~11s the launch took (measured
+        // on-device 2026-09-17 02:36: old media at page 1386 while the page had
+        // moved to 495), and every consumer downstream (popup bar, drift
+        // correction, seek math) followed that wrong value.
+        //
+        // So: while the launch is pending, state the position as null. The
+        // previous generation's media is not the current one either, so it is
+        // not reported as `media`.
+        const awaitingNewItem =
+            this.awaitingConsume && !this.loadedMediaConsumed;
+        const media = awaitingNewItem
+            ? undefined
+            : this.loadedMedia &&
+              this.lastDuration !== undefined &&
+              !isDashRemux
+            ? { ...this.loadedMedia, duration: this.lastDuration }
+            : this.loadedMedia;
         return {
             mediaSessionId: this.mediaSessionId,
             media,
             playbackRate: 1,
-            playerState: this.effectivePlayerState(),
-            currentTime: isDashRemuxMedia(this.loadedMedia)
+            playerState: awaitingNewItem
+                ? PlayerState.BUFFERING
+                : this.effectivePlayerState(),
+            currentTime: awaitingNewItem
+                ? null
+                : isDashRemuxMedia(this.loadedMedia)
                 ? Number(
                       (
                           this.loadedMedia?.customData as {
