@@ -212,6 +212,13 @@ function applyToModel(state, op) {
             next.pageTime = op.target;
             next.desiredPageTime = op.target;
             next.pageControlsAttached = false;
+            // A new item means a new page element, and the site's player starts it
+            // playing (it is what the remux is captured from). So the page is no
+            // longer paused, and a PAGE_PLAY after this is not a transition: the
+            // browser fires no `play` event for a page that is already playing, and
+            // the sender therefore sees nothing to forward. A QUALITY_CHANGE keeps
+            // the same element, so it leaves this alone.
+            next.pagePlaying = true;
             expect.startsGeneration = true;
             expect.generationTarget = op.target;
             expect.rule = "item-change-loads-the-requested-position";

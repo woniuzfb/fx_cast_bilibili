@@ -709,6 +709,17 @@ export default class MediaSender {
         mediaSessionId?: number;
         playerState: string;
     };
+    /**
+     * What the receiver reported BEFORE the report this tick is handling.
+     *
+     * Recorded once per tick, at the tick's own entry (see the call site), because
+     * the decision that consumes it lives deeper in the flow - behind windows that
+     * are allowed to suppress the ACTION but never the memory.
+     */
+    private previousReceiverReport?: {
+        mediaSessionId?: number;
+        playerState: string;
+    };
 
     /**
      * Remember what the receiver just reported, for the NEXT report to be compared
@@ -757,9 +768,11 @@ export default class MediaSender {
      *     just loaded. On a Roku that relaunch auto-plays regardless of
      *     `autoplay`, so adopting it would overwrite a pause the user did ask for
      *     with the device's own startup state.
-     *   - nothing of ours may be holding the page (coordinator transaction, seek
-     *     priming, item transition): the receiver's state there is that
-     *     transaction's echo, not the user's.
+     *   - the state must not be the FIRST report of a session we just created: a
+     *     LOAD creates that session, and on a Roku its first state is the device
+     *     auto-playing whatever `autoplay` said. That IS the same-session rule
+     *     above, which is why nothing else has to exclude our own transaction - and
+     *     why a real user action arriving while a load settles is still adopted.
      *
      * When adoption happens it is logged, because "the intent changed without a
      * command" is otherwise invisible in a trace. The page still follows the
@@ -784,7 +797,17 @@ export default class MediaSender {
         ) {
             return;
         }
-        if (this.isHoldingPage()) return;
+        // NO hold guard here, deliberately.
+        //
+        // It looks like the echo of our own transaction should be refused by
+        // `isHoldingPage()`, but the two identity rules above already do that, and
+        // more precisely: a state WE caused arrives on a session this tick has not
+        // seen before (a LOAD creates its session), so it fails the same-session
+        // test. What the hold guard added was the refusal of a REAL user action
+        // that happened to arrive while our own load was settling - a remote pause
+        // pressed a second after an item change - and the phase-3 generator found
+        // exactly that: a receiver PLAY/PAUSE on a settled session was never
+        // adopted, so the seek that followed reloaded in the wrong state.
         const desired =
             state === cast.media.PlayerState.PLAYING ? "play" : "pause";
         if (
@@ -3392,12 +3415,6 @@ export default class MediaSender {
              * new item. A receiver PAUSED that arrives AFTER the window closes is
              * a real user pause and still stops the page.
              */
-            // The receiver's report is REMEMBERED before any suppression rule can
-            // return: an action may be refused by a window, the memory may not (see
-            // noteReceiverReport). What it reported BEFORE this one is carried to
-            // the decision below, which is the only thing that may compare them.
-            const previousReceiverReport = this.noteReceiverReport(boundMedia);
-
             const itemTransition = this.dashItemTransitionActive();
             if (itemTransition) {
                 this.traceItemTransition(boundMedia);
@@ -3412,18 +3429,6 @@ export default class MediaSender {
                 );
                 return;
             }
-
-            // A receiver PLAY/PAUSE that is not our command is the user acting on
-            // the physical remote or the receiver's own UI, and the next reload
-            // must inherit it (see adoptReceiverPlaybackIntent). Deliberately
-            // BEFORE the equal-state early return below: the page mirror may
-            // already agree with the receiver (it pauses the page the moment it
-            // sees the pause) while the INTENT has not been adopted yet, and the
-            // intent is what a reload reads.
-            this.adoptReceiverPlaybackIntent(
-                boundMedia,
-                previousReceiverReport
-            );
 
             const localState = mediaElement.paused
                 ? cast.media.PlayerState.PAUSED
@@ -3714,6 +3719,37 @@ export default class MediaSender {
             // adapter cannot describe is refused — dropped silently rather than
             // converted or observed. Idempotent and evidence-gated (see the method).
             this.confirmReceiverMediaIdentity();
+            // The receiver's report is REMEMBERED here, before any window or hold
+            // can return from this tick.
+            //
+            // An action may be refused by a window (an item transition's PAUSED
+            // belongs to the previous item; a seek transaction's state is stale);
+            // the MEMORY may not. Recording it deeper in the flow meant a report
+            // that arrived while a window or the coordinator's transaction held the
+            // page was invisible twice over: its action was suppressed, and the
+            // NEXT report on the same session then looked like "a session we have
+            // never seen" - so a receiver PLAY/PAUSE was lost entirely. Measured by
+            // the phase-3 generator (seed 96028: a receiver PAUSED after an item
+            // change was never adopted as intent, and the seek that followed
+            // reloaded playing).
+            this.previousReceiverReport = this.noteReceiverReport(boundMedia);
+            // And the intent is decided HERE, not inside the page mirror below.
+            //
+            // Mirroring the receiver onto the page is deliberately suppressible:
+            // while a transaction holds the page, while an item transition owns it,
+            // and for the gesture window after a real user interaction (the mirror
+            // must not yank the element back before the user's own command lands).
+            // Which play/pause state the next reload inherits is none of those
+            // things - a receiver PAUSED the user asked for with the remote is not
+            // "the mirror fighting a user command" - so tying the two together
+            // dropped the user's intent every time a window suppressed the mirror.
+            // The phase-3 generator found exactly that (seed 96028: an item change,
+            // then a gesture, then a receiver PAUSED, and the pause was never
+            // adopted).
+            this.adoptReceiverPlaybackIntent(
+                boundMedia,
+                this.previousReceiverReport
+            );
             // ---- window ADVANCEMENT comes before the generic hold -------------
             //
             // `isHoldingPage()` includes this very window, so running the hold

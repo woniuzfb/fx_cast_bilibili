@@ -56,36 +56,49 @@ them. One `PLAY` operation could not tell them apart. See `cases.js`.
 ## Usage
 
 ```sh
-node test/senders/playbackInterleavings.js --pairwise-only     # in npm run test:senders
-node test/senders/playbackInterleavings.js --random 12 --length 5 --seed 42   # npm run test:interleavings
-node test/senders/playbackInterleavings.js --random 60 --length 10 --seed 1000  # exploration
-node test/senders/playbackInterleavings.js --verbose           # the operation-by-operation trace
+node test/senders/playbackInterleavings.js --pairwise-only   # in npm run test:senders
+node test/senders/playbackInterleavings.js --random 20 --length 8 --seed 1000   # npm run test:interleavings
+node test/senders/playbackInterleavings.js --random 60 --length 10 --seed 1000  # npm run test:interleavings:explore
+node test/senders/playbackInterleavings.js --verbose         # the operation-by-operation trace
 ```
 
 `--verbose` prints, per operation, the generations it started, the page position,
 the LOAD autoplay it submitted, and both intents (the sender's own and the model's)
+— the last pair is a diagnostic, never an assertion: it locates a divergence
+instead of leaving it to be inferred.
 
--   the last pair is a diagnostic, never an assertion: it locates a divergence
-    instead of leaving it to be inferred.
+## What the generator has already found
 
-## Open finding (2026-09-17)
+Recorded because the failures are the point of the stage: the first sweep was red,
+and each mismatch was either a real defect or a place where the model had to be
+made precise.
 
-`npm run test:interleavings:explore` currently reports 3 of 77 cases, all one
-shape, and the shortest reproduction is:
+Fixed in the sender (all three found by `--random 60 --length 10 --seed 1000`, then
+`--random 1 --length 8 --seed 96028` as the shortest reproduction):
 
-```sh
-node test/senders/playbackInterleavings.js --random 1 --length 8 --seed 96028 --verbose
-# ITEM_CHANGE(300) → SETTLE → BLE_PLAY → PAGE_PLAY → RECEIVER_PAUSED → …
-```
+1. **A suppressed report was not REMEMBERED.** The tick's windows (an item
+   transition's PAUSED, a seek transaction's stale state, the generic hold) return
+   before the receiver-state handling, so a report they suppressed was also absent
+   from the memory the NEXT report is compared against - which made that next one
+   read as "a session we have never seen" and lost the user's play/pause twice
+   over. `noteReceiverReport` now records at the tick's entry, before every
+   suppression: an action may be refused by a window, the memory may not.
+2. **The intent was adopted inside the page MIRROR path.** Mirroring is
+   suppressible by design (a hold, an item transition, the gesture window after a
+   real interaction), and the adoption inherited all of it: a remote pause pressed
+   a second after an item change was dropped. The adoption now runs at the tick's
+   entry, next to the recording, with its own guards.
+3. **The adoption's hold guard was redundant and harmful.** A state we caused
+   arrives on a session the tick has not seen before (a LOAD creates its session),
+   so the same-session rule already refuses it; the hold guard only added the
+   refusal of real user actions that arrived while our own load settled. Removed.
 
-The model says the `RECEIVER_PAUSED` (a settled state change on the session the
-receiver has been reporting on) is the user's intent, so the following seeks must
-reload paused; the implementation keeps `desiredPlayback = playing` and reloads
-playing. The report is not dropped by the observation memory any more (that half
-is fixed: see `noteReceiverReport`), so the remaining gate is inside the
-adoption decision or upstream of it in the tick - **not yet located**, which is
-why the exploration mode is documented as red rather than made green by choosing
-seeds.
+Model corrections (the other direction - the implementation was right):
 
-Until it is resolved, `npm run test:senders` runs the pairwise suite only (17/17)
-and `npm run test:interleavings` the deterministic sweep that is green (29/29).
+-   a page `play`/`pause` is a TRANSITION: the browser fires no event for a page
+    already in that state, so a `PAGE_PLAY` on a playing page changes nothing;
+-   a new item brings a new page element that the site's player starts playing, so
+    `pagePlaying` becomes true on `ITEM_CHANGE` (a `QUALITY_CHANGE` keeps the element);
+-   while the page's controls are detached neither the page's own events nor the
+    popup's page route are delivered (the production fallback to the bridge route is
+    the background's layer, covered by the load matrix).
