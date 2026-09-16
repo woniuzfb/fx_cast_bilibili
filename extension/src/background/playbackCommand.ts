@@ -289,6 +289,19 @@ function terminate(
         receiverPhase: command.receiverPhase,
         routeAttempts: command.routeAttempts
     });
+    // A finished command must LEAVE the device's slot, because that slot is read
+    // as "the command this device is running": the receiver-observation feed
+    // asks it that question on every poll and judges the answer with the
+    // command's media identity. Left behind, a terminal command kept answering
+    // for the device, so every sample of the NEXT cast was measured against the
+    // PREVIOUS cast's LOAD generation and thrown away as an "Observation from a
+    // different LOAD generation" - one every poll for as long as the new cast
+    // lasted, naming a command that had already completed. Nothing is lost by
+    // removing it: `publish` below writes the outcome onto the device itself,
+    // which is where every reader of a finished command looks.
+    if (commands.get(device.id)?.commandId === command.commandId) {
+        commands.delete(device.id);
+    }
     publish(device, command);
 }
 

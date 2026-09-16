@@ -298,6 +298,91 @@ async function runReturnScenario(mod, PlayerState, clock) {
     return { device, atOpposite, atReturned };
 }
 
+/**
+ * A finished command must not keep answering for the device.
+ *
+ * Reported from a real session: after a cast had been stopped and a NEW one
+ * started, the console filled with
+ *
+ *   Observation from a different LOAD generation ignored
+ *   { commandId: 4, commandLoadGeneration: 1, observationLoadGeneration: 2 }
+ *
+ * once per 3s poll for as long as the new cast lasted - naming a command that
+ * had already completed (its own "Playback command finished" line is earlier in
+ * the same log). The command registry kept the terminal command in the device's
+ * slot, and the receiver-observation feed reads that slot as "the command this
+ * device is running", so every sample of the new cast was measured against the
+ * OLD cast's media identity.
+ *
+ * This scenario drives that exact sequence and captures the coordinator's own
+ * log output, because the defect's only symptom IS that line.
+ */
+async function runFinishedCommandScenario(mod, PlayerState) {
+    const device = makeDevice(PlayerState);
+    mod.setPlaybackDeviceLookup(id => (id === device.id ? device : undefined));
+    mod.configurePlaybackCommands({
+        onViewChanged: () => {},
+        deviceRouteAttempt: () => true
+    });
+
+    // Cast 1: a command is dispatched and the receiver confirms it.
+    const generation1 = mod.nextRokuLoadGeneration(device.id);
+    mod.setRokuMediaIdentityFields(device.id, {
+        contentId: "cast-1",
+        ownerId: "session:1",
+        loadGeneration: generation1
+    });
+    await mod.dispatchPlaybackCommand(
+        device,
+        "PLAY",
+        mediaStatus(PlayerState, PlayerState.PAUSED, 5)
+    );
+    const dispatchedAt = device.playbackCommand.receiverDispatchStartedAt ?? 0;
+    mod.acceptReceiverObservation(
+        device.id,
+        mediaStatus(PlayerState, PlayerState.PLAYING, 6),
+        { source: "ecp-poll", pollStartedAt: dispatchedAt + 1, sequence: 2 },
+        Date.now(),
+        generation1
+    );
+    const afterConfirmation = {
+        registry: mod.playbackCommandSnapshot(),
+        view: device.playbackCommand && device.playbackCommand.lifecycle
+    };
+
+    // Cast 2: the user re-casts, so the extension creates a NEW load
+    // generation, and the ECP poll feed keeps reporting samples.
+    const generation2 = mod.nextRokuLoadGeneration(device.id);
+    const logged = [];
+    const realInfo = console.info;
+    console.info = (...args) => logged.push(args.map(String).join(" "));
+    try {
+        for (let sequence = 3; sequence < 6; sequence++) {
+            mod.acceptReceiverObservation(
+                device.id,
+                mediaStatus(PlayerState, PlayerState.PLAYING, 7),
+                {
+                    source: "ecp-poll",
+                    pollStartedAt: dispatchedAt + sequence * 3000,
+                    sequence
+                },
+                Date.now(),
+                generation2
+            );
+        }
+    } finally {
+        console.info = realInfo;
+    }
+
+    return {
+        afterConfirmation,
+        registryAfterNextCast: mod.playbackCommandSnapshot(),
+        generationMismatchLogs: logged.filter(line =>
+            line.includes("different LOAD generation")
+        )
+    };
+}
+
 async function main() {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-playback-"));
     const bundlePath = path.join(workDir, "playback.cjs");
@@ -323,6 +408,7 @@ async function main() {
         states.PLAYING
     );
     const returned = await runReturnScenario(mod, states, clock);
+    const finished = await runFinishedCommandScenario(mod, states);
     clock.restore();
 
     console.log("\n=== scenario facts ===");
@@ -335,6 +421,16 @@ async function main() {
     console.log("\n[PAUSE pending, receiver seen PLAYING then PAUSED]");
     console.log("  at opposite:  ", JSON.stringify(returned.atOpposite));
     console.log("  after return: ", JSON.stringify(returned.atReturned));
+    console.log("\n[a completed command, then the next cast's samples]");
+    console.log(
+        "  after confirmation:",
+        JSON.stringify(finished.afterConfirmation)
+    );
+    console.log(
+        "  after the next cast's samples:",
+        JSON.stringify(finished.registryAfterNextCast),
+        `(generation-mismatch logs: ${finished.generationMismatchLogs.length})`
+    );
 
     console.log("\n=== assertions ===");
     check(
@@ -356,6 +452,24 @@ async function main() {
             opposite.afterObservation.lifecycle === "active",
         JSON.stringify(opposite.afterObservation)
     );
+
+    if (fixedExpectation) {
+        check(
+            "post-fix: a confirmed command leaves the device's slot (nothing is left to answer for the device)",
+            finished.afterConfirmation.registry.length === 0 &&
+                finished.afterConfirmation.view === "terminal",
+            JSON.stringify(finished.afterConfirmation)
+        );
+        check(
+            "post-fix: the next cast's samples are not judged against the finished command (no 'different LOAD generation' verdict)",
+            finished.generationMismatchLogs.length === 0 &&
+                finished.registryAfterNextCast.length === 0,
+            JSON.stringify({
+                logs: finished.generationMismatchLogs,
+                registry: finished.registryAfterNextCast
+            })
+        );
+    }
 
     if (fixedExpectation) {
         check(
