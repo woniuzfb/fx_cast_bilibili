@@ -103,8 +103,17 @@ export interface PopupMediaSample {
  * slow CDN) and the receiver reload.
  */
 const SEEK_CONFIRM_WINDOW_MS = 15000;
-/** Receiver reports within this distance of the target confirm the seek. */
-const SEEK_CONFIRM_TOLERANCE_S = 1.5;
+/**
+ * Receiver reports within this distance of the target confirm the seek.
+ *
+ * Wide enough for the NEW generation's first position, which the receiver
+ * reports up to several seconds ahead of the target while it fills its buffer:
+ * measured on-device (2026-09-17 02:36:43) a move to 495.77 was confirmed by a
+ * report at 505.04 (+9.3s). Narrow enough that the PREVIOUS generation's
+ * positions, which are hundreds of seconds away during a long jump, can never
+ * pass: the same reload reported 1386.9.
+ */
+const SEEK_CONFIRM_TOLERANCE_S = 15;
 /**
  * Safety cap for the reload hold. Same 15s budget as the optimistic seek
  * window: if the receiver never reports a settled position (failed reload),
@@ -174,8 +183,14 @@ export function updatePopupMediaTimeline(
         next.duration = duration;
     }
 
-    const seekPending =
-        !mediaChanged &&
+    // A seek window is OPEN while its deadline has not passed, regardless of
+    // whether the media changed in between: the seek's own reload changes the
+    // media (the bridge appends a fresh cache buster per generation), and both
+    // the OLD generation (still playing, still reporting) and the NEW one
+    // (taking over) arrive inside that window. `mediaChanged` used to gate this,
+    // which left the new generation's confirming report with no branch to land
+    // in and let the old generation's reports through.
+    const seekWindowOpen =
         previous.seekTarget !== undefined &&
         previous.seekExpiresAt !== undefined &&
         sample.now < previous.seekExpiresAt;
@@ -191,6 +206,19 @@ export function updatePopupMediaTimeline(
         next.contentId = rawContentId;
         next.reloadHoldTime = undefined;
         next.reloadExpiresAt = undefined;
+        if (seekWindowOpen) {
+            // Keep the target, its deadline and the origin media: the window is
+            // still running and the decision below is made from them.
+            next.seekTarget = previous.seekTarget;
+            next.seekExpiresAt = previous.seekExpiresAt;
+            next.seekStartedContentId = previous.seekStartedContentId;
+            next.seekStartedMediaId = previous.seekStartedMediaId;
+            next.currentTime = previous.currentTime;
+            next.updatedAt = previous.updatedAt;
+        } else {
+            next.seekStartedContentId = undefined;
+            next.seekStartedMediaId = undefined;
+        }
     }
 
     // Detect an externally-triggered reload (BLE remote or the page's own
@@ -198,7 +226,7 @@ export function updatePopupMediaTimeline(
     // drives the receiver PLAYING -> IDLE/BUFFERING (position resets to ~0,
     // media dropped) -> PLAYING at the new position. The hallmark: we were
     // showing a real position and now get an UNSETTLED report. A popup seek
-    // already owns the freeze via seekPending, and a genuine media change
+    // already owns the freeze via the seek window, and a genuine media change
     // resets everything, so neither arms this hold. This only freezes the
     // displayed position number; it never affects seek-bar visibility.
     // CCTV synthetic DVR / Bilibili DASH remux only: their startup sequences
@@ -224,7 +252,7 @@ export function updatePopupMediaTimeline(
         rawContentId !== previous.contentId;
     const reloadStarting =
         !mediaChanged &&
-        !seekPending &&
+        !seekWindowOpen &&
         hadRealPosition &&
         previous.reloadHoldTime === undefined &&
         // Unsettled report after a real position, OR a fresh remux URL while a
@@ -238,7 +266,7 @@ export function updatePopupMediaTimeline(
     }
 
     const reloadHoldActive =
-        !seekPending &&
+        !seekWindowOpen &&
         next.reloadHoldTime !== undefined &&
         next.reloadExpiresAt !== undefined &&
         sample.now < next.reloadExpiresAt;
@@ -261,21 +289,21 @@ export function updatePopupMediaTimeline(
         (sample.playerSettled === true ||
             (sample.hlsDvr !== true && sample.dashRemux !== true));
     if (positionReportUsable) {
-        if (seekPending) {
-            // A report from the generation the seek started from is the OLD
-            // media still playing: it can neither confirm nor correct the seek,
-            // and accepting it is exactly the "two positions pulling" flicker.
-            const fromSeekOrigin =
-                (sample.contentId !== undefined &&
-                    sample.contentId === previous.seekStartedContentId) ||
-                (sample.mediaId !== undefined &&
-                    sample.mediaId === previous.seekStartedMediaId);
-            // Only a report near the target confirms the seek; older stream
-            // positions are stale and must not yank the bar back.
+        if (seekWindowOpen) {
+            // While the seek window is open the bar shows the TARGET, and only a
+            // report near that target may move it. This is the whole rule, and
+            // it is what the several generation-based attempts around it kept
+            // getting wrong: during the reload the receiver keeps reporting the
+            // PREVIOUS media (still playing on the old playlist) while the new
+            // one is loading, and whether a report belongs to one or the other
+            // cannot be decided from its identity alone — the seek's own reload
+            // reuses the origin's content id, and the arriving order varies.
+            // Proximity can: measured on-device (2026-09-17 02:36:43) the old
+            // generation reported 1386.9 while the target was 495.8, and the
+            // new one 505.0.
             if (
-                !fromSeekOrigin &&
                 Math.abs(currentTime - (previous.seekTarget as number)) <=
-                    SEEK_CONFIRM_TOLERANCE_S
+                SEEK_CONFIRM_TOLERANCE_S
             ) {
                 next.currentTime = currentTime;
                 next.updatedAt = sample.now;
