@@ -59,6 +59,7 @@ The receiver is authoritative: pausing on the Roku (remote, system UI, or any ot
 -   The Roku must be able to reach this machine over the LAN (the bridge's media server listens on a local address reported to the device).
 -   **No DRM.** The Roku path has no CDM and the bridge never rewrites protected streams, so DRM-encumbered media cannot be cast to a Roku.
 -   Roku Media Player's own limits apply: containers/codecs the channel cannot decode will not play, even when the bridge can serve them.
+-   **Play/pause needs the Roku's display to be on.** The bridge controls Roku playback with ECP keypresses, and a device only delivers app-level keys while it is displaying: with the TV/display off, `Pause` and `Play` (and `InstantReplay`, and the navigation keys) answer HTTP 200 and are ignored, while playback keeps running and OS-level keys such as `Home` still work. Roku has no Cast protocol to fall back on, only ECP, so a pause sent in that state cannot take effect and the popup's button goes back to the receiver's actual state.
 
 ## Building
 

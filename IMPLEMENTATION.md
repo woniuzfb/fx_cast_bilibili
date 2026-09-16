@@ -119,6 +119,7 @@ Because the emulation sits below the cast SDK, **all senders work unchanged**: t
 -   Volume is approximated with relative `VolumeUp`/`VolumeDown` keypresses (ECP has no volume query).
 -   Subtitle track selection has no ECP equivalent and is ignored.
 -   Seeks restart the media player channel (brief reload flash).
+-   **`PLAY`/`PAUSE` cannot work while the device is not displaying.** A keypress is the only play/pause primitive this emulation has (a Roku speaks no Cast protocol), and the platform only delivers app-level keys to the running channel while it has a display. Measured on a Roku 3 with Media Assistant playing: in that state `Pause`, `Play`, `keydown`/`keyup Play`, `InstantReplay` and `Left`/`Right`/`Select`/`Back` all answered HTTP 200 with **no effect**, while `/query/media-player` kept reporting an advancing `state="play"` and `/query/active-app` kept naming the player — and `Home`, which the OS handles itself (and which is what `STOP` uses), still worked. Nothing observes a change either, so the extension's command ends as `not-confirmed` after its 10s receiver window and the popup button reverts to the receiver's real state: the user sees "no reaction" rather than an error. `SEEK` is a `mediaPosition` re-launch rather than a keypress, so it is not subject to this (not verified in that state). `RokuDeviceInfo.powerMode` is parsed by `ecp.ts` but read nowhere, so the display state is not surfaced to the extension today: the limitation is documented, not detected.
 
 ## WebExtension Permissions
 
