@@ -402,7 +402,10 @@ function teeTextResponse(
     filter.onerror = () => {
         try {
             filter.disconnect();
-        } catch {}
+        } catch {
+            // The response already failed, so the stream is over either way and
+            // a disconnect failure has nothing left to recover.
+        }
     };
 }
 
@@ -1214,7 +1217,11 @@ export function initBilibiliPageCapture() {
                 if (!complete) return;
                 try {
                     addRepresentations(state, JSON.parse(text));
-                } catch {}
+                } catch {
+                    // A playurl body that is not JSON (or not the shape
+                    // addRepresentations expects) is not a capture failure: the
+                    // cached manifest simply stays as it was.
+                }
             });
         },
         {
@@ -1431,7 +1438,10 @@ export function initBilibiliPageCapture() {
                 abandonRequest(details.requestId);
                 try {
                     filter.disconnect();
-                } catch {}
+                } catch {
+                    // The response already errored and the request has been
+                    // abandoned above; a disconnect failure changes nothing.
+                }
             };
         },
         { urls: ["<all_urls>"], types: ["xmlhttprequest", "media", "other"] },
