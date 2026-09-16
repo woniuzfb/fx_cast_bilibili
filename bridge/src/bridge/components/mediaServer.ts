@@ -1534,6 +1534,16 @@ async function startDashRemuxServer(
                 if (kind === "video") {
                     padBaseSeconds = selectedTime;
                     keyframeResolved = true;
+                    // The readiness gate waits for BOTH keyframeResolved and
+                    // padReadyResult, and on this path the keyframe comes from
+                    // the page's own capture request, not from the ffprobe run
+                    // (the Roku path never probes) — so this is the only place
+                    // the pad generator can be started. Without it the gate
+                    // waits forever and `mediaServerStarted` never arrives: the
+                    // cast shows no reaction at all. Same contract as the
+                    // probe's own request: the first request wins and a zero
+                    // base needs no segment.
+                    requestPadSegment?.(padBaseSeconds);
                 }
                 captureDebug("page-response-start-selected", {
                     kind,
@@ -2692,6 +2702,9 @@ async function startDashRemuxServer(
         // The remux now starts at the requested position (startTime), so the
         // receiver only needs the first couple of segments to begin playback.
         const minimumPlaylistDuration = 8;
+        // Last playlist view, for the timeout message below.
+        let lastGatePlaylist = "";
+        let lastGateDuration = 0;
         for (let attempt = 0; attempt < 900; attempt++) {
             if (
                 serverGeneration !== dashServerGeneration ||
@@ -2718,6 +2731,8 @@ async function startDashRemuxServer(
                 const playlistDuration = [
                     ...playlist.matchAll(/^#EXTINF:([0-9.]+)/gm)
                 ].reduce((total, match) => total + Number(match[1]), 0);
+                lastGatePlaylist = playlist;
+                lastGateDuration = playlistDuration;
                 if (
                     // Wait for the keyframe probe so the served playlist is padded to
                     // the probed keyframe, not the rough startTime.
@@ -2735,9 +2750,8 @@ async function startDashRemuxServer(
                     const endList = playlist.includes("#EXT-X-ENDLIST");
                     const completeHighest =
                         highestCompleteDashSegment(playlist);
-                    const completeCount = completeHighest + 1;
                     const startupCount = Math.min(
-                        completeCount,
+                        completeHighest + 1,
                         ROKU_DASH_PREBUFFER_SEGMENTS
                     );
                     if (
@@ -2803,7 +2817,16 @@ async function startDashRemuxServer(
             subject: "mediaCast:mediaServerError",
             data: {
                 requestId,
-                message: `Timed out preparing DASH stream through ${minimumPlaylistDuration}s: ${stderr}`
+                // A stall here is otherwise indistinguishable from "the bridge
+                // never answered": report which gate condition was still open,
+                // with the last playlist view the loop had.
+                message:
+                    `Timed out preparing DASH stream through ${minimumPlaylistDuration}s: ${stderr}` +
+                    ` [gate keyframeResolved=${keyframeResolved}` +
+                    ` padReady=${padReadyResult} rokuPrebuffer=${rokuDashPrebuffer}` +
+                    ` listedSegments=${
+                        listedDashSegmentIndexes(lastGatePlaylist).length
+                    } playlistDuration=${lastGateDuration}]`
             }
         });
         void stopMediaServer();
