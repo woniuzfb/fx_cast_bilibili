@@ -23,21 +23,6 @@ import {
 } from "../cast/dashPresentation";
 
 /**
- * The last conversion applied for a device: the receiver position that went in
- * and the page position that came out.
- *
- * A flag cannot live on the status (the device-media merge rebuilds that object
- * on every report), and a WeakMap keyed by the media cannot either (the merge
- * hands over a fresh media object each time, from the session registry, even
- * when nothing about it changed). What IS reliable is the pair of values: if the
- * position currently on the status equals the page position this device was last
- * given, the value has already been converted and converting it again would add
- * dashStart a second time. Measured before this: a Roku's 41.5 became 81.5 and
- * then 121.5 within the two reports of a single poll.
- */
-const dashLastConversion = new Map<string, { raw: number; page: number }>();
-
-/**
  * A CCTV live relay never takes the DASH remux timeline path: its customData is
  * {hlsDvr: true} with no dashStart and no presentation offset, and its receiver
  * positions are on the synthetic VOD clock, not shifted by any pad runway. This
@@ -1356,26 +1341,31 @@ export default new (class extends TypedEventTarget<EventMap> {
                     device.mediaStatus = { ...device.mediaStatus, ...status };
                     const newMedia = device.mediaStatus.media;
                     if (oldMedia && newMedia && oldMedia !== newMedia) {
-                        // Per-field copies (a keyed loop trips TS2322:
-                        // assigning the union of field types to the
-                        // intersection-typed target).
-                        if (
-                            newMedia.duration == null &&
-                            oldMedia.duration != null
-                        ) {
-                            newMedia.duration = oldMedia.duration;
-                        }
-                        // Metadata only carries over between media about the
-                        // SAME content: a report that names a different
-                        // contentId is a different generation, and inheriting
-                        // the old customData would hand it the old generation's
-                        // dashStart (measured: an unidentified 500 was published
-                        // as 936.014207).
+                        // Metadata carries over only between media about the SAME
+                        // content: a report that names a different contentId is a
+                        // different generation, and inheriting the old fields
+                        // hands the new media the old one's dashStart (measured:
+                        // an unidentified 500 was published as 936.014207), its
+                        // duration (the seek bar's scale), its title and its
+                        // tracks. An anonymous media (`contentId` absent on either
+                        // side) is still treated as the same content, because a
+                        // stream-derived report that drops the id is exactly the
+                        // case this preservation exists for.
                         const sameContent =
                             newMedia.contentId === undefined ||
                             oldMedia.contentId === undefined ||
                             normalizeContentId(newMedia.contentId) ===
                                 normalizeContentId(oldMedia.contentId);
+                        // Per-field copies (a keyed loop trips TS2322:
+                        // assigning the union of field types to the
+                        // intersection-typed target).
+                        if (
+                            sameContent &&
+                            newMedia.duration == null &&
+                            oldMedia.duration != null
+                        ) {
+                            newMedia.duration = oldMedia.duration;
+                        }
                         if (
                             sameContent &&
                             newMedia.customData == null &&
@@ -1384,12 +1374,14 @@ export default new (class extends TypedEventTarget<EventMap> {
                             newMedia.customData = oldMedia.customData;
                         }
                         if (
+                            sameContent &&
                             newMedia.metadata == null &&
                             oldMedia.metadata != null
                         ) {
                             newMedia.metadata = oldMedia.metadata;
                         }
                         if (
+                            sameContent &&
                             newMedia.tracks == null &&
                             oldMedia.tracks != null
                         ) {
@@ -1406,7 +1398,17 @@ export default new (class extends TypedEventTarget<EventMap> {
                     // cast device never keeps Roku session media alive.
                     this.clearOptimisticRelayMedia(device.id);
                 } else {
-                    device.mediaStatus = status;
+                    // A COPY, never the payload itself: the conversion below
+                    // mutates the position it is given, and writing into the
+                    // message object leaves that message carrying a PAGE value.
+                    // Any later handling of the same message — a replay, or the
+                    // fan-out this repo's harness used to do for every listener
+                    // registered on its stub port — then converts a page value as
+                    // if it were a raw one, which is how one position became
+                    // three (41.5 -> 81.5 -> 121.5). Copying makes the conversion
+                    // idempotent by construction: it always reads a position the
+                    // BRIDGE reported, never one it produced.
+                    device.mediaStatus = { ...status };
                 }
 
                 // Receiver position -> page position, on the MERGED status.
@@ -1425,33 +1427,23 @@ export default new (class extends TypedEventTarget<EventMap> {
                 // is left unconverted rather than moved by a runway that was never
                 // its own.
                 //
-                // Idempotent by marker: the conversion mutates the status it is
-                // given, and a status can pass through here more than once.
-                const statusRawTime = Number(device.mediaStatus.currentTime);
-                const lastConversion = dashLastConversion.get(device.id);
-                const alreadyConverted =
-                    lastConversion !== undefined &&
-                    Number.isFinite(statusRawTime) &&
-                    Math.abs(lastConversion.page - statusRawTime) < 1e-6;
-                if (!alreadyConverted) {
-                    const adjusted = this.adjustDashCurrentTime(
-                        device,
-                        device.mediaStatus.media,
-                        device.mediaStatus.currentTime,
-                        device.mediaStatus.mediaSessionId
-                    );
-                    if (
-                        adjusted !== undefined &&
-                        Number.isFinite(statusRawTime)
-                    ) {
-                        dashLastConversion.set(device.id, {
-                            raw: statusRawTime,
-                            page: adjusted
-                        });
-                    }
-                    if (adjusted !== undefined) {
-                        device.mediaStatus.currentTime = adjusted;
-                    }
+                // No "already converted" bookkeeping is needed, because the
+                // input to this conversion is always a position the BRIDGE
+                // reported: the status is either a copy of the incoming payload
+                // or a merge that took `currentTime` from it. A value comparison
+                // could not have answered the question anyway - the test that
+                // recognises the page value published last also refuses a
+                // legitimate conversion whenever a fresh raw position happens to
+                // equal it, and then the popup is handed a remux-relative number
+                // with nothing to say so.
+                const adjusted = this.adjustDashCurrentTime(
+                    device,
+                    device.mediaStatus.media,
+                    device.mediaStatus.currentTime,
+                    device.mediaStatus.mediaSessionId
+                );
+                if (adjusted !== undefined) {
+                    device.mediaStatus.currentTime = adjusted;
                 }
 
                 if (sampleChanged) {

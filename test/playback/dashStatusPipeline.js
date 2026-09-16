@@ -20,7 +20,15 @@
  *
  * Usage:
  *   node test/playback/dashStatusPipeline.js
- *   node test/playback/dashStatusPipeline.js --pre-fix   # negative control
+ *   node test/playback/dashStatusPipeline.js --pre-fix                    # control against HEAD
+ *   node test/playback/dashStatusPipeline.js --pre-fix --rev 63447f1      # control against a revision
+ *
+ * `--pre-fix` runs the SAME contract against another revision (a `git worktree`)
+ * and requires the rows to fail for whatever defects that revision actually
+ * carries — each defect is detected in the revision's own source, so the control
+ * reports which ones it found instead of assuming one revision's shape. A
+ * revision carrying none of them is an error: nothing would have been
+ * controlled.
  */
 
 const fs = require("fs");
@@ -139,7 +147,7 @@ async function build() {
             }
         ]
     });
-    return { modules: require(outfile), workDir };
+    return { modules: require(outfile), workDir, src };
 }
 
 /**
@@ -149,23 +157,41 @@ async function build() {
  * the bundle's own module instance: a separate `require` of this file would be a
  * second instance with its own listener list, and messages dispatched into that
  * one would never reach the module under test.
+ *
+ * A FRESH port per `connectNative` call, like the real transport (the background
+ * opens one native connection per bridge process), and a dispatch that reaches
+ * ONE port. Sharing a single port object grew its listener list by one per
+ * connection, so every later message was handled once per registered device -
+ * invisible while the handler was idempotent, and the actual reason a position
+ * once came out as 41.5 -> 81.5 -> 121.5 (the conversion wrote into the message
+ * object, so the second handling converted a page value as if it were a raw
+ * one). Idempotence is now a property of the code under test, and it is asserted
+ * by dispatching the same message twice on purpose (see the guard rows), not by
+ * an accident of how many devices this file has registered so far.
  */
 function nativeMessagingStubSource() {
     return `"use strict";
-const listeners = { message: [], disconnect: [] };
-const port = {
-    postMessage: message => { global.__bridgePosted.push(message); },
-    disconnect: () => undefined,
-    onMessage: { addListener: fn => listeners.message.push(fn) },
-    onDisconnect: { addListener: fn => listeners.disconnect.push(fn) }
-};
+const ports = [];
+function makePort() {
+    const listeners = { message: [], disconnect: [] };
+    const port = {
+        postMessage: message => { global.__bridgePosted.push(message); },
+        disconnect: () => undefined,
+        onMessage: { addListener: fn => listeners.message.push(fn) },
+        onDisconnect: { addListener: fn => listeners.disconnect.push(fn) }
+    };
+    ports.push({ port, listeners });
+    return port;
+}
 module.exports = {
-    connectNative: () => port,
+    connectNative: () => makePort(),
     sendNativeMessage: async () => "0.0.0-test"
 };
-module.exports.__port = port;
-module.exports.__dispatch = message =>
-    listeners.message.slice().forEach(fn => fn(message));
+module.exports.__dispatch = message => {
+    const newest = ports[ports.length - 1];
+    if (!newest) throw new Error("no native port was ever connected");
+    newest.listeners.message.slice().forEach(fn => fn(message));
+};
 (globalThis.__bridgeStubInstances ||= []).push(module.exports);
 `;
 }
@@ -304,19 +330,44 @@ async function registerDevice(modules, device) {
     await modules.deviceManager.refresh();
     await flush();
 
+    // A COPY of the caller's literal: the module under test keeps the object it
+    // is given and writes the device's live state onto it (mediaStatus, status).
+    // Passing the shared const meant a device registered later inherited the
+    // state a previous scenario had written onto the same literal - which is how
+    // a "fresh" device arrived with a media status already set.
     stubDispatcher()({
         subject: "main:deviceUp",
-        data: { deviceId: device.id, deviceInfo: device }
+        data: { deviceId: device.id, deviceInfo: { ...device } }
     });
     await flush();
     return modules.deviceManager.getDeviceById(device.id);
 }
 
-function sendMediaStatus(modules, device, status) {
+/**
+ * @param provenance The bridge's statement of how this sample was produced.
+ *   Real `ecp-poll` samples carry `{source, pollStartedAt, pollCompletedAt,
+ *   sequence}`; the synthetic sources carry only `{source}`; the Chromecast path
+ *   sends none at all.
+ */
+function sendMediaStatus(modules, device, status, provenance) {
     stubDispatcher()({
         subject: "main:receiverDeviceMediaStatusUpdated",
-        data: { deviceId: device.id, status }
+        data: {
+            deviceId: device.id,
+            status,
+            ...(provenance === undefined ? {} : { provenance })
+        }
     });
+}
+
+/** An `ecp-poll` provenance whose identity is (sequence, pollStartedAt). */
+function pollProvenance(sequence, pollStartedAt) {
+    return {
+        source: "ecp-poll",
+        pollStartedAt,
+        pollCompletedAt: pollStartedAt + 40,
+        sequence
+    };
 }
 
 function sendReceiverStatus(modules, device, applications) {
@@ -371,7 +422,7 @@ function dashCustomData(pagePosition, offsetSeconds) {
 }
 
 async function main() {
-    const { modules, workDir } = await build();
+    const { modules, workDir, src: sourceUnderTest } = await build();
     console.info(
         `DASH status pipeline (${PRE_FIX ? `revision ${REV}` : "working tree"})`
     );
@@ -538,6 +589,72 @@ async function main() {
         })
     );
 
+    // ---- the conversion is idempotent by IDENTITY, never by value -----------
+    //
+    // A fresh sample whose raw position happens to equal the page value published
+    // last is still a raw position: 81.5 here is what the previous report was
+    // PUBLISHED as, and it is also a perfectly legal remux-relative position for
+    // the next one. A guard that asks "does this equal the page I last published?"
+    // cannot tell the two apart and leaves it unconverted — handing the popup a
+    // remux-relative number while claiming it is page time.
+    sendMediaStatus(
+        modules,
+        ROKU,
+        makeStatus({
+            currentTime: 81.5,
+            contentId: "http://10.0.0.111:9555/s/roku-gen/index.m3u8?v=1",
+            customData: dashCustomData(40, 0)
+        }),
+        pollProvenance(6, 1_000_000)
+    );
+    await flush();
+    check(
+        "Roku: a raw position equal to the last published page is still converted (81.5 -> 121.5)",
+        Math.abs(Number(roku.mediaStatus?.currentTime) - 121.5) < 1e-6,
+        JSON.stringify({ published: roku.mediaStatus?.currentTime })
+    );
+
+    // The guard's own purpose, from the other side: ONE position is converted
+    // once, however many times its message is handled. Asserted on a FRESH device
+    // whose first report is the one that used to alias the message object, and by
+    // dispatching the same message twice on purpose rather than by relying on how
+    // many listeners the harness happens to have registered.
+    const replayDevice = await registerDevice(modules, {
+        id: "roku-replay-test",
+        friendlyName: "Roku (replay)",
+        modelName: "Roku",
+        capabilities: 0,
+        host: "127.0.0.1",
+        port: 8060,
+        deviceType: "roku"
+    });
+    const replayed = makeStatus({
+        currentTime: 84.5,
+        contentId: "http://10.0.0.111:9555/s/roku-replay/index.m3u8?v=1",
+        customData: dashCustomData(40, 0)
+    });
+    const replayedProvenance = pollProvenance(1, 2_000_000);
+    sendMediaStatus(modules, replayDevice, replayed, replayedProvenance);
+    await flush();
+    const afterFirstHandling = Number(replayDevice.mediaStatus?.currentTime);
+    sendMediaStatus(modules, replayDevice, replayed, replayedProvenance);
+    await flush();
+    check(
+        "the conversion does not write into the message it was given (a replay stays a raw position)",
+        replayed.currentTime === 84.5,
+        JSON.stringify({ messageCurrentTime: replayed.currentTime })
+    );
+    check(
+        "one message handled twice converts one position once (84.5 -> 124.5 both times)",
+        Math.abs(afterFirstHandling - 124.5) < 1e-6 &&
+            Math.abs(Number(replayDevice.mediaStatus?.currentTime) - 124.5) <
+                1e-6,
+        JSON.stringify({
+            afterFirstHandling,
+            afterSecondHandling: replayDevice.mediaStatus?.currentTime
+        })
+    );
+
     // ---- a receiver relaunch must not look like the end of the cast ---------
     // A Roku DASH remux LOAD relaunches the player app, so the device reports no
     // application for a moment. Treating that as the end tore the media status
@@ -589,12 +706,15 @@ async function main() {
     // constant in the module, so the check is asserted against the real source
     // rather than by waiting 8s.
     const deviceManagerSource = fs.readFileSync(
-        path.join(
-            path.resolve(__dirname, "..", ".."),
-            "extension/src/background/deviceManager.ts"
-        ),
+        path.join(sourceUnderTest, "background/deviceManager.ts"),
         "utf8"
     );
+    /** Does this revision decide the conversion by value (the guard this test
+     *  replaces)? Source, not behavior: a pre-fix revision that lacks the guard
+     *  entirely must not be required to fail its row. */
+    const versionHasValueGuard =
+        /dashLastConversion/.test(deviceManagerSource) &&
+        /lastConversion\.page/.test(deviceManagerSource);
     check(
         "relaunch: the hold is bounded (an app that stays gone still tears down)",
         /RECEIVER_APP_GONE_GRACE_MS = \d+;/.test(deviceManagerSource) &&
@@ -616,20 +736,68 @@ async function main() {
 
     console.info("");
     if (PRE_FIX) {
-        const expected = failures.filter(name =>
-            /runway is removed|position is page time/.test(name)
+        // The control is CAPABILITY-based, because the rows below were written
+        // for defects that landed in different revisions: whatever this revision
+        // actually carries must fail the row that exists for it, and a row for a
+        // defect it does not carry must not be required to fail. Read from the
+        // revision's own source, so the control says which defects it found
+        // instead of assuming one revision's shape.
+        const defects = [
+            {
+                id: "one anchor for both receiver families",
+                present:
+                    /Math\.max\(0, dashStart \+ raw - presentationOffset\)/.test(
+                        deviceManagerSource
+                    ),
+                rows: /runway is removed|position is page time/,
+                least: 2
+            },
+            {
+                id: "the value-based already-converted guard",
+                present: /dashLastConversion/.test(deviceManagerSource),
+                rows: /equal to the last published page/,
+                least: 1
+            },
+            {
+                id: "the conversion writes into the message object",
+                present: /device\.mediaStatus = status;/.test(
+                    deviceManagerSource
+                ),
+                // Only the mutation row: a revision with this defect and an
+                // already-converted guard still reads the same page value on a
+                // replay, which is precisely why that guard looked sufficient.
+                rows: /does not write into the message/,
+                least: 1
+            }
+        ].filter(defect => defect.present);
+        const missing = defects.filter(
+            defect =>
+                failures.filter(name => defect.rows.test(name)).length <
+                defect.least
         );
-        if (expected.length < 2) {
+        console.info(
+            `revision control (${REV}): carries ${defects.length} defect(s)` +
+                (defects.length
+                    ? ` [${defects.map(d => d.id).join("; ")}]`
+                    : " [none]")
+        );
+        for (const name of failures) console.info("  - " + name);
+        if (defects.length === 0) {
             console.error(
-                `dashStatusPipeline: --pre-fix expected the Chromecast conversion failures, saw ${expected.length}` +
-                    (failures.length ? ` (${failures.join("; ")})` : "")
+                `dashStatusPipeline: --pre-fix ${REV} carries none of the defects these rows exist for; nothing was controlled`
+            );
+            process.exitCode = 1;
+        } else if (missing.length) {
+            console.error(
+                `dashStatusPipeline: --pre-fix ${REV} did not fail the rows for: ${missing
+                    .map(d => d.id)
+                    .join("; ")}`
             );
             process.exitCode = 1;
         } else {
             console.info(
-                `revision control (${REV}): ${fail} check(s) failed, including the ${expected.length} expected`
+                `every defect this revision carries failed its own row (${fail} check(s) failed)`
             );
-            for (const name of failures) console.info("  - " + name);
             process.exitCode = 0;
         }
     } else {
