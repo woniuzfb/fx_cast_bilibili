@@ -378,24 +378,6 @@ function loadBridgePlan() {
  * The targets, with the keyframe a probe would report for each and the plan the
  * bridge's own expressions must produce.
  *
- * The list is built around the RUNWAY, not around zero. `expect` is written by
- * hand (the plan() above derives its numbers from the bridge's source), and the
- * rows that matter are the ones where "there are pads" and "the runway is
- * enough" disagree:
- *
- *   keyframe 4 / page 36   pad base 32 > content base 4  -> 28s of runway
- *   keyframe 16 / page 44  pad base 32 > content base 16 -> 16s of runway
- *   keyframe 28 / page 60  pad base 32 > content base 28 ->  4s of runway
- *   keyframe 32 / page 64  pad base 32 = content base 32 ->  0s (no runway)
- *
- * A target of 32 with the video's first keyframe at 0 DOES carry the full
- * runway: the bootstrap requirement comes from the receiver starting fresh, not
- * from the target being near the beginning.
- */
-/**
- * The targets, with the keyframe a probe would report for each and the plan the
- * bridge's own expressions must produce.
- *
  * `expect` is written by hand (the plan derives its numbers from the bridge's
  * source), and it asserts the three quantities SEPARATELY - pad duration, clock
  * offset and LOAD position - because they are what an earlier version of this
