@@ -286,36 +286,30 @@ export default new (class extends TypedEventTarget<EventMap> {
     /**
      * Receiver position -> page position for a Bilibili DASH remux.
      *
-     * The receiver reports its position RELATIVE TO THE MEDIA IT WAS GIVEN, and
-     * that media is a playlist the bridge generated from the page's seek target:
+     * Both families report a position on the clock of the playlist the bridge
+     * generated, but those playlists do not start at the same place, so the
+     * anchor is per FAMILY (see the split at the formula): a Chromecast's runway
+     * is padded up to the seek target, so its clock already runs on page time and
+     * only the media's stated offset has to come off; the Roku capture path emits
+     * no pads at all, so its numbers are remux-relative and `dashStart` restores
+     * the page position.
      *
-     *     receiverTime = (pageTime - dashStart) + presentationOffset
-     *
-     * `dashStart` is where that playlist's real content sits in page time (the
-     * seek target), and `presentationOffset` is the synthetic pad runway in
-     * front of it. Both receivers behave this way — measured on-device:
-     * Chromecast walked a 32s runway and reported `page + 32`; the Roku session
-     * reported 10.066s five seconds after a load at `dashStart` 1086.65 (its
-     * `?fxcastNoPad=1` playlist means its offset is 0, not that its position is
-     * page time).
-     *
-     * So the mapping is `dashStart + receiverTime - presentationOffset`, and
-     * dropping `dashStart` is what made the popup start every Roku cast at 0:00
-     * and count up from there (measured: raw 8.795 with dashStart 636.2 was
-     * published as 8.795 instead of 644.995).
-     *
-     * The offset comes from the media THIS report is about, through the media's
-     * own identity — never from a device-level value that a later media could
-     * inherit. Periodic MEDIA_STATUS broadcasts often carry only the stream's
-     * own media snapshot, so when a report drops `customData` the offset is taken
-     * from the identity map below, which is keyed the same way: by this device's
+     * `dashStart` is the page position the media was generated from, and
+     * `presentationOffset` is the synthetic runway in front of its content — both
+     * from the media's OWN statement (`customData`), through the media's
+     * identity. Never from a device-level value that a later media could inherit.
+     * Periodic MEDIA_STATUS broadcasts often carry only the stream's own media
+     * snapshot, so when a report drops `customData` the shift is taken from the
+     * identity map below, which is keyed the same way: by this device's
      * mediaSessionId and by the media's base contentId. A report whose media is
      * in neither place is NOT converted — guessing would move the popup by a
-     * whole runway, which is exactly the failure this replaces.
+     * whole runway (or by a whole seek target), which is exactly the failure this
+     * replaces.
      *
      * Returns undefined when there is nothing to map — the media is not a DASH
-     * remux, it is the CCTV live relay, the identity is unknown, or the position
-     * is unusable — in which case the caller leaves the status as reported.
+     * remux, it is the CCTV live relay, the identity is unknown, or the family's
+     * own anchor is missing — in which case the caller leaves the status as
+     * reported.
      */
     private adjustDashCurrentTime(
         device: ReceiverDevice,
@@ -370,26 +364,61 @@ export default new (class extends TypedEventTarget<EventMap> {
 
         const raw = Number(receiverTime ?? 0);
         if (!Number.isFinite(raw)) return undefined;
-        // Where this media's content starts in page time. A media that never
-        // stated one cannot be converted: without it the receiver's position is
-        // anchored nowhere, and 0 is a position (the start of the video), not a
-        // safe default.
+        // Where this media's content starts in page time. Only the Roku family
+        // anchors on it (see the family split below); a media that never stated
+        // one cannot be converted FOR THAT FAMILY, because without it the
+        // receiver's position is anchored nowhere and 0 is a position (the start
+        // of the video), not a safe default.
         const dashStart =
             declaredOffset !== undefined && Number.isFinite(declaredStart)
                 ? declaredStart
                 : recalled?.dashStart;
         const presentationOffset = declaredOffset ?? recalled?.offsetSeconds;
-        if (presentationOffset === undefined || dashStart === undefined) {
-            void logMediaDebug("DASH current time NOT mapped (no dashStart)", {
-                deviceId: device.id,
-                deviceLabel: deviceDebugLabel(device),
-                rawStatusCurrentTime: raw,
-                mediaSessionId: identity.mediaSessionId,
-                mediaContentId: identity.contentId
-            });
+        // WHICH ANCHOR APPLIES IS A PROPERTY OF THE RECEIVER, NOT OF THE MEDIA.
+        // The two families are handed different playlists, so their clocks do not
+        // start at the same place:
+        //
+        //   Chromecast  the pad runway is generated UP TO the seek target
+        //               (padBaseSeconds = max(keyframe, CHROMECAST_MIN_PAD_SECONDS)),
+        //               so the playlist's clock already runs on page time and the
+        //               media's stated offset is the whole shift:
+        //                   pageTime = receiverTime - presentationOffset
+        //               This is the bridge's own invariant (mediaServer.ts:
+        //               `presentationTime = pageTime + padBase - contentBase`,
+        //               0 for every cast whose keyframe is past the minimum, 32s
+        //               for an opening cast that walks the minimum runway).
+        //   Roku        the capture path emits NO pad entries (?fxcastNoPad=1)
+        //               and its content starts at the captured segment's own
+        //               start, so the receiver's numbers are REMUX-relative and
+        //               the page position has to be restored with dashStart:
+        //                   pageTime = dashStart + receiverTime - presentationOffset
+        //
+        // Requiring the Roku anchor of both is what doubled a Chromecast
+        // mid-video cast: that position already contained the seek target, so
+        // adding dashStart again published `page + dashStart` (a cast at 23:51
+        // showed ~47:42), while an opening cast (dashStart ~0) looked correct.
+        const rokuCapturePlaylist = device.deviceType === "roku";
+        if (
+            presentationOffset === undefined ||
+            (rokuCapturePlaylist && dashStart === undefined)
+        ) {
+            void logMediaDebug(
+                rokuCapturePlaylist
+                    ? "DASH current time NOT mapped (no dashStart)"
+                    : "DASH current time NOT mapped (no presentation offset)",
+                {
+                    deviceId: device.id,
+                    deviceLabel: deviceDebugLabel(device),
+                    rawStatusCurrentTime: raw,
+                    mediaSessionId: identity.mediaSessionId,
+                    mediaContentId: identity.contentId
+                }
+            );
             return undefined;
         }
-        const pageTime = Math.max(0, dashStart + raw - presentationOffset);
+        const clockAnchor =
+            rokuCapturePlaylist && dashStart !== undefined ? dashStart : 0;
+        const pageTime = Math.max(0, clockAnchor + raw - presentationOffset);
         void logMediaDebug("DASH current time mapped", {
             deviceId: device.id,
             deviceLabel: deviceDebugLabel(device),
@@ -398,6 +427,7 @@ export default new (class extends TypedEventTarget<EventMap> {
             declaredOffset,
             mediaSessionId: identity.mediaSessionId,
             chosenOffset: presentationOffset,
+            clockAnchor,
             publishedCurrentTime: pageTime
         });
         return pageTime;

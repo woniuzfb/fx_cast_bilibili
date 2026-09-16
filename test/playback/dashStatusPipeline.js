@@ -396,18 +396,20 @@ async function main() {
     const chromecastTime = chromecast.mediaStatus?.currentTime;
     // The receiver reports 36.389605 on ITS clock; that media's content starts at
     // page 4.001269 behind a 32s runway, so the page position is
-    // 4.001269 + 36.389605 - 32 = 8.390874. (On-device, 2026-09-17: a Roku
-    // reported 8.795 with dashStart 636.2016 and offset 0, i.e. 644.9966 page
-    // time — the receiver's number is REMUX-relative, never page time.)
+    // 36.389605 - 32 = 4.389605. The runway is the WHOLE shift for a Chromecast:
+    // its playlist is padded up to the seek target, so that clock already runs on
+    // page time and `dashStart` must NOT be added again — doing so publishes
+    // `page + dashStart` = 8.390874 here, and roughly twice the real position on
+    // a mid-video cast (a cast at 23:51 showed ~47:42).
     check(
-        "Chromecast: the runway is removed and the LOAD position restored (36.389605 -> 8.390874)",
-        Math.abs(Number(chromecastTime) - 8.390874) < 1e-6,
+        "Chromecast: the runway is removed and the LOAD position restored (36.389605 -> 4.389605)",
+        Math.abs(Number(chromecastTime) - 4.389605) < 1e-6,
         JSON.stringify({ published: chromecastTime })
     );
     check(
-        "Chromecast: the position is page time, not the padded clock",
+        "Chromecast: the position is page time, not the padded clock and not the seek target added twice",
         Math.abs(Number(chromecastTime) - 36.389605) > 1 &&
-            Math.abs(Number(chromecastTime) - 4.389605) > 1,
+            Math.abs(Number(chromecastTime) - 8.390874) > 1,
         JSON.stringify({ published: chromecastTime })
     );
 
@@ -424,9 +426,8 @@ async function main() {
     );
     await flush();
     check(
-        "Chromecast: a bare-media report is still mapped (68 -> 40.001269)",
-        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 40.001269) <
-            1e-6,
+        "Chromecast: a bare-media report is still mapped (68 -> 36)",
+        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 36) < 1e-6,
         JSON.stringify({ published: chromecast.mediaStatus?.currentTime })
     );
     check(
@@ -455,13 +456,14 @@ async function main() {
         })
     );
     await flush();
-    // dashStart 436.014207 with offset 0: the receiver's 436.014207 IS the
-    // content-relative position, so page time is twice that. The point of the
-    // check is unchanged — this media's own 0 must win over the earlier
-    // generation's 32 (a device-level slot could not tell them apart).
+    // dashStart 436.014207 with offset 0: this media was loaded without a runway,
+    // so its 436.014207 IS page time and nothing may be applied to it. The check
+    // rules out both wrong answers at once — the earlier generation's 32 would
+    // publish 404.014207, and adding this media's own dashStart would publish
+    // 872.028414.
     check(
         "Chromecast: a media stating offset 0 is NOT remapped by an earlier generation's 32",
-        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 872.028414) <
+        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 436.014207) <
             1e-6,
         JSON.stringify({ published: chromecast.mediaStatus?.currentTime })
     );
@@ -479,9 +481,8 @@ async function main() {
     );
     await flush();
     check(
-        "Chromecast mid-video (offset 0): the page position is dashStart + the receiver's own position",
-        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 936.514207) <
-            1e-6,
+        "Chromecast mid-video (offset 0): the receiver's own position IS the page position (500.5, not 936.5)",
+        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 500.5) < 1e-6,
         JSON.stringify({ published: chromecast.mediaStatus?.currentTime })
     );
 

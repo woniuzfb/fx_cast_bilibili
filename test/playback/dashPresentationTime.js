@@ -213,29 +213,62 @@ function main(modules) {
         JSON.stringify(ticked)
     );
 
-    // ---- the receiver's position is REMUX-relative, not page time ---------
+    // ---- WHICH anchor applies is a property of the receiver family ---------
     //
-    // Measured on a Roku cast (console export 2026-09-17 01:50): the session
+    // Both families report a position on the generated playlist's clock, but the
+    // playlists do not start at the same place:
+    //
+    //   Chromecast  the runway is padded UP TO the seek target, so that clock
+    //               already runs on page time and only the media's stated offset
+    //               comes off: page = raw - offset.
+    //   Roku        the capture path emits no pad entries (?fxcastNoPad=1), so
+    //               its numbers are remux-relative and dashStart restores the
+    //               page position: page = dashStart + raw - offset.
+    //
+    // Measured on a Roku cast (console export 2026-09-17 01:50): the receiver
     // reported 8.795 while its media stated dashStart 636.2016 and offset 0, and
     // the popup published 8.795 — so the bar started at 0:00 and counted up from
-    // there. The conversion is dashStart + raw - offset, and it is ONE place.
+    // there. The same value for a CHROMECAST is why the anchor cannot be shared:
+    // a mid-video cast's raw position already contains the seek target, so
+    // adding dashStart published `page + dashStart` (a cast at 23:51 showed
+    // ~47:42) while an opening cast, whose dashStart is ~0, looked correct.
     const deviceManagerSourceForMapping = fs.readFileSync(
         path.join(extensionSrc, "background/deviceManager.ts"),
         "utf8"
     );
     check(
-        "mapping: the receiver position is converted with dashStart + raw - offset",
-        /Math\.max\(0, dashStart \+ raw - presentationOffset\)/.test(
+        "mapping: the anchor is chosen by the receiver family, not for both",
+        /const rokuCapturePlaylist = device\.deviceType === "roku";/.test(
             deviceManagerSourceForMapping
-        ),
-        "the mapping still drops dashStart (the popup then starts each cast at 0:00)"
+        ) &&
+            /const clockAnchor =\s*rokuCapturePlaylist && dashStart !== undefined \? dashStart : 0;/.test(
+                deviceManagerSourceForMapping
+            ),
+        "the mapping applies one anchor to both families"
     );
     check(
-        "mapping: a media that states no dashStart is refused instead of anchored at 0",
-        /DASH current time NOT mapped \(no dashStart\)/.test(
+        "mapping: one formula publishes both families' page time",
+        /Math\.max\(0, clockAnchor \+ raw - presentationOffset\)/.test(
             deviceManagerSourceForMapping
         ),
+        "the mapping still drops an anchor or adds one twice"
+    );
+    check(
+        "mapping: the Roku family refuses a media that states no dashStart instead of anchoring at 0",
+        /rokuCapturePlaylist && dashStart === undefined/.test(
+            deviceManagerSourceForMapping
+        ) &&
+            /DASH current time NOT mapped \(no dashStart\)/.test(
+                deviceManagerSourceForMapping
+            ),
         "a missing dashStart would be treated as page 0"
+    );
+    check(
+        "mapping: the Chromecast family does NOT require dashStart (its clock is already page time)",
+        !/presentationOffset === undefined \|\| dashStart === undefined\)/.test(
+            deviceManagerSourceForMapping
+        ),
+        "the Chromecast mapping refuses a media it can convert"
     );
     check(
         "mapping: the identity map carries dashStart alongside the offset (periodic reports drop customData)",
