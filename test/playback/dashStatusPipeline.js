@@ -655,6 +655,106 @@ async function main() {
         })
     );
 
+    // ---- a SEEK RELOAD: the superseded generation's reports ------------------
+    //
+    // A DASH seek restarts the bridge remux: the sender appends a fresh
+    // `?v=<timestamp>` and LOADs a media whose `dashStart` is the new page
+    // position (600 here), while the receiver is still playing the PREVIOUS
+    // stream (anchor 300) for a beat. Periodic reports about that previous stream
+    // carry no customData, so they can only be resolved through the identity map
+    // (`mediaSessionId` / contentId) — and the map now holds the NEW generation,
+    // because remembering a generation replaces that device's entries.
+    //
+    // Converting such a report with the new generation's anchor invents a
+    // position above both the old and the new one: the old remux clock (100)
+    // plus the NEW dashStart (600) publishes 700, which is neither where the
+    // receiver is (400) nor where it is going (605). On the popup that is a
+    // jump of a whole seek target — the same class of defect as the doubled
+    // Chromecast position above, and the reason this test drives the real merge.
+    const seekReloadDevice = await registerDevice(modules, {
+        ...ROKU,
+        id: "roku-seek-reload-test"
+    });
+    const oldGenerationContentId =
+        "http://10.0.0.111:9555/s/roku-seek/index.m3u8?v=1";
+    const newGenerationContentId =
+        "http://10.0.0.111:9555/s/roku-seek/index.m3u8?v=2";
+    // Generation 1: the media the popup is watching, loaded from page 300.
+    sendMediaStatus(
+        modules,
+        seekReloadDevice,
+        makeStatus({
+            currentTime: 100,
+            contentId: oldGenerationContentId,
+            customData: dashCustomData(300, 0)
+        })
+    );
+    await flush();
+    const beforeSeek = Number(seekReloadDevice.mediaStatus?.currentTime);
+    check(
+        "seek reload: generation 1 reads on its own anchor (300 + 100)",
+        Math.abs(beforeSeek - 400) < 1e-6,
+        JSON.stringify({ published: beforeSeek })
+    );
+    // The seek's own LOAD: page 600, still offset 0.
+    sendMediaStatus(
+        modules,
+        seekReloadDevice,
+        makeStatus({
+            currentTime: 5,
+            contentId: newGenerationContentId,
+            customData: dashCustomData(600, 0)
+        })
+    );
+    await flush();
+    const afterReload = Number(seekReloadDevice.mediaStatus?.currentTime);
+    check(
+        "seek reload: generation 2 reads on the NEW anchor (600 + 5)",
+        Math.abs(afterReload - 605) < 1e-6,
+        JSON.stringify({ published: afterReload })
+    );
+    // The stale report: the receiver's own bare media snapshot for the stream it
+    // is still finishing. Its identity is generation 1's.
+    sendMediaStatus(
+        modules,
+        seekReloadDevice,
+        makeStatus({
+            currentTime: 100,
+            bareMedia: true,
+            contentId: oldGenerationContentId
+        }),
+        pollProvenance(7, 3_000_000)
+    );
+    await flush();
+    const staleReported = Number(seekReloadDevice.mediaStatus?.currentTime);
+    check(
+        "seek reload: the superseded generation's report is ignored, not converted with the new anchor (605, not 700 nor a bare 100)",
+        Math.abs(staleReported - 605) < 1e-6,
+        JSON.stringify({
+            published: staleReported,
+            mergedWithTheNewAnchor: 700,
+            theStaleStreamsOwnPosition: 100
+        })
+    );
+    // ...and refusing that report must not wedge the map for the generation that
+    // IS current: the next bare report of generation 2 is still converted.
+    sendMediaStatus(
+        modules,
+        seekReloadDevice,
+        makeStatus({
+            currentTime: 9,
+            bareMedia: true,
+            contentId: newGenerationContentId
+        })
+    );
+    await flush();
+    const currentAfterStale = Number(seekReloadDevice.mediaStatus?.currentTime);
+    check(
+        "seek reload: the current generation's next bare report is still converted (600 + 9)",
+        Math.abs(currentAfterStale - 609) < 1e-6,
+        JSON.stringify({ published: currentAfterStale })
+    );
+
     // ---- a receiver relaunch must not look like the end of the cast ---------
     // A Roku DASH remux LOAD relaunches the player app, so the device reports no
     // application for a moment. Treating that as the end tore the media status
@@ -709,6 +809,29 @@ async function main() {
         path.join(sourceUnderTest, "background/deviceManager.ts"),
         "utf8"
     );
+    /**
+     * The body of the DASH remux status handler, so a control row can ask what
+     * THIS revision's handler does instead of matching a pattern anywhere in the
+     * file.
+     *
+     * The distinction matters: `device.mediaStatus = status;` (writing the
+     * message object straight onto the device) also appears in three unrelated
+     * branches, so a whole-file match claimed the mutation defect for a revision
+     * that had already fixed it — the control then reported a defect whose rows
+     * passed, which is a false alarm rather than a caught regression.
+     */
+    const statusHandlerSource = (() => {
+        const start = deviceManagerSource.indexOf(
+            'case "main:receiverDeviceMediaStatusUpdated"'
+        );
+        if (start < 0) return "";
+        const next = deviceManagerSource.indexOf('case "', start + 10);
+        return deviceManagerSource.slice(
+            start,
+            next < 0 ? deviceManagerSource.length : next
+        );
+    })();
+
     /** Does this revision decide the conversion by value (the guard this test
      *  replaces)? Source, not behavior: a pre-fix revision that lacks the guard
      *  entirely must not be required to fail its row. */
@@ -759,10 +882,22 @@ async function main() {
                 least: 1
             },
             {
+                // The defect this stage's last rows were written for: the map and
+                // the metadata merge both matched a report to a generation by its
+                // BASE contentId, so the `?v=` marker that distinguishes one remux
+                // from the next was discarded exactly where it was needed.
+                id: "a superseded generation matched by base id alone",
+                present: !/differentDashGeneration/.test(deviceManagerSource),
+                rows: /superseded generation's report is ignored/,
+                least: 1
+            },
+            {
                 id: "the conversion writes into the message object",
-                present: /device\.mediaStatus = status;/.test(
-                    deviceManagerSource
-                ),
+                present:
+                    statusHandlerSource !== "" &&
+                    !/device\.mediaStatus = \{ \.\.\.status \};/.test(
+                        statusHandlerSource
+                    ),
                 // Only the mutation row: a revision with this defect and an
                 // already-converted guard still reads the same page value on a
                 // replay, which is precisely why that guard looked sufficient.

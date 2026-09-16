@@ -60,6 +60,46 @@ function dashContentKey(
         : `${deviceId}|content:${normalized}`;
 }
 
+/**
+ * Does this contentId carry the sender's per-generation marker (`?v=<ts>`)?
+ *
+ * The sender appends a fresh query to the DASH remux URL on every remux
+ * restart, so the query IS the generation: two ids that both carry one and
+ * differ are two different media generations, while an id with no query says
+ * nothing (a receiver may report the stream's base id, and the first LOAD of a
+ * cast may carry no marker at all).
+ */
+function carriesGenerationTag(contentId: unknown): contentId is string {
+    return typeof contentId === "string" && contentId.includes("?");
+}
+
+/**
+ * Are these two ids the SAME media in PROVABLY different DASH remux generations?
+ *
+ * Both halves matter, and both are evidence rather than inference: the query is
+ * the generation (the sender appends a fresh `?v=<ts>` per remux restart), and
+ * an equal base path is what makes the two ids the same media at all. An id with
+ * no query, or a different base path, is not evidence of a superseded generation
+ * — it is an unmarked id or another media entirely, and those have their own
+ * handling (leave the position as reported; never inherit a shift).
+ *
+ * This is the test that tells "a report about the stream the receiver has not
+ * finished playing" apart from "a report about the media this device is actually
+ * on". Too lax and a superseded stream's clock is converted with the new
+ * generation's anchor — a jump of a whole seek target; too eager and a legitimate
+ * report is refused a conversion it needs.
+ */
+function differentDashGeneration(
+    recorded: unknown,
+    reported: unknown
+): boolean {
+    if (!carriesGenerationTag(recorded) || !carriesGenerationTag(reported)) {
+        return false;
+    }
+    if (recorded === reported) return false;
+    return normalizeContentId(recorded) === normalizeContentId(reported);
+}
+
 import {
     currentRokuMediaIdentities,
     currentRokuMediaIdentity,
@@ -183,11 +223,14 @@ export default new (class extends TypedEventTarget<EventMap> {
      * carries only the stream's media snapshot with no customData, and a report
      * with no shift to apply must not be guessed at. Entries for a device are
      * replaced whenever that device's media states a new generation, so the table
-     * tracks one generation per device instead of growing.
+     * tracks one generation per device instead of growing — which is also why a
+     * record keeps the contentId it was stated for: that marker is what tells a
+     * report about the superseded stream (see isSupersededDashGeneration) from a
+     * report about the generation this device is actually on.
      */
     private dashPresentationByMedia = new Map<
         string,
-        { offsetSeconds: number; dashStart: number }
+        { offsetSeconds: number; dashStart: number; contentId?: string }
     >();
     /**
      * Signature of the last remote ECP media sample traced per device. The
@@ -266,6 +309,59 @@ export default new (class extends TypedEventTarget<EventMap> {
                   }
                 : {})
         };
+    }
+
+    /**
+     * Does this report describe the DASH remux generation this device has already
+     * replaced?
+     *
+     * True only when both halves are provable, which is what keeps it from being a
+     * guess:
+     *
+     *   - the report's media carries a `?v=` marker that differs from the one on
+     *     record for the SAME base content (see differentDashGeneration), so it
+     *     names a different generation of this device's stream; and
+     *   - it does NOT state that stream's own shift, so it is not a generation
+     *     announcing itself. A real LOAD status states its own `customData`
+     *     (dashRemux + dashStart) and is therefore never superseded, even though
+     *     the map still holds the previous generation when it arrives.
+     *
+     * Everything else answers false — no marker on either side, another media
+     * entirely, nothing on record — so a report is only dropped on evidence.
+     */
+    private isSupersededDashGeneration(
+        device: ReceiverDevice,
+        media: MediaInfo | undefined
+    ): boolean {
+        const customData =
+            media?.customData && typeof media.customData === "object"
+                ? (media.customData as {
+                      dashRemux?: unknown;
+                      dashStart?: unknown;
+                      hlsDvr?: unknown;
+                  })
+                : undefined;
+        if (customData?.dashRemux === true) {
+            if (isHlsDvrCustomData(customData)) return false;
+            // A FINITE dashStart is the statement, whether or not an offset
+            // accompanies it: a media with no runway declares no offset at all
+            // (see adjustDashCurrentTime), so requiring both would call that
+            // media's own LOAD status superseded.
+            if (Number.isFinite(Number(customData.dashStart))) {
+                return false;
+            }
+        }
+        // The generation on record is looked up by the report's BASE content id,
+        // which is what makes it findable from a report whose marker differs: the
+        // table keys a generation by both the session and the base id, and only
+        // the newest generation has entries (the replacement clears the device's).
+        const recordedKey = dashContentKey(device.id, media?.contentId);
+        const recorded =
+            recordedKey === undefined
+                ? undefined
+                : this.dashPresentationByMedia.get(recordedKey);
+        if (recorded === undefined) return false;
+        return differentDashGeneration(recorded.contentId, media?.contentId);
     }
 
     /**
@@ -442,10 +538,14 @@ export default new (class extends TypedEventTarget<EventMap> {
                 : 0;
         const record = {
             offsetSeconds: normalized,
-            dashStart: Number.isFinite(dashStart) ? dashStart : 0
+            dashStart: Number.isFinite(dashStart) ? dashStart : 0,
+            contentId: identity.contentId
         };
         const records: Array<
-            [string, { offsetSeconds: number; dashStart: number }]
+            [
+                string,
+                { offsetSeconds: number; dashStart: number; contentId?: string }
+            ]
         > = [];
         const sessionKey =
             identity.mediaSessionId === undefined
@@ -1329,6 +1429,37 @@ export default new (class extends TypedEventTarget<EventMap> {
                           )
                         : undefined;
                 if (mergedSessionMedia) status.media = mergedSessionMedia;
+
+                // A report about a generation this device has already REPLACED is
+                // not this cast's state, and it must not reach the merge below.
+                //
+                // A DASH seek restarts the bridge remux and LOADs a media with a
+                // fresh `?v=` marker and a new `dashStart`, while the receiver is
+                // still finishing the previous stream. Periodic MEDIA_STATUS
+                // broadcasts about that previous stream carry only the stream's
+                // media snapshot — no customData — so the merge hands them the
+                // PREVIOUS status' metadata, which by then belongs to the new
+                // generation: the old remux clock (100) was published as
+                // `newDashStart + raw` (600 + 100 = 700) for a stream truly at
+                // 400, a jump of a whole seek target. Dropping the sample is also
+                // what keeps the current generation's metadata available for the
+                // reports that DO belong to it: inheriting the stale media left
+                // the device without a customData for the next bare report to
+                // carry forward.
+                if (this.isSupersededDashGeneration(device, status.media)) {
+                    if (sampleChanged) {
+                        this.traceDeviceMedia(
+                            deviceId,
+                            "superseded-generation-status-ignored",
+                            {
+                                inputContentId: status.media?.contentId,
+                                publishedContentId:
+                                    device.mediaStatus?.media?.contentId
+                            }
+                        );
+                    }
+                    break;
+                }
 
                 if (device.mediaStatus) {
                     // Periodic MEDIA_STATUS broadcasts can carry a
