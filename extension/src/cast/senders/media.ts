@@ -699,6 +699,90 @@ export default class MediaSender {
         this.desiredPlayback = action === "play" ? "playing" : "paused";
     }
 
+    /**
+     * The last receiver state the mirror saw, and which media session reported it
+     * (see adoptReceiverPlaybackIntent). Kept as the raw pair, because the whole
+     * question is "did THIS session move", which no device-level or page-level
+     * value can answer.
+     */
+    private lastReceiverReport?: {
+        mediaSessionId?: number;
+        playerState: string;
+    };
+
+    /**
+     * Adopt a receiver PLAY/PAUSE the extension did NOT command as the user's
+     * playback intent, so a following reload LOADs in the state the user left the
+     * receiver in.
+     *
+     * A pause pressed on the PHYSICAL remote (or on the receiver's own UI, or by
+     * another controller) reaches this sender as an observation, and nothing says
+     * "the user asked for this" except the observation itself. Without adopting
+     * it, `desiredPlayback` keeps describing the extension's last command, and the
+     * next seek LOADs `autoplay: true` — silently resuming playback the user
+     * stopped. The physical remote IS the user, so its state is intent.
+     *
+     * Each guard below is a way the receiver moves WITHOUT the user, which is what
+     * makes "not our command" decidable at all:
+     *
+     *   - only a SETTLED state counts. BUFFERING/IDLE are the transitions our own
+     *     load and seek transactions produce (and are what the page hold covers);
+     *     adopting one would inherit a state nobody asked for.
+     *   - the state must CHANGE on a media session we have already reported: the
+     *     first state of a NEWER session is the receiver starting the session WE
+     *     just loaded. On a Roku that relaunch auto-plays regardless of
+     *     `autoplay`, so adopting it would overwrite a pause the user did ask for
+     *     with the device's own startup state.
+     *   - nothing of ours may be holding the page (coordinator transaction, seek
+     *     priming, item transition): the receiver's state there is that
+     *     transaction's echo, not the user's.
+     *
+     * When adoption happens it is logged, because "the intent changed without a
+     * command" is otherwise invisible in a trace. The page still follows the
+     * receiver in `reconcilePlaybackState` either way — this only decides what the
+     * NEXT reload inherits.
+     */
+    private adoptReceiverPlaybackIntent(media: {
+        playerState: string;
+        mediaSessionId?: number;
+    }): void {
+        const previous = this.lastReceiverReport;
+        this.lastReceiverReport = {
+            mediaSessionId: media.mediaSessionId,
+            playerState: media.playerState
+        };
+        const state = media.playerState;
+        const settled =
+            state === cast.media.PlayerState.PLAYING ||
+            state === cast.media.PlayerState.PAUSED;
+        if (!settled) return;
+        if (
+            previous === undefined ||
+            previous.playerState === state ||
+            media.mediaSessionId === undefined ||
+            previous.mediaSessionId !== media.mediaSessionId
+        ) {
+            return;
+        }
+        if (this.isHoldingPage()) return;
+        const desired =
+            state === cast.media.PlayerState.PLAYING ? "play" : "pause";
+        if (
+            this.desiredPlayback === (desired === "play" ? "playing" : "paused")
+        ) {
+            return;
+        }
+        this.noteDesiredPlayback(desired);
+        this.debug?.(
+            "receiver moved on its own: the playback intent follows it",
+            {
+                receiverState: state,
+                mediaSessionId: media.mediaSessionId,
+                desiredPlayback: this.desiredPlayback
+            }
+        );
+    }
+
     /** Route a trusted BLE action through page-to-receiver synchronization. */
     controlFromBleRemote(
         action: "seek_backward" | "seek_forward" | "pause" | "play",
@@ -3302,6 +3386,15 @@ export default class MediaSender {
                 );
                 return;
             }
+
+            // A receiver PLAY/PAUSE that is not our command is the user acting on
+            // the physical remote or the receiver's own UI, and the next reload
+            // must inherit it (see adoptReceiverPlaybackIntent). Deliberately
+            // BEFORE the equal-state early return below: the page mirror may
+            // already agree with the receiver (it pauses the page the moment it
+            // sees the pause) while the INTENT has not been adopted yet, and the
+            // intent is what a reload reads.
+            this.adoptReceiverPlaybackIntent(boundMedia);
 
             const localState = mediaElement.paused
                 ? cast.media.PlayerState.PAUSED

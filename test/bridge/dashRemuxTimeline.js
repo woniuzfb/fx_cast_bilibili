@@ -943,6 +943,22 @@ async function padIsServable(run) {
  *    element (idempotent) and restores it on stop;
  *  - the page sender opens the item-transition window before the reload.
  */
+/**
+ * Do `first` and `second` appear, in that order, WITHIN `scope`?
+ *
+ * A file-wide first-occurrence search is not good enough for orderings inside a
+ * method: `isHoldingPage()` is also consulted by helper methods defined earlier in
+ * the class, so adding one such call reported the ordering below as broken when
+ * nothing in the tick had moved.
+ */
+function orderWithin(source, scope, first, second) {
+    const start = source.indexOf(scope);
+    if (start < 0) return false;
+    const a = source.indexOf(first, start);
+    const b = source.indexOf(second, start);
+    return a >= 0 && b >= 0 && a < b;
+}
+
 function checkItemChangeContracts() {
     const page = fs.readFileSync(resolved.bilibiliSource, "utf8");
     const pauseCondition =
@@ -1031,20 +1047,26 @@ function checkItemChangeContracts() {
             ),
         "the release rule lost one of its identity conditions"
     );
+    const pageTickScope =
+        "private addMediaElementListeners(mediaElement: HTMLMediaElement) {";
     check(
         "sender: the item-transition release runs BEFORE the generic page hold (it cannot hold itself alive)",
-        sender.indexOf("if (this.dashItemTransitionActive()) {") <
-            sender.indexOf("if (this.isHoldingPage()) return;"),
+        orderWithin(
+            sender,
+            pageTickScope,
+            "if (this.dashItemTransitionActive()) {",
+            "if (this.isHoldingPage()) return;"
+        ),
         "the transition release is unreachable behind the hold guard"
     );
     check(
         "sender: the transition guard is evaluated before the equal-state early return",
-        sender.indexOf(
-            "const itemTransition = this.dashItemTransitionActive();"
-        ) <
-            sender.indexOf(
-                "if (localState === boundMedia.playerState) return;"
-            ),
+        orderWithin(
+            sender,
+            pageTickScope,
+            "const itemTransition = this.dashItemTransitionActive();",
+            "if (localState === boundMedia.playerState) return;"
+        ),
         "the transition check sits after the early return again"
     );
     check(

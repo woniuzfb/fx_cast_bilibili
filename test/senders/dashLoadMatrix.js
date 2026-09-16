@@ -1879,6 +1879,13 @@ async function startCast(MediaSender, { pageTime = 0 } = {}) {
     const cast = {
         h,
         generations,
+        /**
+         * The media session the receiver is currently reporting on. Rows that
+         * deliver their own receiver state need it: "the session we already had
+         * moved" and "a new session appeared" are different events, and only the
+         * first one is the user acting on another controller.
+         */
+        receiverSessionId: () => sessionId,
         plan: pageStart => bridgePlan.plan(pageStart, keyframeFor(pageStart)),
 
         /**
@@ -2995,6 +3002,117 @@ const SCENARIOS = [
                     pageAt: 120,
                     pads: "full-pad-runway",
                     clock: "no-offset"
+                }
+            }
+        ]
+    },
+    {
+        id: "U",
+        name: "实体遥控暂停（无扩展命令）→ 随后的 seek 必须继承它",
+        start: { pageTime: 600 },
+        steps: [
+            {
+                // The physical remote IS the user, so a receiver PAUSED the
+                // extension did not command has to become the playback intent.
+                // Without that, `desiredPlayback` keeps describing the
+                // extension's last command and the next seek silently resumes
+                // playback the user stopped.
+                name: "实体遥控 Pause（同一 session 内的状态变化）：采纳为意图，不得产生 Generation 或接收端命令",
+                run: async cast => {
+                    cast.beforeCommands = cast.h.receiverCommandTotals();
+                    // The receiver was playing; then it is paused. Both on the
+                    // session it was already reporting.
+                    await cast.report(
+                        PlayerState.PLAYING,
+                        600,
+                        cast.receiverSessionId()
+                    );
+                    await cast.report(
+                        PlayerState.PAUSED,
+                        600,
+                        cast.receiverSessionId()
+                    );
+                },
+                contract: {
+                    generations: 0,
+                    custom: (cast, mismatches) => {
+                        const before = cast.beforeCommands;
+                        const after = cast.h.receiverCommandTotals();
+                        const delta = {
+                            pause: after.pause - before.pause,
+                            play: after.play - before.play,
+                            seek: after.seek - before.seek
+                        };
+                        if (delta.pause || delta.play || delta.seek) {
+                            mismatches.push(
+                                `a status report produced receiver commands ${JSON.stringify(
+                                    delta
+                                )} (an observation is not a command)`
+                            );
+                        }
+                    }
+                }
+            },
+            {
+                name: "随后页面拖到 0:00：LOAD 必须 autoplay=false（遥控暂停跨过这次 seek）",
+                run: cast => cast.pageSeek(0),
+                contract: {
+                    finalTarget: 0,
+                    generations: 1,
+                    pads: "full-pad-runway",
+                    clock: "shifted",
+                    pageAt: 0,
+                    autoplay: false
+                },
+                // Before the receiver's own play/pause was adopted as intent, the
+                // reload inherited "playing" and resumed what the remote had
+                // stopped.
+                gap: {
+                    finalTarget: 0,
+                    generations: 1,
+                    pads: "full-pad-runway",
+                    clock: "shifted",
+                    pageAt: 0,
+                    autoplay: true
+                }
+            }
+        ]
+    },
+    {
+        id: "V",
+        name: "接收端自己起播（新 session 的 PLAYING）不得覆盖用户的暂停",
+        start: { pageTime: 600 },
+        steps: [
+            {
+                name: "popup 暂停（用户明确表达的意图）",
+                run: cast => cast.pause(),
+                contract: { generations: 0 }
+            },
+            {
+                // A Roku relaunch auto-plays regardless of `autoplay`, and any
+                // reload brings up a NEW media session. That startup state is the
+                // device's, not the user's: adopting it would overwrite the pause
+                // the user did ask for.
+                name: "接收端以新 session 报告 PLAYING（设备自播）：不得被当成用户意图",
+                run: async cast => {
+                    await cast.report(
+                        PlayerState.PLAYING,
+                        600,
+                        cast.receiverSessionId() + 1
+                    );
+                },
+                contract: { generations: 0 }
+            },
+            {
+                name: "随后 seek：LOAD 仍须 autoplay=false（暂停没有被设备自播改写）",
+                run: cast => cast.pageSeek(0),
+                contract: {
+                    finalTarget: 0,
+                    generations: 1,
+                    pads: "full-pad-runway",
+                    clock: "shifted",
+                    pageAt: 0,
+                    autoplay: false
                 }
             }
         ]
