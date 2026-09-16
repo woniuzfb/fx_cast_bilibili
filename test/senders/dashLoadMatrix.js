@@ -261,12 +261,28 @@ function loadBridgePlan() {
             "dashLoadMatrix: presentationStartTime is not computed where expected"
         );
     }
+    // presentationStartTime is published through a named helper (the Chromecast
+    // window is sized against the same value), so the right-hand side may be a
+    // call: resolve the helper's own body instead of evaluating an unbound name.
+    let presentationSource = expression[1].trim();
+    const helperName = /^([A-Za-z_$][\w$]*)\(\)$/.exec(presentationSource);
+    if (helperName) {
+        const helper = new RegExp(
+            `const ${helperName[1]} = \\(\\) =>\\s*([\\s\\S]*?);\\n`
+        ).exec(source);
+        if (!helper) {
+            throw new Error(
+                `dashLoadMatrix: ${helperName[1]}() is called but its body was not found in mediaServer.ts`
+            );
+        }
+        presentationSource = helper[1].trim();
+    }
     // eslint-disable-next-line no-new-func
     const presentationExpression = new Function(
         "padBaseSeconds",
         "normalizedStartTime",
         "contentBaseSeconds",
-        `return ${expression[1]};`
+        `return ${presentationSource};`
     );
     // The arm the source uses for the Chromecast path: `useStartupPadding` is
     // true for every non-Roku cast while the option is on (its default), which

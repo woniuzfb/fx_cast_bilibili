@@ -190,13 +190,20 @@ if (name.includes("ffprobe")) {
             header + "\\n" + lines.join("\\n") + "\\n" + (endList ? "#EXT-X-ENDLIST\\n" : "")
         );
     };
+    // EVERY advertised entry exists from the first write; only the files drip.
+    // A real remux produces segments at 50-238x and the receiver sees a list
+    // that keeps growing while its app launches, so an up-front list is the
+    // faithful shape — and it is the only one that makes the served playlist
+    // deterministic regardless of how long the harness took to get there.
+    for (let i = 0; i < count; i++) {
+        lines.push("#EXTINF:4.000000,");
+        lines.push(path.basename(pattern.replace("%06d", String(i).padStart(6, "0"))));
+    }
     write(false);
     let index = 0;
     const step = () => {
         const file = pattern.replace("%06d", String(index).padStart(6, "0"));
         fs.writeFileSync(file, Buffer.alloc(376, 0x47));
-        lines.push("#EXTINF:4.000000,");
-        lines.push(path.basename(file));
         index++;
         write(index >= count);
         if (index >= count) process.exit(0);
@@ -225,10 +232,10 @@ async function buildBridge(sourcePath) {
     if (REVERT_TIMELINE) {
         // Negative control, one behavior at a time: take the CURRENT source (so
         // the harness seams still exist) and put back exactly the pre-fix
-        // timeline rules — no minimum pad runway on the Chromecast path, and pad
-        // generation serialized behind the keyframe probe. Both rewrites must
-        // apply: a control that silently tests the fixed code would report green
-        // and mean nothing.
+        // timeline rules — no minimum pad runway on the Chromecast path, pad
+        // generation serialized behind the keyframe probe, and no window cap on
+        // the advertised playlist. All three rewrites must apply: a control that
+        // silently tests the fixed code would report green and mean nothing.
         const original = fs.readFileSync(sourcePath, "utf8");
         const reverted = original
             .replace(
@@ -238,10 +245,17 @@ async function buildBridge(sourcePath) {
             .replace(
                 /if \(useStartupPadding\) \{\n\s*requestPadSegment\(CHROMECAST_MIN_PAD_SECONDS\);\n\s*\}/,
                 ""
+            )
+            .replace(
+                /const visibleEnd = Math\.min\(capByMiddle, capByRunway\);/,
+                "const visibleEnd = capByRunway;"
             );
         if (
             reverted === original ||
-            reverted.includes("requestPadSegment(CHROMECAST_MIN_PAD_SECONDS)")
+            reverted.includes(
+                "requestPadSegment(CHROMECAST_MIN_PAD_SECONDS)"
+            ) ||
+            reverted.includes("Math.min(capByMiddle, capByRunway)")
         ) {
             throw new Error(
                 "--revert-timeline could not rewrite the timeline rules; the patch no longer matches the source"
@@ -366,7 +380,9 @@ async function runRemux(bridge, options) {
         rokuDashPrebuffer = false,
         /** Options page value: undefined = ON (the default), false = OFF. */
         startupPadding = undefined,
-        fetchPlaylist = true
+        fetchPlaylist = true,
+        /** Receiver-app launch delay before its FIRST playlist fetch. */
+        playlistFetchDelayMs = 0
     } = options;
     const tools = writeFakeTools(bridge.toolsDir);
     const messenger = makeMessenger();
@@ -410,6 +426,13 @@ async function runRemux(bridge, options) {
     let playlist;
     if (fetchPlaylist) {
         // The receiver's own fetch: this exercises the rewrite + HTTP serving.
+        // A delay models the receiver app's launch, during which the un-windowed
+        // playlist would grow.
+        if (playlistFetchDelayMs > 0) {
+            await new Promise(resolve =>
+                setTimeout(resolve, playlistFetchDelayMs)
+            );
+        }
         playlist = await fetchText(playlistUrl);
     }
 
@@ -422,10 +445,30 @@ async function runRemux(bridge, options) {
             return { tool, at: Number(at), role };
         });
 
+    // The bridge's own playlist diagnostics, parsed: the window it published is
+    // a fact about the served playlist, and the server's view of it (shown /
+    // total / windowEnd) is the only way to tell a window from a short list.
+    // `event` is the message's field; the window numbers ride inside `details`.
+    const playlistDebug = messenger.messages
+        .filter(
+            message =>
+                message.subject === "main:dashRemuxDebug" &&
+                message.data?.event === "playlist"
+        )
+        .map(message => {
+            try {
+                return JSON.parse(message.data?.details ?? "{}");
+            } catch {
+                return undefined;
+            }
+        })
+        .filter(Boolean);
+
     const result = {
         requestId,
         data: started.data,
         playlist,
+        playlistDebug,
         playlistUrl,
         port,
         spawns,
@@ -510,6 +553,206 @@ async function caseMidVideo(bridge) {
 }
 
 /**
+ * The window: a no-ENDLIST EVENT playlist is capped at the tail so the LOAD
+ * position always stays past the window's middle. This is what keeps the
+ * 50-238x remux from ballooning the list past the position during the receiver
+ * app's launch delay (on-device: a mid cast failed once the list reached
+ * 3345s, middle 1672 > position 1435).
+ */
+async function caseWindow(bridge) {
+    const PRESENTATION_START = 32 + 2.864;
+    const run = await runRemux(bridge, {
+        startTime: 2.864,
+        keyframes: "0",
+        // 40 x 4s: far past both window bounds, so the served playlist is
+        // truncated for a reason instead of merely being short.
+        segments: 40
+    });
+    const served = segmentNames(run.playlist.body);
+    const debug = run.playlistDebug.at(-1);
+    check(
+        "window: the bridge reports a Chromecast window on the served playlist",
+        Boolean(debug && debug.chromecastWindowed === true),
+        JSON.stringify(debug ?? run.playlistDebug)
+    );
+    check(
+        "window: the served playlist is truncated to the window, not served whole",
+        Boolean(debug) &&
+            served.length === Number(debug.chromecastVisibleEntries) &&
+            Number(debug.chromecastVisibleEntries) <
+                Number(debug.chromecastTotalEntries),
+        JSON.stringify({
+            served: served.length,
+            shown: debug?.chromecastVisibleEntries,
+            total: debug?.chromecastTotalEntries
+        })
+    );
+    const windowEnd = Number(debug?.chromecastWindowEnd);
+    const visibleSeconds = Number(debug?.chromecastVisibleSeconds);
+    // Observing from here cannot reproduce the bridge's exact elapsed time (the
+    // drip starts inside the request), so the assertion is on the DISTANCE from
+    // the position: it is fixed by the formula, and 0.2s of slack covers the gap
+    // between the bridge's clock reading and this one. The runway bound would be
+    // presentation + 60 = 94.9s — an order of magnitude outside that slack.
+    const expectedWindowEnd = 2 * (PRESENTATION_START - 5);
+    check(
+        "window: the window end is the middle bound 2 x (position + elapsed - segment - 1), not the position + 60s runway",
+        Number.isFinite(windowEnd) &&
+            Math.abs(windowEnd - expectedWindowEnd) < 0.2,
+        JSON.stringify({
+            windowEnd,
+            expectedWindowEnd,
+            runwayBound: PRESENTATION_START + 60
+        })
+    );
+    check(
+        "window: exactly the entries that fit inside the window end are advertised (the rest is held back)",
+        Number.isFinite(windowEnd) &&
+            visibleSeconds <= windowEnd &&
+            visibleSeconds > windowEnd - 4,
+        JSON.stringify({ visibleSeconds, windowEnd })
+    );
+    // The join acceptance rule, from the playlist the receiver actually gets:
+    // the entry containing the middle of the window must END before the LOAD
+    // position, and every entry must have landed inside the window end.
+    const durations = entryDurations(run.playlist.body);
+    const half = durations.reduce((total, d) => total + d, 0) / 2;
+    let reached = 0;
+    let middleEntryEnd = 0;
+    for (const duration of durations) {
+        reached += duration;
+        if (reached >= half) {
+            middleEntryEnd = reached;
+            break;
+        }
+    }
+    check(
+        "window: the window's middle entry ends before the LOAD position (the join rule)",
+        middleEntryEnd > 0 && middleEntryEnd <= PRESENTATION_START,
+        JSON.stringify({
+            middleEntryEnd,
+            presentationStart: PRESENTATION_START
+        })
+    );
+    check(
+        "window: nothing past the window end is advertised",
+        Number.isFinite(windowEnd) && visibleSeconds <= windowEnd + 1e-6,
+        JSON.stringify({ visibleSeconds, windowEnd })
+    );
+    check(
+        "window: the window still carries real segments now (it is not a bare pad runway)",
+        served.includes("segment-000000.ts"),
+        JSON.stringify(served.slice(-3))
+    );
+    return run;
+}
+
+/**
+ * The drip clock is anchored at the receiver's FIRST playlist fetch, not at the
+ * remux's start. That anchoring IS the fix for the second half of the failure:
+ * on-device, the receiver app's 3-7s launch delay let the list balloon to 3345s
+ * while the LOAD position stayed at 1435, putting the window's middle (1672)
+ * past the position — a mid cast failed that way (harness run "midctl2").
+ */
+async function caseWindowAnchor(bridge) {
+    const PRESENTATION_START = 32 + 2.864;
+    const LOAD_DELAY_MS = 2500;
+    const run = await runRemux(bridge, {
+        startTime: 2.864,
+        keyframes: "0",
+        // 200 x 4s = 800s of advertised media at 50ms per segment: the list is
+        // still growing (no ENDLIST) when the delayed first fetch arrives, which
+        // is exactly the state that defeated the on-device mid cast.
+        segments: 200,
+        segmentMs: 50,
+        playlistFetchDelayMs: LOAD_DELAY_MS
+    });
+    const debug = run.playlistDebug.at(-1);
+    const windowEnd = Number(debug?.chromecastWindowEnd);
+    check(
+        "window anchor: the first fetch still gets a window sized from ITS own moment, not from the remux start",
+        // Same distance-from-position observation as caseWindow: 2.1s of
+        // generation elapsed before the fetch, and the window ignores it.
+        Number.isFinite(windowEnd) &&
+            Math.abs(windowEnd - 2 * (PRESENTATION_START - 5)) < 0.5,
+        JSON.stringify({
+            windowEnd,
+            expected: 2 * (PRESENTATION_START - 5),
+            listedEntries: debug?.chromecastTotalEntries
+        })
+    );
+    check(
+        "window anchor: the remux ballooned far past the position while the receiver was away (the failure this anchoring prevents)",
+        Number(debug?.chromecastTotalEntries) > 100 &&
+            windowEnd < PRESENTATION_START + 60,
+        JSON.stringify({
+            listedEntries: debug?.chromecastTotalEntries,
+            windowEnd
+        })
+    );
+    return run;
+}
+
+async function casePadDiscontinuity(bridge) {
+    const run = await runRemux(bridge, { startTime: 2.864, keyframes: "0" });
+    const body = String(run.playlist.body ?? "");
+    const tagAt = body.indexOf("#EXT-X-DISCONTINUITY");
+    const realAt = body.indexOf("segment-000000.ts");
+    const lastPadAt = body.lastIndexOf("pad.ts");
+    check(
+        "discontinuity: the served playlist declares the pad -> real segment boundary exactly once",
+        tagAt >= 0 && body.indexOf("#EXT-X-DISCONTINUITY", tagAt + 1) === -1,
+        JSON.stringify(body.split("\n").slice(-8))
+    );
+    check(
+        "discontinuity: it sits between the last pad and the first real segment",
+        tagAt >= 0 && lastPadAt >= 0 && realAt > tagAt && tagAt > lastPadAt,
+        JSON.stringify({ lastPadAt, tagAt, realAt })
+    );
+    return run;
+}
+
+async function caseNoPadDiscontinuity(bridge) {
+    // A mid-video cast is padded to its keyframe (1431s of runway), so it DOES
+    // have the boundary; what must never happen is a tag with no pads in front
+    // of it, because then there is no discontinuity to declare.
+    const mid = await runRemux(bridge, {
+        startTime: 1431.805,
+        keyframes: "1431"
+    });
+    const midBody = String(mid.playlist.body ?? "");
+    check(
+        "discontinuity: a padded mid-video cast declares its own boundary too (the tag follows the pads, whatever the pad base)",
+        midBody.includes("#EXT-X-DISCONTINUITY") &&
+            midBody.indexOf("#EXT-X-DISCONTINUITY") >
+                midBody.lastIndexOf("pad.ts"),
+        JSON.stringify({
+            pads: countLeading(segmentNames(midBody), "pad.ts"),
+            tagAt: midBody.indexOf("#EXT-X-DISCONTINUITY")
+        })
+    );
+    const off = await runRemux(bridge, {
+        startTime: 2.864,
+        keyframes: "0",
+        startupPadding: false
+    });
+    const offBody = String(off.playlist.body ?? "");
+    const offRows = segmentNames(offBody);
+    check(
+        "discontinuity: no pad entries anywhere means no boundary is declared (nothing to declare it between)",
+        !offBody.includes("#EXT-X-DISCONTINUITY") &&
+            !offRows.includes("pad.ts") &&
+            Number(off.data.padBaseSeconds) === 0,
+        JSON.stringify({
+            tagAt: offBody.indexOf("#EXT-X-DISCONTINUITY"),
+            first: offRows[0],
+            padBase: off.data.padBaseSeconds
+        })
+    );
+    return mid;
+}
+
+/**
  * The options-page switch (default ON). OFF must restore the pre-compatibility
  * timeline completely: no runway, LOAD at the requested start, no pad segment
  * generated up front, and an unchanged mid-video case either way.
@@ -521,10 +764,20 @@ async function caseStartupPaddingOff(bridge) {
         startupPadding: false
     });
     const rows = segmentNames(off.playlist.body);
+    const offWindow = off.playlistDebug.at(-1);
     check(
-        "option off: no pad entries are published at all",
-        rows.length > 0 && !rows.includes("pad.ts"),
-        JSON.stringify({ first: rows[0], pads: countLeading(rows, "pad.ts") })
+        "option off (opening cast, keyframe 0): no pad entries exist to publish, and the window has nothing to keep",
+        Number(off.data.padBaseSeconds) === 0 &&
+            !rows.includes("pad.ts") &&
+            Boolean(offWindow) &&
+            Number(offWindow.chromecastVisibleEntries) === 0,
+        JSON.stringify({
+            rows: rows.length,
+            pads: rows.filter(row => row === "pad.ts").length,
+            padBase: off.data.padBaseSeconds,
+            windowEnd: offWindow?.chromecastWindowEnd,
+            body: String(off.playlist.body ?? "").slice(0, 120)
+        })
     );
     check(
         "option off: LOAD is the requested start on an unpadded timeline",
@@ -566,11 +819,21 @@ async function caseStartupPaddingOff(bridge) {
         "the Roku path's pad base no longer ignores the option"
     );
     check(
-        "option (Roku): the up-front pad generation is gated by the same flag (never on the Roku path)",
-        /if \(useStartupPadding\) \{\n\s*requestPadSegment\(CHROMECAST_MIN_PAD_SECONDS\);/.test(
-            source
-        ),
-        "the up-front pad generation is not gated by the option-derived flag"
+        "option (Roku): nothing requests a pad with the minimum runway (the flag cannot reach that path)",
+        !/requestPadSegment\(CHROMECAST_MIN_PAD_SECONDS\)/.test(source) &&
+            /requestPadSegment\?\.\(padBaseSeconds\);/.test(source),
+        "the minimum-runway pad request is back"
+    );
+    // The one shared cut point for both remux inputs, read out of the source:
+    // the keyframe, never the raw startTime, and never a keyframe-padded value
+    // that would cut the audio ahead of the video.
+    check(
+        "seek: both inputs are cut at the resolved keyframe (min of pad base and content base), not startTime",
+        /Math\.min\(padBaseSeconds, contentBaseSeconds\)/.test(source) &&
+            !/seekArgs =[\s\S]{0,120}normalizedStartTime\.toFixed\(3\)/.test(
+                source
+            ),
+        "the remux -ss is not the shared keyframe position"
     );
     return off;
 }
@@ -600,33 +863,39 @@ async function caseProbeFailure(bridge) {
 }
 
 async function caseParallelStart(bridge) {
+    const PROBE_MS = 1200;
     const run = await runRemux(bridge, {
         startTime: 2.864,
         keyframes: "0",
-        probeMs: 1200
+        probeMs: PROBE_MS
     });
     const probe = run.spawns.find(entry => entry.tool === "ffprobe");
     const remux = run.spawns.find(entry => entry.role === "remux");
     const pad = run.spawns.find(entry => entry.role === "pad");
     check(
-        "parallel startup: all three processes are started for one remux",
+        "startup order: all three processes are started for one remux",
         Boolean(probe && remux && pad),
         JSON.stringify(run.spawns)
     );
+    // The remux's -ss has to name the keyframe the video input will land on,
+    // which is only known once the probe answers, so the remux now starts AFTER
+    // it (bounded at 8s). This is the price of cutting both inputs at the same
+    // point; the old parallel start cut them at different points and lost the
+    // first segment's audio.
     check(
-        "parallel startup: the pad generator starts BEFORE the probe exits (not serialized behind it)",
-        Boolean(probe && pad) && pad.at < probe.at + 1200,
-        JSON.stringify({ probeMs: 1200, spawns: run.spawns })
+        "startup order: the remux starts only after the probe has exited (the shared cut point needs its answer)",
+        Boolean(probe && remux) && remux.at >= probe.at + PROBE_MS - 150,
+        JSON.stringify({ probeMs: PROBE_MS, spawns: run.spawns })
     );
     check(
-        "parallel startup: the remux starts before the probe exits",
-        Boolean(probe && remux) && remux.at < probe.at + 1200,
-        JSON.stringify({ probeMs: 1200, spawns: run.spawns })
+        "startup order: pad generation starts with the remux, once the base is known (not before the probe)",
+        Boolean(probe && pad) && pad.at >= probe.at + PROBE_MS - 150,
+        JSON.stringify({ probeMs: PROBE_MS, spawns: run.spawns })
     );
     check(
-        "parallel startup: readiness still waits for the finished probe",
-        run.readyMs >= 1200,
-        JSON.stringify({ readyMs: run.readyMs })
+        "startup order: readiness still waits for the finished probe",
+        run.readyMs >= PROBE_MS,
+        JSON.stringify({ probeMs: PROBE_MS, readyMs: run.readyMs })
     );
     return run;
 }
@@ -634,6 +903,13 @@ async function caseParallelStart(bridge) {
 function segmentNames(playlist) {
     return [...String(playlist ?? "").matchAll(/^(pad|segment-\d+)\.ts/gm)].map(
         match => match[0]
+    );
+}
+
+/** Every advertised entry duration, in playlist order. */
+function entryDurations(playlist) {
+    return [...String(playlist ?? "").matchAll(/^#EXTINF:([0-9.]+)/gm)].map(
+        match => Number(match[1])
     );
 }
 
@@ -832,6 +1108,10 @@ async function main() {
     );
     await attempt("start-at-0", () => caseZeroStart(bridge));
     await attempt("mid-video", () => caseMidVideo(bridge));
+    await attempt("window", () => caseWindow(bridge));
+    await attempt("window anchor", () => caseWindowAnchor(bridge));
+    await attempt("pad discontinuity", () => casePadDiscontinuity(bridge));
+    await attempt("no-pad discontinuity", () => caseNoPadDiscontinuity(bridge));
     await attempt("startup padding off", () => caseStartupPaddingOff(bridge));
     await attempt("probe failure", () => caseProbeFailure(bridge));
     await attempt("parallel startup", () => caseParallelStart(bridge));
@@ -844,14 +1124,14 @@ async function main() {
     console.info("");
     if (REVERT_TIMELINE) {
         // The control: with the pre-fix timeline rules back in place, the
-        // zero-start padding and the parallel pad startup must FAIL here, or the
-        // checks above measure nothing.
+        // zero-start padding, the parallel pad startup, the window cap and the
+        // pad-boundary tag must FAIL here, or the checks above measure nothing.
         const expected = failures.filter(name =>
-            /opening cast.*opens with pad entries|start-at-0|parallel startup: the pad generator/.test(
+            /opening cast.*opens with pad entries|start-at-0|parallel startup: the pad generator|window: the window end is the middle bound|window anchor: the first fetch|discontinuity: the served playlist declares/.test(
                 name
             )
         );
-        if (expected.length < 3) {
+        if (expected.length < 6) {
             console.error(
                 `dashRemuxTimeline: --revert-timeline expected the control failures, saw ${expected.length}` +
                     (failures.length ? ` (${failures.join("; ")})` : "")

@@ -43,22 +43,67 @@ padded timeline (32 + 2.864), and `pad.ts` really is servable.
 between two different playlist shapes; that boundary was a startup race.
 
 **The options switch (`chromecastDashStartupPadding`, default ON).** OFF must
-restore the pre-compatibility timeline completely: no pad entries published, no
-pad process spawned up front, `padBaseSeconds === 0`, LOAD at the requested
-start; mid-video stays byte-identical either way; and the Roku path is asserted
-from the source to ignore the flag (its pad base is the captured segment's own
-start, and this harness has no capture input).
+restore the pre-compatibility timeline completely: no minimum-runway pad entries,
+no pad process spawned for the minimum runway, `padBaseSeconds === 0` on an
+opening cast (so the window has nothing to keep), LOAD at the requested start;
+mid-video stays byte-identical either way; and the Roku path is asserted from the
+source to ignore the flag (its pad base is the captured segment's own start, and
+this harness has no capture input).
+
+**The shared remux cut point.** Both inputs are seeked to `contentBaseSeconds`,
+the probed video keyframe (`Math.min(padBaseSeconds, contentBaseSeconds)`), never
+to the raw `startTime`: seeking video and audio to the same *wall-clock* target
+cuts them at DIFFERENT points (the video input resumes at its keyframe, the audio
+input at the target), which makes the mpegts interleaver drop the first segment's
+audio that precedes its first written video packet. `padBaseSeconds` is NOT the
+cut point — it is the end of the playlist's synthetic runway and is larger than
+the keyframe whenever the Chromecast minimum runway is active (keyframe 0,
+padBase 32 on an opening cast). Measured on a real remux before the fix:
+video 1.500s against audio 4.394s with 87 audio packets instead of 211; after it:
+1.500/1.500 with 211. The source check here pins the expression, so a regression
+to `-ss startTime` fails.
+
+**Startup order.** Because the cut point is only known once the probe answers,
+the remux now starts AFTER the probe has exited (bounded at 8s, falling back to
+`startTime`), and pad generation starts with it. The checks assert that order
+(probe first, then remux and pad together) instead of the previous parallel
+startup, which is the trade this fix makes.
 
 **Mid-video (health control).** Keyframe 1431 / start 1431.805 keeps
 `padBaseSeconds === 1431`, `presentationStartTime === 1431.805` and reports
 `probedKeyframeSeconds === 1431` — the values the working production path has.
 
-**Probe failure.** A corrupt ffprobe payload must still reach readiness, must
-fall back to the requested start, and must NOT claim a probed keyframe.
+**The window (`limitChromecastDashPlaylist`).** A no-ENDLIST EVENT playlist is
+capped at its tail so the LOAD position always stays past the window's middle,
+because a Chromecast joins at the middle and rejects a LOAD before the end of
+the middle entry. With 40 segments advertised, the SERVED playlist must be
+truncated, not whole; the window end must be the middle bound
+`2 x (position + elapsed - targetDuration - 1)` (in that configuration the
+Roku-style `position + 60s` runway bound is not the one that binds); exactly the
+entries that fit inside the window end are advertised; and — read back off the
+served playlist — the entry containing half the window ends at or before the
+LOAD position. Deleting the cap makes those checks fail, which is what the
+`--revert-timeline` control asserts.
 
-**Parallel startup.** With a 1200ms probe, the pad generator and the remux must
-both be spawned before the probe exits, and readiness must still wait for the
-probe: pad generation is not serialized behind ffprobe.
+**The window's drip anchor.** The drip clock starts at the receiver's FIRST
+playlist fetch, not at the remux start: with 800s advertised at 50ms per segment
+and a 2.5s fetch delay, the first fetch must still receive a window sized from
+its own moment. That anchoring is the fix for the on-device mid-cast failure
+where the app's 3-7s launch grew the list to 3345s and put the middle (1672)
+past the position (1435).
+
+**The pad discontinuity.** The pads are a different media timeline from the
+remuxed segments, so the boundary is declared: `#EXT-X-DISCONTINUITY` must
+appear exactly once, between the last `pad.ts` and the first real segment, and
+never when no pad entries were emitted (padding omitted, or a zero pad base).
+Without the tag a receiver is entitled to carry the pad's decode clock straight
+into the real segment.
+
+**Probe failure.** A corrupt ffprobe payload must still reach readiness, must
+fall back to the requested start, and must NOT claim a probed keyframe. It also
+keeps the remux's cut point equal to the requested start, since the fallback
+keyframe is the start time: a failed probe degrades to the old behaviour instead
+of cutting both inputs at a pad base that no keyframe backs.
 
 **Item change contracts.** Read out of the real sender sources, so the checks
 cannot drift from the shipped code: `bilibili.ts` pauses the page ONLY under an
@@ -77,10 +122,11 @@ node test/bridge/dashRemuxTimeline.js --revert-timeline # negative control
 node test/bridge/dashRemuxTimeline.js --rev <git-rev>   # another revision
 ```
 
-`--revert-timeline` takes the CURRENT source and rewrites exactly two rules back
-to their pre-fix form (pad base = keyframe; pad generation only from the probe
-callback), then requires the opening-cast, zero-start and parallel-startup checks
-to FAIL. The rewrite is verified to have applied — a control that silently tested
+`--revert-timeline` takes the CURRENT source and rewrites exactly three rules
+back to their pre-fix form (pad base = keyframe; pad generation only from the
+probe callback; no middle-bound cap on the advertised playlist), then requires
+the opening-cast, zero-start, parallel-startup, window and pad-boundary checks to
+FAIL. The rewrite is verified to have applied — a control that silently tested
 the fixed code would otherwise report green and mean nothing.
 
 `--rev` runs the whole harness against another revision in a `git worktree`.
