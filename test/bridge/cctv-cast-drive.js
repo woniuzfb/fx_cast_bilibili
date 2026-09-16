@@ -50,7 +50,8 @@ function parseArgs(argv) {
         currentTime: 0,
         observeMs: 30000,
         keep: false,
-        noCast: false
+        noCast: false,
+        holdMs: 0
     };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--host") args.host = argv[++i];
@@ -61,6 +62,7 @@ function parseArgs(argv) {
         else if (argv[i] === "--observe-ms") args.observeMs = Number(argv[++i]);
         else if (argv[i] === "--keep") args.keep = true;
         else if (argv[i] === "--no-cast") args.noCast = true;
+        else if (argv[i] === "--hold") args.holdMs = Number(argv[++i]);
         else if (argv[i] === "--url") args.url = argv[++i];
         else if (argv[i] === "--no-relay") args.noRelay = true;
         else throw new Error(`unknown arg ${argv[i]}`);
@@ -115,7 +117,7 @@ function attachReader(child, onMessage) {
 async function resolveSeed() {
     if (args.seed) return args.seed;
     const response = await fetch(args.master, {
-        headers: { Referer: REFERER, "User-Agent": USER_AGENT }
+        headers: { "Referer": REFERER, "User-Agent": USER_AGENT }
     });
     const body = await response.text();
     const variant = body
@@ -251,8 +253,7 @@ function castLoad(url, currentTime, observeMs, opts = {}) {
                                     : "");
                             events.push(line);
                             log(line);
-                            if (s.playerState === "PLAYING")
-                                finish("PLAYING");
+                            if (s.playerState === "PLAYING") finish("PLAYING");
                             else if (s.idleReason === "ERROR") finish("ERROR");
                         }
                         return;
@@ -292,7 +293,10 @@ function castLoad(url, currentTime, observeMs, opts = {}) {
             // leftover app instance first, then LAUNCH and LOAD once the app is
             // reported. Without this a stale session silently swallowed the LOAD
             // and the harness measured nothing.
-            receiverChannel.send({ type: "GET_STATUS", requestId: requestId++ });
+            receiverChannel.send({
+                type: "GET_STATUS",
+                requestId: requestId++
+            });
             sleep(1200).then(async () => {
                 if (sessionId) {
                     log(`stopping existing app session ${sessionId}`);
@@ -312,7 +316,10 @@ function castLoad(url, currentTime, observeMs, opts = {}) {
                     requestId: requestId++
                 });
             });
-            observeTimer = setTimeout(() => finish("OBSERVE_TIMEOUT"), observeMs);
+            observeTimer = setTimeout(
+                () => finish("OBSERVE_TIMEOUT"),
+                observeMs
+            );
         });
         client.on("error", err => reject(err));
     });
@@ -363,7 +370,9 @@ async function main() {
         !fs.existsSync(path.join(bridgeBuildDir, "src/main.js"))
     ) {
         throw new Error(
-            `bridge build failed: ${String(built.stderr || built.stdout).slice(-500)}`
+            `bridge build failed: ${String(built.stderr || built.stdout).slice(
+                -500
+            )}`
         );
     }
     const bridge = spawn("node", [path.join(bridgeBuildDir, "src/main.js")], {
@@ -446,7 +455,12 @@ async function main() {
     log(
         `served playlist: status=${playlist.status} bytes=${playlist.body.length} entries=${entries}`
     );
-    log(`served playlist head:\n${playlist.body.split("\n").slice(0, 14).join("\n")}`);
+    log(
+        `served playlist head:\n${playlist.body
+            .split("\n")
+            .slice(0, 14)
+            .join("\n")}`
+    );
     const padEntries = (playlist.body.match(/^pad\.ts$/gm) ?? []).length;
     log(`pad entries in served playlist: ${padEntries}`);
     if (padEntries > 0) {
@@ -458,13 +472,18 @@ async function main() {
                 ` type=${pad.headers["content-type"]}`
         );
     }
-    log(`served playlist tail:\n${playlist.body.split("\n").slice(-4).join("\n")}`);
+    log(
+        `served playlist tail:\n${playlist.body
+            .split("\n")
+            .slice(-4)
+            .join("\n")}`
+    );
 
     // Which of the advertised entries are actually servable right now, and how
     // long does the relay take to answer? Indexes sampled across the timeline.
-    const segUrls = [
-        ...playlist.body.matchAll(/^(\/seg\?u=[^\s]+)$/gm)
-    ].map(m => m[1]);
+    const segUrls = [...playlist.body.matchAll(/^(\/seg\?u=[^\s]+)$/gm)].map(
+        m => m[1]
+    );
     for (const index of [0, 1, entries - 1, Math.floor(entries / 2)]) {
         const target = segUrls[index];
         if (!target) continue;
@@ -479,19 +498,50 @@ async function main() {
         );
     }
 
+    if (args.noCast && args.holdMs > 0) {
+        // Serve the relay for a while without casting, so an external cast (or
+        // another harness invocation) can use it. Everything is torn down after.
+        log(`holding the relay for ${args.holdMs}ms (no cast)`);
+        await sleep(args.holdMs);
+    }
     if (!args.noCast) {
+        // The sender LOADs at the bridge's reported startTime, which the pad
+        // runway shifts past itself (32s): a position inside the runway is the
+        // middle-join failure this whole path exists to avoid.
+        const loadPosition =
+            args.currentTime > 0
+                ? args.currentTime
+                : Number(started.startTime ?? 0);
         const result = await castLoad(
             playlistUrl,
-            args.currentTime,
+            loadPosition,
             args.observeMs,
             { keep: args.keep }
         );
         log(`outcome: ${result.outcome}`);
-        const byIndex = new Map();
-        for (const request of relayRequests) {
-            if (request.path !== "/seg") continue;
+        // Pass/fail contract for the pad runway: the receiver must fetch /pad.ts
+        // (the runway's middle-join point) and reach PLAYING at the shifted
+        // position. Before the runway it fetched one real segment and reported
+        // LOAD_FAILED with idleReason=ERROR.
+        const padFetches = relayRequests.filter(
+            r => r.path === "/pad.ts"
+        ).length;
+        const segFetches = relayRequests.filter(r => r.path === "/seg").length;
+        log(
+            `receiver fetches: pad.ts=${padFetches} seg=${segFetches}` +
+                ` outcome=${result.outcome}`
+        );
+        if (result.outcome !== "PLAYING") {
+            log(
+                `FAIL: the receiver did not reach PLAYING (got ${result.outcome})`
+            );
+            process.exitCode = 1;
+        } else if (padFetches === 0) {
+            log("FAIL: the receiver never fetched the pad runway");
+            process.exitCode = 1;
+        } else {
+            log("PASS: pad runway fetched and the receiver reached PLAYING");
         }
-        log(`relay /seg requests: ${relayRequests.filter(r => r.path === "/seg").length}`);
     }
 
     writeMessage(bridge, {
