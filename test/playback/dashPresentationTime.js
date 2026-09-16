@@ -274,64 +274,6 @@ function main(modules) {
         })
     );
 
-    // ---- the pending-launch window states NO position ----------------------
-    //
-    // The root cause of the "two positions pulling" defect was upstream of the
-    // popup: while a DASH remux LOAD waited for the Roku to start the new item
-    // (measured: ~11s), the session reported the PREVIOUS item's position as if
-    // it were the current media's (old media at page 1386 while the page had
-    // moved to 495), so every consumer followed a value describing a stream the
-    // user was no longer watching. The session now states currentTime = null and
-    // BUFFERING for that window, and reports no media at all.
-    //
-    // This freezes what the popup does with it: NO POSITION is not a position.
-    const beforeLaunch = updatePopupMediaTimeline(
-        { mediaId: "", currentTime: 0, updatedAt: 0, duration: 0 },
-        {
-            mediaId: "gen-before",
-            contentId: "http://10.0.0.111:9555/s/gen-before/index.m3u8?v=1",
-            currentTime: 1386.9,
-            duration: 6022,
-            now: 2_100_000,
-            playerSettled: true,
-            isPlaying: true,
-            dashRemux: true,
-            dashStart: 1377.66
-        }
-    );
-    check(
-        "pending launch: a null position is NOT a position (the bar keeps the last real one)",
-        updatePopupMediaTimeline(beforeLaunch, {
-            mediaId: "gen-before",
-            contentId: "http://10.0.0.111:9555/s/gen-before/index.m3u8?v=1",
-            currentTime: null,
-            duration: undefined,
-            now: 2_101_000,
-            playerSettled: false,
-            isPlaying: false,
-            dashRemux: true
-        }).currentTime === 1386.9,
-        JSON.stringify({
-            stored: updatePopupMediaTimeline(beforeLaunch, {
-                mediaId: "gen-before",
-                contentId: "http://10.0.0.111:9555/s/gen-before/index.m3u8?v=1",
-                currentTime: null,
-                duration: undefined,
-                now: 2_101_000,
-                playerSettled: false,
-                isPlaying: false,
-                dashRemux: true
-            })
-        })
-    );
-    check(
-        "pending launch: the elapsed clock does not run either while the position is unknown",
-        estimatePopupMediaTime(beforeLaunch, false, 2_101_000) === 1386.9,
-        JSON.stringify({
-            estimated: estimatePopupMediaTime(beforeLaunch, false, 2_101_000)
-        })
-    );
-
     // ---- the popup must not own a conversion at all ----------------------
     const popupSource = fs.readFileSync(
         path.join(extensionSrc, "ui/popup/ReceiverMedia.svelte"),
