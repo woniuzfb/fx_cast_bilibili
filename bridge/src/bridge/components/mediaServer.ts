@@ -368,6 +368,76 @@ function remoteHostAllowed(value: string): boolean {
     }
 }
 
+/**
+ * Generate the black/silent startup pad segment both receiver timelines can
+ * advertise in front of their real media: the DASH remux's synthetic runway,
+ * and the live relay's (the Default Media Receiver needs a runway whose middle
+ * it can join, see the DASH path). One shared helper so the two cannot drift.
+ *
+ * Resolves true when the file exists and is playable, false on any failure or
+ * timeout, and never rejects.
+ */
+function generateStartupPadSegment(
+    ffmpegPath: string,
+    padPath: string,
+    seconds: number,
+    timeoutMs = 15000
+): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+        const padProcess = spawn(
+            ffmpegPath,
+            [
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x180:r=5",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-t",
+                String(seconds),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "5",
+                "-c:a",
+                "aac",
+                "-shortest",
+                "-f",
+                "mpegts",
+                padPath
+            ],
+            { stdio: ["ignore", "ignore", "pipe"] }
+        );
+        dashAuxProcesses.add(padProcess);
+        let settled = false;
+        const finish = (ready: boolean) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            dashAuxProcesses.delete(padProcess);
+            resolve(ready);
+        };
+        const timer = setTimeout(() => {
+            padProcess.kill("SIGKILL");
+            finish(false);
+        }, timeoutMs);
+        padProcess.on("exit", code =>
+            finish(code === 0 && fs.existsSync(padPath))
+        );
+        padProcess.on("error", () => finish(false));
+    });
+}
+
 function firstLocalAddress(): string | undefined {
     for (const addresses of Object.values(os.networkInterfaces())) {
         const address = addresses?.find(
@@ -2755,6 +2825,15 @@ async function startDashRemuxServer(
  */
 const LIVE_HLS_ENTRY_PATH = "index.m3u8";
 
+/**
+ * Live relay startup runway: black/silent pad segment(s) advertised in front of
+ * the synthetic DVR, so the Default Media Receiver's middle-of-window join lands
+ * inside the pads instead of on the real head (the same reason the DASH remux
+ * pads its opening, see CHROMECAST_MIN_PAD_SECONDS).
+ */
+const LIVE_RELAY_PAD_PATH = "pad.ts";
+const RELAY_STARTUP_PAD_SECONDS = 32;
+
 function encodeRelayUrl(url: string): string {
     return Buffer.from(url, "utf8").toString("base64url");
 }
@@ -3499,6 +3578,16 @@ async function startLiveHlsRelayServer(
     const upstreamHeaders: Record<string, string> = {
         "User-Agent": userAgent || "Mozilla/5.0"
     };
+
+    // Pad runway state for this relay generation. The file lives in a private
+    // temp dir: it is generated, served and removed with the relay.
+    const liveRelayDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "fx-cast-live-pad-")
+    );
+    const liveRelayPadPath = path.join(liveRelayDir, LIVE_RELAY_PAD_PATH);
+    const liveRelayFfmpegPath = resolveFfmpegPath();
+    let relayLiveEdgeBaseSeconds: number | undefined;
+    let relayTotalDurationSeconds: number | undefined;
     // Relay messages always travel to the extension because selected events
     // drive liveness and recovery. Verbose bridge stderr is independently gated.
     const relayLog = (event: string, data: Record<string, unknown> = {}) => {
@@ -3801,6 +3890,8 @@ async function startLiveHlsRelayServer(
     // (unfetchable, undecryptable, ffmpeg-invalid sequence) is absorbed by
     // the slot mapping layer below instead of a playlist rewrite.
     let servedPlaylist = dvr.playlist;
+    relayLiveEdgeBaseSeconds = dvr.liveEdgeBaseSeconds;
+    relayTotalDurationSeconds = dvr.totalDurationSeconds;
     const lastServedPlaylist = servedPlaylist;
     relayLog("synthetic DVR playlist constructed", {
         synthetic: true,
@@ -5152,6 +5243,31 @@ async function startLiveHlsRelayServer(
             return;
         }
 
+        // Startup pad runway bytes. The playlist only advertises this entry
+        // after the file exists (see the ready block), so a miss here means the
+        // file was removed mid-session: 404 is the honest answer.
+        if (reqUrl.pathname === `/${LIVE_RELAY_PAD_PATH}`) {
+            let body: Buffer | undefined;
+            try {
+                body = await fs.promises.readFile(liveRelayPadPath);
+            } catch {
+                body = undefined;
+            }
+            if (!body) {
+                res.writeHead(404).end();
+                return;
+            }
+            res.writeHead(200, {
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store",
+                "Content-Type": "video/mp2t",
+                "Content-Length": body.length
+            });
+            if (req.method === "HEAD") res.end();
+            else res.end(body);
+            return;
+        }
+
         // Segment/key/map bytes. Slot URLs (the synthesized /seg?u= entries of
         // the immutable served playlist) resolve through the pipeline cache
         // ONLY — the receiver can never trigger a synchronous upstream fetch.
@@ -5615,8 +5731,13 @@ async function startLiveHlsRelayServer(
         // live pipeline (they fill on-demand as the receiver reaches them).
         prebufferSlotCount = nextSlot;
     }
-    // The served playlist head is always a cached segment after the window
-    // adjustment, so the receiver starts at the very first cached segment.
+    // Where the receiver must start on the SERVED timeline. Without a pad
+    // runway that is 0: the head of the DVR history, the first cached segment.
+    // With one, the runway occupies [0, padSeconds) and the real history starts
+    // behind it, so the LOAD position moves past the runway by exactly that
+    // much — the receiver walks over the pads and lands in the real media at
+    // the same content offset, which is also what keeps the window's middle
+    // join inside the pads (see the runway block below).
     const startTime = 0;
     relayLog("CCTV initial prebuffer ready", {
         segmentCount: nextSlot,
@@ -5650,7 +5771,13 @@ async function startLiveHlsRelayServer(
             Math.ceil(plan.stepSeconds),
             Math.ceil(maxKnownDuration)
         );
-        let extinfIndex = 0;
+        // Pad entries (if any) sit in front of the real segments and keep their
+        // own duration, so the measured-duration mapping starts after them.
+        const padEntryCount = Math.max(
+            0,
+            (playlist.match(/^#EXTINF:/gm) ?? []).length - knownDurations.length
+        );
+        let extinfIndex = -padEntryCount;
         const lines = playlist.split("\n").map(line => {
             if (/^#EXT-X-TARGETDURATION:/i.test(line)) {
                 return `#EXT-X-TARGETDURATION:${targetDuration}`;
@@ -5671,6 +5798,63 @@ async function startLiveHlsRelayServer(
     };
     servedPlaylist = materializePrebufferDurations(servedPlaylist);
 
+    // ---- Startup pad runway (the same receiver requirement the DASH remux
+    // solves with pads, see buildRemuxArgs/CHROMECAST_MIN_PAD_SECONDS) ----
+    //
+    // The Default Media Receiver joins a playlist at the MIDDLE of what it can
+    // see and refuses a LOAD position before the end of that middle entry. The
+    // synthetic DVR's head is the oldest published history, so the receiver's
+    // join and its LOAD position land on top of each other and the LOAD fails
+    // ("Receiver returned media error" ~1s after its first segment). Putting a
+    // pad runway in front moves the middle of the visible window into the pads,
+    // where acceptance is guaranteed, and gives the real prebuffer a head start
+    // the receiver buffers through instead of racing.
+    //
+    // The runway is only advertised once the file is really there: a playlist
+    // entry whose segment 503s would be worse than no runway at all.
+    const padSeconds = RELAY_STARTUP_PAD_SECONDS;
+    let relayLoadPositionSeconds = 0;
+    const padReady = liveRelayFfmpegPath
+        ? await generateStartupPadSegment(
+              liveRelayFfmpegPath,
+              liveRelayPadPath,
+              padSeconds
+          )
+        : false;
+    if (padReady) {
+        const padCount = Math.max(1, Math.round(padSeconds / 4));
+        const perPad = padSeconds / padCount;
+        const padEntries = Array.from({ length: padCount }, () => [
+            `#EXTINF:${perPad.toFixed(6)},`,
+            LIVE_RELAY_PAD_PATH
+        ]).flat();
+        const lines = servedPlaylist.split("\n");
+        const mediaSequenceIndex = lines.findIndex(line =>
+            /^#EXT-X-MEDIA-SEQUENCE:/i.test(line)
+        );
+        const insertAt = mediaSequenceIndex >= 0 ? mediaSequenceIndex + 1 : 1;
+        servedPlaylist = [
+            ...lines.slice(0, insertAt),
+            ...padEntries,
+            ...lines.slice(insertAt)
+        ].join("\n");
+        // The pads occupy the front of the presentation timeline, so every
+        // derived second moves back by the runway.
+        relayLoadPositionSeconds = padSeconds;
+        relayLiveEdgeBaseSeconds = padSeconds + (dvr?.liveEdgeBaseSeconds ?? 0);
+        relayTotalDurationSeconds =
+            padSeconds + (dvr?.totalDurationSeconds ?? 0);
+        relayLog("CCTV startup pad runway advertised", {
+            padSeconds,
+            padCount,
+            padPath: LIVE_RELAY_PAD_PATH,
+            liveEdgeBaseSeconds: relayLiveEdgeBaseSeconds,
+            totalDurationSeconds: relayTotalDurationSeconds
+        });
+    } else {
+        relayLog("CCTV startup pad runway unavailable", { padSeconds });
+    }
+
     // Ready: the served playlist is finalized (prebuffer EXTINF durations
     // published). /live.m3u8 and /seg start answering and the sender may
     // load the receiver.
@@ -5690,13 +5874,13 @@ async function startLiveHlsRelayServer(
     // Real synthesized duration (history + future). On the plain-rewrite
     // fallback there is no finite duration to report — leave it unset so the
     // sender doesn't advertise a fabricated one.
-    const pageDuration = dvr?.totalDurationSeconds;
+    const pageDuration = relayTotalDurationSeconds;
     relayLog("live relay ready", {
         mediaPath: LIVE_HLS_ENTRY_PATH,
         localAddress: listenAddress,
-        startTime,
+        startTime: relayLoadPositionSeconds,
         pageDuration,
-        liveEdgeBaseSeconds: dvr?.liveEdgeBaseSeconds,
+        liveEdgeBaseSeconds: relayLiveEdgeBaseSeconds,
         builtAtMs: dvr?.builtAtMs
     });
     messaging.sendMessage({
@@ -5708,16 +5892,17 @@ async function startLiveHlsRelayServer(
             localAddress: listenAddress,
             // Mode "dash-remux" keeps the sender on the seekable-VOD handling
             // path (finite duration, BUFFERED stream type) shared with the
-            // Bilibili remux. startTime is 0: the head of the DVR history, a
-            // full lookback behind the live edge (see above) — the sender
-            // loads the receiver there directly.
+            // Bilibili remux. startTime is the head of the DVR history, a full
+            // lookback behind the live edge (see above), shifted past any
+            // startup pad runway — the sender loads the receiver there
+            // directly.
             mode: "dash-remux",
-            startTime,
+            startTime: relayLoadPositionSeconds,
             pageDuration,
             // DVR live edge for the sender: the edge sits at liveEdgeBaseSeconds
             // in the VOD timeline at builtAtMs and advances with wall clock. Used
             // to clamp forward seeks so they never target unpublished segments.
-            liveEdgeBaseSeconds: dvr?.liveEdgeBaseSeconds,
+            liveEdgeBaseSeconds: relayLiveEdgeBaseSeconds,
             builtAtMs: dvr?.builtAtMs,
             // Segment cadence: the receiver fetches one segment per stepSeconds
             // while alive. The sender keys its liveness timeout on this (2x).

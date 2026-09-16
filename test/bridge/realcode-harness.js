@@ -92,6 +92,7 @@ function parseArgs(argv) {
             args.loadDelayMs = Number(argv[++i]);
         else if (argv[i] === "--inject-pads")
             args.injectPads = Number(argv[++i]);
+        else if (argv[i] === "--direct") args.direct = argv[++i];
         else throw new Error(`unknown arg ${argv[i]}`);
     }
     return args;
@@ -364,6 +365,26 @@ function castLoad(url, currentTime, duration, observeMs, opts = {}) {
 
 // --- main ---------------------------------------------------------------
 async function main() {
+    // `--direct <url> [--current-time N]`: cast an arbitrary URL with THIS
+    // harness's (validated) castv2 handshake and no bridge at all. It exists to
+    // control the driver: a stream that is known to play through the bridge must
+    // also play through this path, otherwise a failure says nothing about the
+    // media.
+    const directIndex = process.argv.indexOf("--direct");
+    if (directIndex >= 0) {
+        const url = process.argv[directIndex + 1];
+        if (!url) throw new Error("--direct needs a URL");
+        log(`direct cast (no bridge): ${url}`);
+        const result = await castLoad(
+            url,
+            args.startTime,
+            undefined,
+            args.observeMs,
+            {}
+        );
+        log(`outcome: ${result.outcome}`);
+        process.exit(0);
+    }
     // Private bridge build, per run (same approach as sessionHarness.js): a
     // fresh temp copy compiled from the working tree, so the harness never
     // reads dist/, an installed bridge, or a possibly-stale prebuilt dir.
