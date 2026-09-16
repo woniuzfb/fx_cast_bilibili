@@ -262,6 +262,8 @@ export default class RokuRemote {
      * from one that merely arrived after it.
      */
     private pollSequence = 0;
+    /** Whether a completed poll has been reported from this remote yet. */
+    private reportedFirstSample = false;
     /** Foreground channel from /query/active-app (undefined = home screen). */
     private lastActiveApp?: ActiveAppInfo;
     private lastActiveAppId?: string;
@@ -748,7 +750,7 @@ export default class RokuRemote {
         // and completes after the next one begins must stay attributed to the
         // load it observed, not to whatever is current when it finishes.
         const loadGeneration = this.loadGeneration;
-        const state = await queryMediaPlayer(this.host);
+        const rawState = await queryMediaPlayer(this.host);
 
         // The foreground channel decides whether an application is
         // reported at all (/query/media-player only knows about active
@@ -762,6 +764,24 @@ export default class RokuRemote {
             activeApp = this.lastActiveApp;
         }
         if (this.destroyed) return;
+
+        // Some Roku firmware keeps /query/media-player at its last non-idle
+        // state after playback has ended: a "play" that carries no position,
+        // duration or title while the home screen is foreground (no channel
+        // id) is that residue, not playback. Re-read it as idle so neither
+        // the popup nor the media trace keeps showing a phantom playing
+        // device. Real playback is never caught by this: our own casts and
+        // foreign channels are both foreground (an active-app id), and a
+        // foreground channel that reports no metadata still has one.
+        const stalePlayingReport =
+            rawState.state !== "idle" &&
+            !activeApp?.id &&
+            rawState.position === undefined &&
+            rawState.duration === undefined &&
+            rawState.title === undefined;
+        const state = stalePlayingReport
+            ? { ...rawState, state: "idle" }
+            : rawState;
 
         // Change detection compares the composed state BEFORE the update with
         // the composed state AFTER it - i.e. what the consumer was last shown
@@ -793,7 +813,21 @@ export default class RokuRemote {
             (this.lastActiveAppId ?? undefined);
         this.lastActiveAppId = activeApp?.id;
 
-        if (stateChanged || positionMoved || appChanged) {
+        // The first COMPLETED sample always reports the receiver status,
+        // even when nothing changed from this fresh remote's initial
+        // idle/no-app view: a bridge restart must be able to retire a stale
+        // media status the extension still holds from before the restart
+        // (a receiver status with no applications is what makes
+        // deviceManager drop it).
+        const isFirstCompletedSample = !this.reportedFirstSample;
+        this.reportedFirstSample = true;
+
+        if (
+            stateChanged ||
+            positionMoved ||
+            appChanged ||
+            isFirstCompletedSample
+        ) {
             this.emitReceiverStatus();
         }
         // Every completed poll is a sample, and must be published as one
