@@ -172,13 +172,28 @@ async function perform(cast, op) {
             await cast.qualityChange(h.element.currentTime);
             return;
         case "LOAD_RESOLVE":
+            // ONE generation: the active load. A successful load can serve a pending
+            // seek, which starts the NEXT generation - and that one must stay in
+            // flight for the sequence to see it (`LOAD_RESOLVE → the pending seek
+            // starts a generation → STOP`). Draining the whole chain here hid those.
+            // `SETTLE` is the operation that drains everything.
             if (op.refused) {
                 await cast.answerAndRefuseNewest();
             } else {
                 await cast.answerNewest();
-                await cast.settle();
             }
             return;
+        case "RECEIVER_ECHO": {
+            // The receiver reports what the extension last told it to be. Nothing
+            // else: the state comes from the fixture's record of OUR command.
+            const commanded = h.lastCommandedReceiverState();
+            await cast.report(
+                commanded ?? PlayerState.PLAYING,
+                h.element.currentTime,
+                cast.receiverSessionId()
+            );
+            return;
+        }
         case "RECEIVER_PLAYING":
         case "RECEIVER_PAUSED": {
             // The receiver reports a settled state. The session is the one the
@@ -270,8 +285,18 @@ async function runCase(
         // Parameters that describe the LIVE cast are read here, not in the case
         // data: a receiver report comes from the session the receiver is on, and
         // an item change is "a video this one is not".
-        if (op.id === "RECEIVER_PLAYING" || op.id === "RECEIVER_PAUSED") {
+        if (
+            op.id === "RECEIVER_PLAYING" ||
+            op.id === "RECEIVER_PAUSED" ||
+            op.id === "RECEIVER_ECHO"
+        ) {
             op.mediaSessionId = cast.receiverSessionId();
+        }
+        if (op.id === "RECEIVER_ECHO") {
+            // Which state the echo carries is the fixture's record of our own last
+            // command - the model is told it, it does not guess.
+            op.playerState =
+                cast.h.lastCommandedReceiverState() ?? PlayerState.PLAYING;
         }
         if (op.id === "ITEM_CHANGE") {
             // A UNIQUE identity per item change: reusing one placeholder made the
@@ -300,7 +325,18 @@ async function runCase(
             paused: cast.h.element.paused
         };
         const modelBefore = model;
-        const { state: modelAfter, expect } = applyToModel(model, op);
+        const { state: modelAfter, expect } = applyToModel(model, {
+            ...op,
+            // The page's REAL play/pause state goes in as an input, because the
+            // model cannot predict it: a DASH seek's hold pauses the ELEMENT
+            // without touching the intent, and a page op on an element that is
+            // already in the requested state fires no event at all - so "the user
+            // pressed page pause" is only an intent when the element actually
+            // moved. Assuming the model's own belief here made the generator
+            // report a pause the sender never saw (it is the mirror's own freeze,
+            // not the user's gesture).
+            pagePaused: pageBefore.paused
+        });
         model = modelAfter;
 
         let thrown;
@@ -316,16 +352,6 @@ async function runCase(
             // The three operations that OWN the load lifecycle are excluded: their
             // whole point is a load that is still in flight (an item/quality change
             // holds it) or one that is being resolved or refused.
-            if (
-                ![
-                    "ITEM_CHANGE",
-                    "QUALITY_CHANGE",
-                    "LOAD_RESOLVE",
-                    "SETTLE"
-                ].includes(op.id)
-            ) {
-                await cast.settle();
-            }
         } catch (err) {
             thrown = err instanceof Error ? err.message : String(err);
         }
@@ -393,6 +419,7 @@ async function runCase(
                     // Diagnostic only (never asserted on): the sender's own view
                     // of the intent, so a divergence can be located instead of
                     // inferred.
+                    ` commanded=${cast.h.lastCommandedReceiverState() ?? "-"}` +
                     ` intent(impl)=${cast.h.sender.desiredPlayback} intent(model)=${model.desiredPlayback}` +
                     (thrown ? ` THREW ${thrown}` : "")
             );

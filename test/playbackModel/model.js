@@ -94,6 +94,16 @@ const DEFAULT_STATE = {
     /** The session the last receiver report came from (see rule 4). */
     lastReceiverSession: undefined,
     lastReceiverState: undefined,
+    /**
+     * The play/pause the extension last COMMANDED the receiver to be in, and
+     * whether that command was a user intent at all.
+     *
+     * A DASH seek pauses the receiver to hold the frame while the remux rebuilds -
+     * a command nobody asked for - so `desiredPlayback` deliberately stays where
+     * the user left it while `lastCommanded` becomes PAUSED. The observation that
+     * command produces must therefore not be read as a user action: it is our echo.
+     */
+    lastCommanded: undefined,
     /** The identity each recorded generation belonged to. */
     generationIdentities: []
 };
@@ -118,7 +128,18 @@ function createModel(overrides = {}) {
  *       servesPending      whether this operation is what serves a pending seek
  */
 function applyToModel(state, op) {
+    // `op.playerState` is stamped by the caller for the observation operations
+    // (RECEIVER_ECHO carries exactly the state the extension last commanded).
     const next = { ...state };
+    if (op.pagePaused !== undefined) {
+        // The page's real state, supplied by the runner before every operation.
+        // The model's own `pagePlaying` is a BELIEF: it does not know that a DASH
+        // seek's hold freezes the element, nor that a mirror write pauses it, and
+        // the browser only fires `play`/`pause` on a real transition. Taking the
+        // truth here keeps the "already in that state" rule about the element
+        // instead of about the model's guess.
+        next.pagePlaying = !op.pagePaused;
+    }
     const expect = {
         startsGeneration: false,
         generationTarget: undefined,
@@ -168,6 +189,8 @@ function applyToModel(state, op) {
             }
             next.desiredPlayback = wantsPlaying ? "playing" : "paused";
             next.pagePlaying = wantsPlaying;
+            // Both routes end in a receiver play/pause command.
+            next.lastCommanded = wantsPlaying ? "PLAYING" : "PAUSED";
             expect.autoplay = wantsPlaying;
             expect.rule = pageOrigin
                 ? "page-transition-is-intent"
@@ -181,11 +204,13 @@ function applyToModel(state, op) {
             if (op.id === "BLE_PLAY") {
                 next.desiredPlayback = "playing";
                 next.pagePlaying = true;
+                next.lastCommanded = "PLAYING";
                 expect.autoplay = true;
                 expect.rule = "ble-play-is-intent";
             } else {
                 next.desiredPlayback = "paused";
                 next.pagePlaying = false;
+                next.lastCommanded = "PAUSED";
                 expect.autoplay = false;
                 expect.rule = "ble-pause-is-intent";
             }
@@ -222,6 +247,12 @@ function applyToModel(state, op) {
                 : next.activeLoad !== undefined
                 ? "seek-coalesces-onto-the-load-in-flight"
                 : "seek-is-an-explicit-position";
+            // The seek pauses the RECEIVER to hold the frame while the remux is
+            // rebuilt (onDashSeekStart). That is a command, not an intent: the
+            // intent is untouched, and the receiver's report of it is the echo.
+            if (expect.startsGeneration || next.pageControlsAttached) {
+                next.lastCommanded = "PAUSED";
+            }
             // A position never sends a receiver play/pause; a positioned reload
             // carries the intent instead.
             break;
@@ -271,6 +302,16 @@ function applyToModel(state, op) {
                 // successful load.
                 expect.rule = "refused-load-keeps-the-intent";
             } else {
+                // Serving a pending seek means starting a generation for it: the
+                // load that just resolved is not the end of the chain, so a load is
+                // in flight again - which is why a seek arriving now COALESCES onto
+                // it instead of opening its own transaction.
+                if (next.pendingSeek !== undefined) {
+                    next.activeLoad = {
+                        target: next.pendingSeek.target,
+                        mediaIdentity: next.pendingSeek.mediaIdentity
+                    };
+                }
                 next.pendingSeek = undefined;
                 expect.servesPending = true;
                 expect.rule = "resolved-load-serves-the-pending-seek";
@@ -278,9 +319,22 @@ function applyToModel(state, op) {
             break;
         }
         case "RECEIVER_PLAYING":
-        case "RECEIVER_PAUSED": {
+        case "RECEIVER_PAUSED":
+        case "RECEIVER_ECHO": {
             // Rule 4.
-            const observingPlaying = op.id === "RECEIVER_PLAYING";
+            const observed =
+                op.playerState ??
+                (op.id === "RECEIVER_PLAYING"
+                    ? "PLAYING"
+                    : op.id === "RECEIVER_PAUSED"
+                    ? "PAUSED"
+                    : undefined);
+            if (observed === undefined) {
+                throw new Error(
+                    `model: ${op.id} needs the state it carries (op.playerState)`
+                );
+            }
+            const observingPlaying = observed === "PLAYING";
             const sameSession =
                 op.mediaSessionId !== undefined &&
                 next.lastReceiverSession !== undefined &&
@@ -289,24 +343,27 @@ function applyToModel(state, op) {
                 next.lastReceiverState !== undefined &&
                 next.lastReceiverState !==
                     (observingPlaying ? "PLAYING" : "PAUSED");
-            const settled = SETTLED.has(
-                observingPlaying ? "PLAYING" : "PAUSED"
-            );
+            const settled = SETTLED.has(observed);
+            // An observation that matches what WE commanded is our echo, not the
+            // user - and for a seek that command is a hold the user never asked for.
+            const ourOwnCommand = next.lastCommanded === observed;
             next.lastReceiverSession = op.mediaSessionId;
-            next.lastReceiverState = observingPlaying ? "PLAYING" : "PAUSED";
+            next.lastReceiverState = observed;
             // The three conditions are the WHOLE contract. `pageControlsAttached`
             // deliberately does not appear: mirroring the receiver onto the page is
             // suppressible (a hold, an item transition, the gesture window), but
             // adopting the user's intent is not - `noteReceiverReport` records every
             // report, and the same-session rule already refuses our own load's first
             // state, which is the only echo that could be mistaken for the user.
-            if (settled && sameSession && changed) {
+            if (settled && sameSession && changed && !ourOwnCommand) {
                 next.desiredPlayback = observingPlaying ? "playing" : "paused";
                 next.pagePlaying = observingPlaying;
                 expect.rule = "receiver-moved-the-session-the-user-has";
             } else {
                 expect.rule = !sameSession
                     ? "new-session-is-our-own-load"
+                    : ourOwnCommand
+                    ? "the-echo-of-our-own-command"
                     : "no-change-to-adopt";
             }
             // An observation is never a command and never a generation.

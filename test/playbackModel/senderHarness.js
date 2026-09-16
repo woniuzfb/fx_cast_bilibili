@@ -98,6 +98,17 @@ const BILIBILI_REFERER = "https://www.bilibili.com/video/BVtest";
 let fixtureOptions = null;
 /** Monotonic totals of receiver-side commands, per fixture. */
 const receiverCommands = { pause: 0, play: 0, seek: 0 };
+/**
+ * The state the extension last COMMANDED the receiver to be in.
+ *
+ * The receiver echoes what it was told, and one of those commands is the
+ * extension's own: a DASH seek pauses the receiver to hold the frame while the
+ * remux rebuilds. A fixture that did not model the echo could not tell a harness
+ * `RECEIVER_PAUSED` (the user, on the physical remote) from the receiver simply
+ * reporting the pause WE just asked for - which is exactly the distinction the
+ * sender has to make, and the one that regressed.
+ */
+let lastCommandedReceiverState;
 /** True while a row is holding the page's `seeked` back. */
 let pageSeeksDeferred = false;
 const timers = { timeouts: [] };
@@ -456,11 +467,13 @@ function makeMedia(playerState, estimatedTime, mediaSessionId, contentId) {
         pause: () => {
             calls.pause++;
             receiverCommands.pause++;
+            lastCommandedReceiverState = "PAUSED";
             return Promise.resolve();
         },
         play: () => {
             calls.play++;
             receiverCommands.play++;
+            lastCommandedReceiverState = "PLAYING";
             return Promise.resolve();
         },
         seek: () => {
@@ -484,6 +497,7 @@ async function makeSender(MediaSender, opts = {}) {
     receiverCommands.pause = 0;
     receiverCommands.play = 0;
     receiverCommands.seek = 0;
+    lastCommandedReceiverState = undefined;
     pageSeeksDeferred = false;
     timers.timeouts.length = 0;
     windowListeners.clear();
@@ -592,6 +606,12 @@ async function makeSender(MediaSender, opts = {}) {
          * a command, and a skip must never produce a play.
          */
         receiverCommandTotals: () => ({ ...receiverCommands }),
+        /**
+         * What the extension last told the receiver to do - the state the receiver
+         * will report back on its next status ("the echo"). `undefined` means
+         * nothing has been commanded since the fixture was built.
+         */
+        lastCommandedReceiverState: () => lastCommandedReceiverState,
         resolveLoad: media => {
             const entry = sessionState.loadRequests.at(-1);
             if (!entry) return false;

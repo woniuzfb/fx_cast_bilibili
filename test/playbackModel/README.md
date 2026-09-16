@@ -159,3 +159,73 @@ Model corrections (the other direction - the implementation was right):
 -   while the page's controls are detached neither the page's own events nor the
     popup's page route are delivered (the production fallback to the bridge route is
     the background's layer, covered by the load matrix).
+
+## The generator's current red (UNRESOLVED)
+
+One sequence in the long sweep still fails, and it is written down here rather
+than tuned away, because the failure is a live question about the SENDER:
+
+```sh
+node test/senders/playbackInterleavings.js --random 1 --length 10 --seed 222732
+# explicitSeekStartsItsOwnTarget: 12. PAGE_SEEK (0): no generation was started
+```
+
+The sequence reaches step 12 with everything the fixture knows drained (no load
+in flight, the model agrees) and the page at 330s. The user's page seek to 0:00
+then moves the element and the sender logs `page control: seek (dash remux
+restart)` followed by `dash seek coalesced onto the running transaction` — so the
+seek is folded into a transaction that has nothing left in flight, and the
+receiver is never reloaded. The page moves and the cast does not.
+
+The same symptom appears through the POPUP route in the long sweep
+(`--random 60 --length 10 --seed 1000`, the `POPUP_SEEK (300)` row), which is
+evidence AGAINST reading it as an artifact of the page route: two entry points
+that share only the sender's own seek path both fold their request into a
+transaction the fixture has already finished. What is not yet established is
+where that transaction lives:
+
+1. a sender-side transaction that outlives its loads (`dashSeekRunning` / the
+   coordinator's intent) and swallows the next user seek — a real defect;
+2. a fixture artifact: an earlier `QUALITY_CHANGE` in the same sequence logs
+   `presentation identity NOT confirmed`, so the generation the sender believes
+   is still loading may be one the harness never answered as the sender counts it.
+
+Until one of them is established, the sweep is expected to be red on those rows,
+and the pairwise suite (the contract) is not affected by them.
+
+## What the harness cannot say yet
+
+Named rather than hidden, because a silent gap is how a suite comes to look
+stronger than it is:
+
+1. **An item change's own load cannot be resolved by a bare `LOAD_RESOLVE`.** The
+   sequences that would need it (`ITEM_CHANGE → RECEIVER_* → LOAD_RESOLVE →
+PAGE_SEEK`) make the sender's load callback refuse the load
+   (`INVALID_REQUEST: INTERRUPTED`), so a case written that way would assert the
+   fixture's shortcut instead of the contract. The matrix drives an item change
+   through its own helper; this harness still has to learn it. What IS covered in
+   that window: the in-flight triples (`ITEM_CHANGE → BLE_* → LOAD_RESOLVE`), the
+   detached page seek, and the receiver echo below.
+2. **The page's own state and the intent are not modelled separately.** A PAGE
+   pause on a page the mirror has already paused (no event fires, because the page
+   is already in that state) is not expressed: the model tracks the intent, which
+   is what the invariants are about. The case that needed the distinction was
+   removed rather than pretended.
+3. **Mirroring is observed, not predicted.** A case states the world advancement
+   it means (`SETTLE`, `LOAD_RESOLVE`), and I4 is scoped to the operation AFTER an
+   item/quality change; when the implementation re-attaches the page controls
+   inside that window is not something the model predicts.
+
+The sequences the stage exists for, and what each one pins:
+
+-   `POPUP_SEEK → RECEIVER_ECHO → PAGE_SEEK → SETTLE` — a hold's pause is our own
+    command coming back: it may be mirrored never, and adopted as the user's intent
+    never. With the guard disabled the case fails with "the reload after a seek used
+    autoplay false while the intent in force was playing".
+-   `POPUP_SEEK → POPUP_PAUSE → RECEIVER_PLAYING → LOAD_RESOLVE` — the user pauses,
+    the receiver claims to be playing: a report is not an order, so the load that
+    follows carries the user's pause.
+-   `POPUP_SEEK → STOP → LOAD_RESOLVE` — the resolution must not resurrect the
+    generation the user just cancelled (I6).
+-   `LOAD_RESOLVE → RECEIVER_PAUSED → RECEIVER_PLAYING` — the second report is
+    judged against the state the first one left, not the pre-load state.

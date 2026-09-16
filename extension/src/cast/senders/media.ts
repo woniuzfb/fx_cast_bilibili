@@ -694,6 +694,34 @@ export default class MediaSender {
         return this.activeMediaServerRequestId === requestId;
     }
 
+    /**
+     * Command the receiver's play/pause, recording that WE did.
+     *
+     * Every dispatch goes through here - the user's own intents (page, popup, BLE)
+     * and the extension's internal one (the seek hold) - so the observation they
+     * cause can be told apart from the user moving the receiver themselves: a
+     * report that matches `lastCommandedReceiverState` is the echo of a command,
+     * and a state the user chose is by definition not the one we asked for.
+     */
+    private commandReceiverPlayback(
+        media: Media,
+        action: "play" | "pause",
+        onError: (err: unknown) => void
+    ) {
+        this.lastCommandedReceiverState =
+            action === "play"
+                ? cast.media.PlayerState.PLAYING
+                : cast.media.PlayerState.PAUSED;
+        // The SDK's Media takes an explicit `undefined` request and the success
+        // callback before the error callback, which is the shape every sender call
+        // site already used; routing them through here is what records the command.
+        if (action === "play") {
+            media.play(undefined, undefined, onError);
+        } else {
+            media.pause(undefined, undefined, onError);
+        }
+    }
+
     /** Record the play/pause state the user asked for. */
     private noteDesiredPlayback(action: "play" | "pause") {
         this.desiredPlayback = action === "play" ? "playing" : "paused";
@@ -709,6 +737,19 @@ export default class MediaSender {
         mediaSessionId?: number;
         playerState: string;
     };
+    /**
+     * The play/pause the extension last COMMANDED the receiver to be in.
+     *
+     * The receiver reports back what it was told, and one of those commands is
+     * ours alone: a DASH seek pauses the receiver to hold the frame while the remux
+     * is rebuilt (`onDashSeekStart`), which the user never asked for. Reading that
+     * echo as a user intent set `desiredPlayback = paused`, so the seek's own
+     * reload came back `autoplay: false` and the page - which follows the receiver -
+     * stopped: a seek that silently paused playback. Comparing an observation
+     * against what we last commanded is what tells the two apart, because a state
+     * the USER moved to is by definition not the one we asked for.
+     */
+    private lastCommandedReceiverState?: "PLAYING" | "PAUSED";
     /**
      * What the receiver reported BEFORE the report this tick is handling.
      *
@@ -797,17 +838,25 @@ export default class MediaSender {
         ) {
             return;
         }
-        // NO hold guard here, deliberately.
+        // The observation must not be the ECHO OF A COMMAND WE ISSUED.
         //
-        // It looks like the echo of our own transaction should be refused by
-        // `isHoldingPage()`, but the two identity rules above already do that, and
-        // more precisely: a state WE caused arrives on a session this tick has not
-        // seen before (a LOAD creates its session), so it fails the same-session
-        // test. What the hold guard added was the refusal of a REAL user action
-        // that happened to arrive while our own load was settling - a remote pause
-        // pressed a second after an item change - and the phase-3 generator found
-        // exactly that: a receiver PLAY/PAUSE on a settled session was never
-        // adopted, so the seek that followed reloaded in the wrong state.
+        // A hold guard (`isHoldingPage()`) is NOT the right test here: a real user
+        // action that happens to arrive while our own load settles must still be
+        // adopted (the phase-3 generator found exactly that case). What must never
+        // be adopted is the state WE asked for - and one of those commands is not a
+        // user intent at all: a DASH seek pauses the receiver to hold the frame
+        // while the remux is rebuilt. Reading that echo as intent made the seek's
+        // own reload come back `autoplay: false`, and the page, which follows the
+        // receiver, stopped with it.
+        const reportedPlaybackState =
+            state === cast.media.PlayerState.PLAYING ? "PLAYING" : "PAUSED";
+        if (this.lastCommandedReceiverState === reportedPlaybackState) {
+            this.debug?.(
+                "receiver reported the state this extension last commanded: not an intent",
+                { receiverState: state, mediaSessionId: media.mediaSessionId }
+            );
+            return;
+        }
         const desired =
             state === cast.media.PlayerState.PLAYING ? "play" : "pause";
         if (
@@ -872,11 +921,7 @@ export default class MediaSender {
             );
             const onError = (err: unknown) =>
                 this.debug?.("BLE playback command failed", { action, err });
-            if (action === "pause") {
-                media.pause(undefined, undefined, onError);
-            } else {
-                media.play(undefined, undefined, onError);
-            }
+            this.commandReceiverPlayback(media, action, onError);
             return true;
         }
         if (!this.isDashRemux) return false;
@@ -2799,11 +2844,7 @@ export default class MediaSender {
                     error: err instanceof Error ? err.message : String(err)
                 });
             };
-            if (action === "pause") {
-                media.pause(undefined, undefined, onError);
-            } else {
-                media.play(undefined, undefined, onError);
-            }
+            this.commandReceiverPlayback(media, action, onError);
         };
 
         /**
@@ -2920,7 +2961,7 @@ export default class MediaSender {
                 return;
             }
             this.noteDesiredPlayback("play");
-            media.play(undefined, undefined, sendError("play"));
+            this.commandReceiverPlayback(media, "play", sendError("play"));
         };
         const onPause = () => {
             if (suppressPause > 0) {
@@ -2960,7 +3001,7 @@ export default class MediaSender {
                 return;
             }
             this.noteDesiredPlayback("pause");
-            media.pause(undefined, undefined, sendError("pause"));
+            this.commandReceiverPlayback(media, "pause", sendError("pause"));
         };
         // While the bridge re-prepares the stream for a DASH seek, pause the
         // receiver immediately so playback holds at the old frame instead of
@@ -2968,11 +3009,16 @@ export default class MediaSender {
         // target; Roku capture must NOT seek the page yet — those m4s bytes
         // would be ingested by the generation that is about to be replaced.
         this.onDashSeekStart = (target: number) => {
-            currentMedia()?.pause(
-                undefined,
-                undefined,
-                sendError("dash seek pause")
-            );
+            // The seek hold: OUR command, not the user's. It pauses the receiver so
+            // playback holds the old frame instead of running ahead of the rebuild.
+            const held = currentMedia();
+            if (held) {
+                this.commandReceiverPlayback(
+                    held,
+                    "pause",
+                    sendError("dash seek pause")
+                );
+            }
             if (this.preserveSourcePlayback) {
                 this.debug?.(
                     "source-authoritative DASH seek paused receiver; page deferred until capture listens",
@@ -3169,11 +3215,13 @@ export default class MediaSender {
                         at: Date.now()
                     });
                     this.noteDesiredPlayback(action);
-                    if (action === "pause") {
-                        media.pause(undefined, undefined, sendError("pause"));
-                    } else {
-                        media.play(undefined, undefined, sendError("play"));
-                    }
+                    this.commandReceiverPlayback(
+                        media,
+                        action,
+                        action === "pause"
+                            ? sendError("pause")
+                            : sendError("play")
+                    );
                     return true;
                 }
                 // Arm FIRST, then trigger the page transition. `pause()` and
@@ -3448,9 +3496,21 @@ export default class MediaSender {
 
             const resumePage = () => {
                 if (!mediaElement.paused) return;
-                if (!gated) suppressPlay++;
+                // The suppression is UNCONDITIONAL, gate or no gate. Skipping it
+                // for a gated sender left our own mirrored `play` to the gesture
+                // window: with a window open - a real page gesture moments earlier,
+                // which is exactly when a receiver report arrives - the element's
+                // `play` event passed `fromGesture()` and was read as a USER play,
+                // so an OBSERVATION ended up commanding the receiver. That command
+                // also became `lastCommandedReceiverState`, which is how a later
+                // genuine remote pause came to be dismissed as our own echo. The
+                // gate drops an unattributed page event, but it cannot tell our own
+                // event from the user's, so the counter that can must always be
+                // armed - and released by `onPlay`, which is the only thing that
+                // consumes it.
+                suppressPlay++;
                 void mediaElement.play().catch(err => {
-                    if (!gated) suppressPlay = Math.max(0, suppressPlay - 1);
+                    suppressPlay = Math.max(0, suppressPlay - 1);
                     logger.error(
                         needsSourceWatermark
                             ? "Failed to keep page playback alive for the source watermark"
@@ -3473,7 +3533,9 @@ export default class MediaSender {
                     // Outside the window a receiver pause pauses the page as
                     // before (9704dac).
                     if (seekPriming) break;
-                    if (!gated && !mediaElement.paused) suppressPause++;
+                    // Unconditional for the same reason as resumePage's: a mirrored
+                    // pause inside an open gesture window is ours, not the user's.
+                    if (!mediaElement.paused) suppressPause++;
                     mediaElement.pause();
                     break;
                 case cast.media.PlayerState.BUFFERING:
@@ -3482,7 +3544,7 @@ export default class MediaSender {
                         resumePage();
                         break;
                     }
-                    if (!gated && !mediaElement.paused) suppressPause++;
+                    if (!mediaElement.paused) suppressPause++;
                     mediaElement.pause();
                     break;
             }
