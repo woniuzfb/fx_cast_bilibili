@@ -701,14 +701,38 @@ export default class MediaSender {
 
     /**
      * The last receiver state the mirror saw, and which media session reported it
-     * (see adoptReceiverPlaybackIntent). Kept as the raw pair, because the whole
-     * question is "did THIS session move", which no device-level or page-level
-     * value can answer.
+     * (see noteReceiverReport / adoptReceiverPlaybackIntent). Kept as the raw
+     * pair, because the whole question is "did THIS session move", which no
+     * device-level or page-level value can answer.
      */
     private lastReceiverReport?: {
         mediaSessionId?: number;
         playerState: string;
     };
+
+    /**
+     * Remember what the receiver just reported, for the NEXT report to be compared
+     * against.
+     *
+     * Separate from the decision below, and called BEFORE every suppression rule in
+     * the tick on purpose: the windows that suppress an ACTION (an item
+     * transition's PAUSED, a seek transaction's stale state) must not suppress the
+     * MEMORY. Skipping the memory made the first report after such a window look
+     * like "a session we have never seen" - so a receiver PLAY/PAUSE that arrived
+     * while the window was open was not just ignored, it made the NEXT one
+     * unadoptable too, and the user's pause was lost twice over.
+     */
+    private noteReceiverReport(media: {
+        playerState: string;
+        mediaSessionId?: number;
+    }): { mediaSessionId?: number; playerState: string } | undefined {
+        const previous = this.lastReceiverReport;
+        this.lastReceiverReport = {
+            mediaSessionId: media.mediaSessionId,
+            playerState: media.playerState
+        };
+        return previous;
+    }
 
     /**
      * Adopt a receiver PLAY/PAUSE the extension did NOT command as the user's
@@ -742,15 +766,11 @@ export default class MediaSender {
      * receiver in `reconcilePlaybackState` either way — this only decides what the
      * NEXT reload inherits.
      */
-    private adoptReceiverPlaybackIntent(media: {
-        playerState: string;
-        mediaSessionId?: number;
-    }): void {
-        const previous = this.lastReceiverReport;
-        this.lastReceiverReport = {
-            mediaSessionId: media.mediaSessionId,
-            playerState: media.playerState
-        };
+    private adoptReceiverPlaybackIntent(
+        media: { playerState: string; mediaSessionId?: number },
+        /** What the receiver reported before this one (see noteReceiverReport). */
+        previous: { mediaSessionId?: number; playerState: string } | undefined
+    ): void {
         const state = media.playerState;
         const settled =
             state === cast.media.PlayerState.PLAYING ||
@@ -3372,6 +3392,12 @@ export default class MediaSender {
              * new item. A receiver PAUSED that arrives AFTER the window closes is
              * a real user pause and still stops the page.
              */
+            // The receiver's report is REMEMBERED before any suppression rule can
+            // return: an action may be refused by a window, the memory may not (see
+            // noteReceiverReport). What it reported BEFORE this one is carried to
+            // the decision below, which is the only thing that may compare them.
+            const previousReceiverReport = this.noteReceiverReport(boundMedia);
+
             const itemTransition = this.dashItemTransitionActive();
             if (itemTransition) {
                 this.traceItemTransition(boundMedia);
@@ -3394,7 +3420,10 @@ export default class MediaSender {
             // already agree with the receiver (it pauses the page the moment it
             // sees the pause) while the INTENT has not been adopted yet, and the
             // intent is what a reload reads.
-            this.adoptReceiverPlaybackIntent(boundMedia);
+            this.adoptReceiverPlaybackIntent(
+                boundMedia,
+                previousReceiverReport
+            );
 
             const localState = mediaElement.paused
                 ? cast.media.PlayerState.PAUSED
