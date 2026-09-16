@@ -63,10 +63,8 @@
             matched: true as const
         }));
         return (highlighted ?? []).map(part =>
-                typeof part === "string"
-                    ? { text: part, matched: false }
-                    : part
-            );
+            typeof part === "string" ? { text: part, matched: false } : part
+        );
     }
 
     /** Current receiver application (if available) */
@@ -555,10 +553,11 @@
         class="receiver__icon"
         src={device.deviceType === "roku"
             ? "icons/device-roku.svg"
-            : `icons/${device.capabilities &
-              ReceiverDeviceCapabilities.VIDEO_OUT
-                ? "device-video.svg"
-                : "device-audio.svg"}`}
+            : `icons/${
+                  device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT
+                      ? "device-video.svg"
+                      : "device-audio.svg"
+              }`}
         alt=""
         height="24"
         width="24"
@@ -638,21 +637,14 @@
         class="receiver__expand-button ghost"
         class:receiver__expand-button--expanded={isExpanded && mediaStatus}
         title={_("popupShowDetailsTitle")}
-        disabled={
-            isBilibiliRokuLoadPending || !mediaStatus || !isOwnedSession
-        }
+        disabled={isBilibiliRokuLoadPending || !mediaStatus || !isOwnedSession}
         on:click={() => {
             isExpanded = !isExpanded;
             isExpandedUserModified = true;
         }}
     />
 
-    {#if
-        !isBilibiliRokuLoadPending &&
-        isExpanded &&
-        mediaStatus &&
-        isOwnedSession
-    }
+    {#if !isBilibiliRokuLoadPending && isExpanded && mediaStatus && isOwnedSession}
         <div class="receiver__expanded">
             <ReceiverMedia
                 status={mediaStatus}
@@ -674,8 +666,7 @@
                 on:volumeChanged={ev => handleVolumeChange(ev.detail)}
                 on:volumeDown={() =>
                     sendReceiverMessage({ type: "VOLUME_DOWN" })}
-                on:volumeUp={() =>
-                    sendReceiverMessage({ type: "VOLUME_UP" })}
+                on:volumeUp={() => sendReceiverMessage({ type: "VOLUME_UP" })}
             />
         </div>
     {/if}

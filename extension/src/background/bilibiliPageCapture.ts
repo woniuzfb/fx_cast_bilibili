@@ -134,9 +134,7 @@ function pageIdentity(url?: string): string | undefined {
         return undefined;
     }
 }
-function mediaResource(
-    url: string
-): { path: string; kind?: Kind } | undefined {
+function mediaResource(url: string): { path: string; kind?: Kind } | undefined {
     try {
         const u = new URL(url);
         if (

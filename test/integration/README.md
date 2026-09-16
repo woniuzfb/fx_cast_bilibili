@@ -12,25 +12,25 @@ Nothing here changes production code. The harness only observes.
 
 ## Why this shape
 
-| Piece | Why it is real and not simulated |
-| --- | --- |
-| Firefox Developer Edition + the built extension | The relay logic under test (`deviceManager.syncRokuSessionMediaToBridge`, `replayRokuLoadGenerations`, the message handlers) is extension code. Simulating the relay is exactly the shortcut that would bypass the bug. |
-| Two native hosts | `bridge.connect()` calls `connectNative()`, so two connections ARE two processes. The harness proves it from PIDs rather than assuming it. |
-| `hostWrapper.js` | Firefox points at one executable per manifest, so the manifest points at a transparent wrapper that execs the real dev build. It forwards bytes verbatim and parses only a copy, so the harness can never become the protocol. |
-| `fakeRoku.js` | SSDP + ECP are production discovery paths; a stub inside the bridge would skip them. |
-| The dev build (`dist/bridge/…`) | Built from the working tree by `npm run build:bridge`, so the harness tests the current source, not an installed binary. |
+| Piece                                           | Why it is real and not simulated                                                                                                                                                                                               |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Firefox Developer Edition + the built extension | The relay logic under test (`deviceManager.syncRokuSessionMediaToBridge`, `replayRokuLoadGenerations`, the message handlers) is extension code. Simulating the relay is exactly the shortcut that would bypass the bug.        |
+| Two native hosts                                | `bridge.connect()` calls `connectNative()`, so two connections ARE two processes. The harness proves it from PIDs rather than assuming it.                                                                                     |
+| `hostWrapper.js`                                | Firefox points at one executable per manifest, so the manifest points at a transparent wrapper that execs the real dev build. It forwards bytes verbatim and parses only a copy, so the harness can never become the protocol. |
+| `fakeRoku.js`                                   | SSDP + ECP are production discovery paths; a stub inside the bridge would skip them.                                                                                                                                           |
+| The dev build (`dist/bridge/…`)                 | Built from the working tree by `npm run build:bridge`, so the harness tests the current source, not an installed binary.                                                                                                       |
 
 ## Isolation: the harness never touches your build, your bridge or your browser
 
-The harness is designed to run *while* you keep using the extension normally:
+The harness is designed to run _while_ you keep using the extension normally:
 
-| Resource | What the harness does |
-| --- | --- |
-| `dist/` (your build + packaging output) | Never read, never written. The harness builds its OWN copies into its temp dir: `extension/bin/build.js --out-dir …` and `bridge/bin/build.js --out-dir …`. Defaults are unchanged, so your `npm run build:*` behaves exactly as before. |
-| Native messaging manifest | Installs `fx_cast_bilibili_bridge_harness.json` - its own name - so your `fx_cast_bilibili_bridge.json` (system-level from the .pkg, or your own user-level one) is never shadowed and never modified. Restored/removed on every exit path. |
-| Extension it tests | A private build that requests that harness host name, loaded into its own temporary Firefox profile. Your installed extension and profile are untouched. |
-| The installed bridge binary | Never exec'd and never replaced: the wrapper execs the harness's private bridge build. |
-| Device discovery (SSDP) | The harness's private bridge searches on port **19009** and its fake Roku advertises there, so your bridge (1900) can never discover "Harness Roku" - and a real Roku on your LAN is never confused with it. |
+| Resource                                | What the harness does                                                                                                                                                                                                                       |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dist/` (your build + packaging output) | Never read, never written. The harness builds its OWN copies into its temp dir: `extension/bin/build.js --out-dir …` and `bridge/bin/build.js --out-dir …`. Defaults are unchanged, so your `npm run build:*` behaves exactly as before.    |
+| Native messaging manifest               | Installs `fx_cast_bilibili_bridge_harness.json` - its own name - so your `fx_cast_bilibili_bridge.json` (system-level from the .pkg, or your own user-level one) is never shadowed and never modified. Restored/removed on every exit path. |
+| Extension it tests                      | A private build that requests that harness host name, loaded into its own temporary Firefox profile. Your installed extension and profile are untouched.                                                                                    |
+| The installed bridge binary             | Never exec'd and never replaced: the wrapper execs the harness's private bridge build.                                                                                                                                                      |
+| Device discovery (SSDP)                 | The harness's private bridge searches on port **19009** and its fake Roku advertises there, so your bridge (1900) can never discover "Harness Roku" - and a real Roku on your LAN is never confused with it.                                |
 
 Verified end to end: `dist/` is byte-identical before and after a run, the
 real-name manifest count stays 0, the harness-name manifest is installed for the
@@ -42,35 +42,36 @@ its manifest points at the launcher inside that directory, not back into `dist/`
 
 Limits of this isolation, stated rather than implied:
 
-- **One harness run at a time.** The fake Roku's ECP port (8060, on 127.0.0.1) and
-  the isolated SSDP port (19009) are fixed, so two concurrent runs would fight
-  over them. Isolation here means harness vs. production, not harness vs. harness.
-- The wrapper's pass-through (a leftover manifest, no harness run active) knows
-  only the macOS install layout `/Library/Application Support/fx_cast_bilibili/`.
-  On other platforms it finds no bridge, which is harmless: production never asks
-  for the harness host name.
+-   **One harness run at a time.** The fake Roku's ECP port (8060, on 127.0.0.1) and
+    the isolated SSDP port (19009) are fixed, so two concurrent runs would fight
+    over them. Isolation here means harness vs. production, not harness vs. harness.
+-   The wrapper's pass-through (a leftover manifest, no harness run active) knows
+    only the macOS install layout `/Library/Application Support/fx_cast_bilibili/`.
+    On other platforms it finds no bridge, which is harmless: production never asks
+    for the harness host name.
+
 ### What a harness run cleans up, and what it does not
 
-| | Behaviour |
-| --- | --- |
-| `dist/`, your build | Never read, never written (private builds in the harness dir). |
-| Real native host name, installed bridge | Never touched: the harness asks for `<name>_harness` and execs its own bridge build. |
-| Harness manifest (`…_harness.json`) | Removed on normal exit, on `--phase-a-only` bail-out, on a thrown assertion, on `main().catch()`, and on SIGINT/SIGTERM/SIGHUP; a leftover from a previous killed run is deleted rather than restored. |
-| Firefox profile | Removed by default (`--keep-profile` keeps it on purpose). |
-| Children the script owns (Firefox, fake Roku, geckodriver) | Registered on spawn and killed on exit, so an early throw cannot leave a browser or a fake Roku holding port 8060. `runFirefox.js` uses the same ownership model; `--simulate-early-failure` exercises it (verified: exit 1, no fake Roku, 8060 free, no new profile). |
-| Harness working directory (`/tmp/fx-harness-*`: private builds, traces, browser and fake-Roku logs) | **Kept on purpose**, for auditing a failed run; the path is printed at startup. Delete it yourself or let your tmp cleanup policy do it. |
-| `kill -9` of the harness process | Cannot run any JavaScript cleanup. The isolated host name still protects normal usage, but orphan children, the harness manifest, the profile and the working directory can be left behind; the next run removes a leftover manifest it recognises as its own. |
+|                                                                                                     | Behaviour                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dist/`, your build                                                                                 | Never read, never written (private builds in the harness dir).                                                                                                                                                                                                         |
+| Real native host name, installed bridge                                                             | Never touched: the harness asks for `<name>_harness` and execs its own bridge build.                                                                                                                                                                                   |
+| Harness manifest (`…_harness.json`)                                                                 | Removed on normal exit, on `--phase-a-only` bail-out, on a thrown assertion, on `main().catch()`, and on SIGINT/SIGTERM/SIGHUP; a leftover from a previous killed run is deleted rather than restored.                                                                 |
+| Firefox profile                                                                                     | Removed by default (`--keep-profile` keeps it on purpose).                                                                                                                                                                                                             |
+| Children the script owns (Firefox, fake Roku, geckodriver)                                          | Registered on spawn and killed on exit, so an early throw cannot leave a browser or a fake Roku holding port 8060. `runFirefox.js` uses the same ownership model; `--simulate-early-failure` exercises it (verified: exit 1, no fake Roku, 8060 free, no new profile). |
+| Harness working directory (`/tmp/fx-harness-*`: private builds, traces, browser and fake-Roku logs) | **Kept on purpose**, for auditing a failed run; the path is printed at startup. Delete it yourself or let your tmp cleanup policy do it.                                                                                                                               |
+| `kill -9` of the harness process                                                                    | Cannot run any JavaScript cleanup. The isolated host name still protects normal usage, but orphan children, the harness manifest, the profile and the working directory can be left behind; the next run removes a leftover manifest it recognises as its own.         |
 
 One harness run at a time: the fake Roku's ECP port (8060 on 127.0.0.1) and the
 isolated SSDP port are fixed, and the harness manifest name is shared, so two
 concurrent runs would fight over all three. Isolation here means harness vs.
 production, not harness vs. harness.
 
-- Historically the harness used the REAL host name and had to restore the
-  user-level manifest afterwards, because a left-over one shadowed a system-level
-  bridge install and broke normal usage. That shadowing is now impossible by
-  construction (own host name); the snapshot/restore stays so no test artifact is
-  left behind and so a user's own manifest under the harness name is preserved.
+-   Historically the harness used the REAL host name and had to restore the
+    user-level manifest afterwards, because a left-over one shadowed a system-level
+    bridge install and broke normal usage. That shadowing is now impossible by
+    construction (own host name); the snapshot/restore stays so no test artifact is
+    left behind and so a user's own manifest under the harness name is preserved.
 
 ## The harness must not break normal usage
 
@@ -199,7 +200,7 @@ replacement selector owned by `triggerCast`, whose session is created by
 entirely.
 
 To make that an order rather than a race, the modes (a) navigate the popup tab only
-*after* a run-bound marker says a selector opened, and (b) suppress the FIRST
+_after_ a run-bound marker says a selector opened, and (b) suppress the FIRST
 `popup:init` post of the run once, through a run-bound storage flag. Both are
 test-copy-only edits of the instrumented copy; the popup's timers, the init data and
 every other mode are untouched.
@@ -240,59 +241,59 @@ opened: while it is set, `deviceManager` drops that device's ECP media status
 session media - clears it. A gate left set means the device's media status is
 filtered until some later successful load, a device-down or a bridge reconnect.
 
-- `--create-failure-*`: the queued-selection start (the auto-cast provocation above)
-  announces and then fails. Pre-fix nothing releases the gate; post-fix the failing
-  start releases its own. `--request-source selector` moves the same failure to the
-  `main:requestSession` handler's caller instead: the popup still mounts late (that
-  is what makes the route deterministic), but nothing suppresses `popup:init`, so
-  its port matches the selector `requestSession` already opened, its auto-cast
-  timer is cleared, and the outer handler - not `triggerCast` - consumes the error.
-- `--interleave-*`: the `requestSession` start announces and is held, then a second
-  start (the popup's own `action:castCurrentTab`, sent from the popup page with the
-  popup's window focused - what a real click there does) announces a newer
-  generation, and only then does the OLDER start fail. Its release must be refused,
-  because the gate now belongs to the newer start.
+-   `--create-failure-*`: the queued-selection start (the auto-cast provocation above)
+    announces and then fails. Pre-fix nothing releases the gate; post-fix the failing
+    start releases its own. `--request-source selector` moves the same failure to the
+    `main:requestSession` handler's caller instead: the popup still mounts late (that
+    is what makes the route deterministic), but nothing suppresses `popup:init`, so
+    its port matches the selector `requestSession` already opened, its auto-cast
+    timer is cleared, and the outer handler - not `triggerCast` - consumes the error.
+-   `--interleave-*`: the `requestSession` start announces and is held, then a second
+    start (the popup's own `action:castCurrentTab`, sent from the popup page with the
+    popup's window focused - what a real click there does) announces a newer
+    generation, and only then does the OLDER start fail. Its release must be refused,
+    because the gate now belongs to the newer start.
 
 Both modes then drive the fake Roku to a KNOWN sample (PLAYING at 30s,
 `harness-stale-sample`) and assert, as deltas against a baseline taken after the
 failure and before the drive:
 
-- the driven sample reached the extension on the wire (`PLAYING`, `currentTime` 30,
-  after the drive) - i.e. the drive is real;
-- the branch `deviceManager` took FOR THAT SAMPLE: `remote-status-input` when the
-  gate is open, `remote-status-blocked` when it is closed (both traces carry the
-  driven input state, so a pre-existing line cannot satisfy them);
-Measured and NOT usable as evidence: the popup's receiver row shows the driven
-title even while the gate blocks that device's media status (the row's
-now-playing line does not come from `main:receiverDeviceMediaStatusUpdated`, so
-it is not gated). The popup text is therefore printed as a diagnostic only; an
-earlier version of this mode asserted on it and was wrong in both directions.
+-   the driven sample reached the extension on the wire (`PLAYING`, `currentTime` 30,
+    after the drive) - i.e. the drive is real;
+-   the branch `deviceManager` took FOR THAT SAMPLE: `remote-status-input` when the
+    gate is open, `remote-status-blocked` when it is closed (both traces carry the
+    driven input state, so a pre-existing line cannot satisfy them);
+    Measured and NOT usable as evidence: the popup's receiver row shows the driven
+    title even while the gate blocks that device's media status (the row's
+    now-playing line does not come from `main:receiverDeviceMediaStatusUpdated`, so
+    it is not gated). The popup text is therefore printed as a diagnostic only; an
+    earlier version of this mode asserted on it and was wrong in both directions.
 
 What these modes do NOT cover, and must not be read as closed:
 
-- the trusted-sender bypass: its Roku branch is **unreachable through the current
-  UI**, so it has no real-entry dynamic test. The wiring is statically correct -
-  `beginRokuSessionLoad()` plus `commit()`/`release()` and the partial-session
-  cleanup all apply to it - but nothing in the product can produce that message for
-  a Roku today: (1) the only caller that passes a `receiverDevice` to `ensureInit()`
-  is the mirroring sender (`cast/senders/mirroring.ts`), while the
-  media/bilibili/CCTV senders call `ensureInit()` without one; (2) the selector
-  refuses Screen/mirroring for Roku devices (`device.deviceType !== "roku"` in the
-  popup - "Roku devices have no mirroring channel"); and (3) a page that puts
-  `receiverDevice` into the message itself is rejected as untrusted. Re-open this
-  when a trusted sender starts passing a Roku receiver device, or when the UI lets
-  Roku into a direct-connect path: it then needs the full success /
-  session-start-failure / interleave ownership matrix - not a message constructed
-  from an extension page;
-- how a failed `requestSession` is settled towards the page beyond the counts
-  measured below: the harness now records the SDK callback timeline and the number
-  of background cancellations, but nothing asserts an exact settlement contract
-  (error code set, exactly-once as a requirement, promise rejection);
-- failures AFTER `createCastSession` has partly run (bridge connected,
-  `instance.session` set, the `bridge:createCastSession` post throwing): the
-  injection point is the top of `createCastSession`, so nothing past that is
-  covered. What IS covered past it is the reverse case - a cleanup step throwing
-  while the p2 failure is being handled (`--cleanup-fault`, below).
+-   the trusted-sender bypass: its Roku branch is **unreachable through the current
+    UI**, so it has no real-entry dynamic test. The wiring is statically correct -
+    `beginRokuSessionLoad()` plus `commit()`/`release()` and the partial-session
+    cleanup all apply to it - but nothing in the product can produce that message for
+    a Roku today: (1) the only caller that passes a `receiverDevice` to `ensureInit()`
+    is the mirroring sender (`cast/senders/mirroring.ts`), while the
+    media/bilibili/CCTV senders call `ensureInit()` without one; (2) the selector
+    refuses Screen/mirroring for Roku devices (`device.deviceType !== "roku"` in the
+    popup - "Roku devices have no mirroring channel"); and (3) a page that puts
+    `receiverDevice` into the message itself is rejected as untrusted. Re-open this
+    when a trusted sender starts passing a Roku receiver device, or when the UI lets
+    Roku into a direct-connect path: it then needs the full success /
+    session-start-failure / interleave ownership matrix - not a message constructed
+    from an extension page;
+-   how a failed `requestSession` is settled towards the page beyond the counts
+    measured below: the harness now records the SDK callback timeline and the number
+    of background cancellations, but nothing asserts an exact settlement contract
+    (error code set, exactly-once as a requirement, promise rejection);
+-   failures AFTER `createCastSession` has partly run (bridge connected,
+    `instance.session` set, the `bridge:createCastSession` post throwing): the
+    injection point is the top of `createCastSession`, so nothing past that is
+    covered. What IS covered past it is the reverse case - a cleanup step throwing
+    while the p2 failure is being handled (`--cleanup-fault`, below).
 
 ### When the cleanup itself fails (`--cleanup-fault`)
 
@@ -316,10 +317,10 @@ step that THROWS changes either of the two things that matter:
 `--cleanup-fault` injects a throw into one cleanup step, on top of the original
 p2 failure. The values are the two steps that have their own `catch`:
 
-| value | the injected step | what the fault proves |
-| --- | --- | --- |
+| value            | the injected step                                                     | what the fault proves                                                                                                                                                |
+| ---------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `removeListener` | `onMessage.removeListener` for the partial session's message listener | the `try` that removes the message listener exited immediately (the action-state reset in the SAME `try` was never reached), and the `finally` still closed the port |
-| `actionState` | `updateActionState(Default, tabId)` | the message listener WAS removed first, and that step's own `catch` kept the cleanup going to the `finally` |
+| `actionState`    | `updateActionState(Default, tabId)`                                   | the message listener WAS removed first, and that step's own `catch` kept the cleanup going to the `finally`                                                          |
 
 The cleanup is deliberately meant to fail without replacing the original error,
 which is why "the page saw one error" cannot be the evidence: BOTH errors would
@@ -328,10 +329,10 @@ carry different stable identifiers, and the instrumented copy records the
 message that the outer handler ACTUALLY caught. Which handler that is depends on
 the caller, because the two callers consume the error in different code:
 
-- `--request-source selector`: the `main:requestSession` handler logs it and
-  posts `cast:sessionRequestCancelled` to the page;
-- `--request-source queued`: `triggerCast()` catches what `loadSender()`
-  rethrows and only logs (asserted on its own handler marker).
+-   `--request-source selector`: the `main:requestSession` handler logs it and
+    posts `cast:sessionRequestCancelled` to the page;
+-   `--request-source queued`: `triggerCast()` catches what `loadSender()`
+    rethrows and only logs (asserted on its own handler marker).
 
 The label is asserted, not trusted, at two strengths. A run checks the marker
 written immediately before the production Roku branch of `main:requestSession`
@@ -423,12 +424,12 @@ selector route fills `caught: ["requestSessionHandler"]` with `triggerCast` empt
 Two layers of evidence are kept apart on purpose, because they prove different
 things:
 
-- "the other cleanup step was still reached" proves the identity-guarded cleanup
-  sequence continued past the fault that the step's own production `catch`
-  absorbed. It says nothing about the `finally`;
-- "the half-created port existed and its idle host exited" proves the `finally`
-  really closed the port, and that the port-closing steps did not run earlier by
-  accident.
+-   "the other cleanup step was still reached" proves the identity-guarded cleanup
+    sequence continued past the fault that the step's own production `catch`
+    absorbed. It says nothing about the `finally`;
+-   "the half-created port existed and its idle host exited" proves the `finally`
+    really closed the port, and that the port-closing steps did not run earlier by
+    accident.
 
 Which caller ran is likewise asserted in two strengths. The Roku-branch marker of
 `main:requestSession` is supporting evidence (its presence is positive proof of
@@ -455,9 +456,9 @@ node test/integration/sessionHarness.js --request-settlement-reentrant  # the cl
 The route decides who owns the session, and the run derives that from ONE place
 (`pageSessionOwnership`), because "the cast succeeded" is not one fact:
 
-| route | who settles the request | who delivers the session |
-| --- | --- | --- |
-| `selector` (the page clicked its own selector) | one `success` callback | the page's own `requestSession` (the page holds `sessionId`) |
+| route                                                  | who settles the request        | who delivers the session                                        |
+| ------------------------------------------------------ | ------------------------------ | --------------------------------------------------------------- |
+| `selector` (the page clicked its own selector)         | one `success` callback         | the page's own `requestSession` (the page holds `sessionId`)    |
 | `queued` (the popup's auto-cast replaced the selector) | one `error` with code `cancel` | `ApiConfig`'s `sessionListener`, which the page adopts for LOAD |
 
 That distinction is not cosmetic. On the queued route the page's request really is
@@ -474,9 +475,9 @@ and each attempt is tagged with its own `requestId` - without that attribution
 "error then success" cannot be told apart from a double settlement. Measured on the
 fixed build:
 
-| attempt | settlement |
-| --- | --- |
-| A (the cancelled one) | exactly one `error(cancel)`, no session |
+| attempt                               | settlement                                           |
+| ------------------------------------- | ---------------------------------------------------- |
+| A (the cancelled one)                 | exactly one `error(cancel)`, no session              |
 | B (started inside A's error callback) | exactly once, `success`, with a non-empty session id |
 
 and `sessionListenerCalls` is 0, because a request that is still pending owns the
@@ -502,14 +503,14 @@ expectation flips and there is one reader to trust.
 
 Measured pre-fix (2/2 runs, plus 3/3 on `--auto-cast-fixed`):
 
-| fact | value |
-| --- | --- |
-| `requestSessionCalls` | 1 |
-| request callbacks | `[error(cancel), success]` - `sessionCallbacks.length` 2 |
-| `successCount` / `errorCount` / `settleType` | 1 / 1 / `error` |
-| background cancel | site 1 (`if (!selection)`, the replaced selector) |
-| `sessionListenerCalls` | **0** |
-| session id | non-empty (the session really was created) |
+| fact                                         | value                                                    |
+| -------------------------------------------- | -------------------------------------------------------- |
+| `requestSessionCalls`                        | 1                                                        |
+| request callbacks                            | `[error(cancel), success]` - `sessionCallbacks.length` 2 |
+| `successCount` / `errorCount` / `settleType` | 1 / 1 / `error`                                          |
+| background cancel                            | site 1 (`if (!selection)`, the replaced selector)        |
+| `sessionListenerCalls`                       | **0**                                                    |
+| session id                                   | non-empty (the session really was created)               |
 
 Both modes also require that the session really reached the page, and they accept
 EITHER ownership channel, because which one is legitimate depends on the build: the
@@ -547,10 +548,10 @@ for a NEW PID whose `bridge:startDiscovery` arrives after the kill. Reading the
 LOAD-time media event as "what is current now" was the first version's mistake -
 that registry had already been emptied, and the assertion blamed the wrong thing.
 
-| mode | asserted |
-| --- | --- |
-| `-gap` | the replacement recovered the load generation, but LOST the session-media mirror: the replay loop saw `mediaEntryCount === 0` and the new PID received no `bridge:rokuSetSessionMedia` |
-| `-fixed` | the new PID receives BOTH, with owner, generation and marker unchanged, and the replay loop saw `mediaEntryCount === 1` |
+| mode     | asserted                                                                                                                                                                               |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-gap`   | the replacement recovered the load generation, but LOST the session-media mirror: the replay loop saw `mediaEntryCount === 0` and the new PID received no `bridge:rokuSetSessionMedia` |
+| `-fixed` | the new PID receives BOTH, with owner, generation and marker unchanged, and the replay loop saw `mediaEntryCount === 1`                                                                |
 
 Both also assert that the replay did NOT re-enter `setRokuSessionMedia` (no producer
 re-published the media: the wire evidence would look the same while the mechanism
@@ -590,12 +591,12 @@ reconnect, or touch a startup deadline.
 Four phases, all inside ONE load generation (asserted: no new generation
 announcement for the whole sequence):
 
-| phase | action | asserted |
-| --- | --- | --- |
-| A | owner A publishes media (marker `owner-clear-A`) | adopted locally, mirrored once under generation N, and VISIBLE downstream in a fresh status |
-| B | owner B publishes media (marker `owner-clear-B`) | replaces A, mirrored once; B's visibility is the new baseline |
-| C | owner A sends a LATE clear | exactly one `ignored` outcome naming A as caller and B as current owner, zero `applied`, zero mirror clears, zero clear messages on the wire - and B's media still visible in a status published AFTER the clear |
-| D | the CURRENT owner (B) clears | exactly one `applied`, one mirror, one wire clear whose deviceId/ownerId/generation match, and no later status sample carrying B's media |
+| phase | action                                           | asserted                                                                                                                                                                                                         |
+| ----- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A     | owner A publishes media (marker `owner-clear-A`) | adopted locally, mirrored once under generation N, and VISIBLE downstream in a fresh status                                                                                                                      |
+| B     | owner B publishes media (marker `owner-clear-B`) | replaces A, mirrored once; B's visibility is the new baseline                                                                                                                                                    |
+| C     | owner A sends a LATE clear                       | exactly one `ignored` outcome naming A as caller and B as current owner, zero `applied`, zero mirror clears, zero clear messages on the wire - and B's media still visible in a status published AFTER the clear |
+| D     | the CURRENT owner (B) clears                     | exactly one `applied`, one mirror, one wire clear whose deviceId/ownerId/generation match, and no later status sample carrying B's media                                                                         |
 
 Both C and D use a real refresh (`ECP /state`) before reading the downstream status,
 so "B is still visible" cannot be satisfied by a stale DOM reading taken before the
@@ -629,21 +630,21 @@ so the popup binds to the selector `requestSession` already opened and the main
 handler owns the session. Combined with
 `--fail-stage`, each caller can be asked at each checkpoint what the PAGE saw:
 
-- the SDK callback timeline (`sessionCallbacks`, with each callback's type and error
-  code) plus `requestSessionCalls`, `successCount`, `errorCount` and `settleType`
-  (the FIRST settlement's type). The number of settlements is
-  `sessionCallbacks.length` - deliberately not a counter, since one that counted only
-  callbacks matching the first type would read 1 for an error-then-success double
-  settlement;
-- how many times the background posted `cast:sessionRequestCancelled`, counted at
-  every post site (located by brace matching, so a differently indented site cannot
-  slip past and make a double settlement look like a single one) - and WHICH site
-  posted. Each marker carries the post ordinal, the site index, a snippet of that
-  site's own source context, and (where a `catch` binding is in scope) the error it
-  was handling, because a bare count cannot tell "the page was settled by its own
-  failed start" from "by the selector that replaced it". Measured: selector failures
-  settle through the `catch` site carrying the original error, queued failures
-  through `if (!selection)` with no error at all.
+-   the SDK callback timeline (`sessionCallbacks`, with each callback's type and error
+    code) plus `requestSessionCalls`, `successCount`, `errorCount` and `settleType`
+    (the FIRST settlement's type). The number of settlements is
+    `sessionCallbacks.length` - deliberately not a counter, since one that counted only
+    callbacks matching the first type would read 1 for an error-then-success double
+    settlement;
+-   how many times the background posted `cast:sessionRequestCancelled`, counted at
+    every post site (located by brace matching, so a differently indented site cannot
+    slip past and make a double settlement look like a single one) - and WHICH site
+    posted. Each marker carries the post ordinal, the site index, a snippet of that
+    site's own source context, and (where a `catch` binding is in scope) the error it
+    was handling, because a bare count cannot tell "the page was settled by its own
+    failed start" from "by the selector that replaced it". Measured: selector failures
+    settle through the `catch` site carrying the original error, queued failures
+    through `if (!selection)` with no error at all.
 
 Measured at p0 and p2, identical for both callers: one `requestSession` call, zero
 successes, one error callback with code `cancel` (`sessionCallbacks.length` 1), no
@@ -658,16 +659,16 @@ to triggerCast, which logs).
 
 Validated end to end (real processes, real sockets):
 
-- extension loads unsigned from a sideloaded XPI, bridge handshake completes
-  (`checking for bridge...` → `bridge compatible!`),
-- three connections appear with distinct PIDs: two version probes (`bridge:/getInfo`)
-  and the persistent discovery connection (`bridge:startDiscovery`),
-- the discovery process discovers the fake Roku over SSDP, polls it over ECP
-  (`/query/device-info`, then `/query/media-player` + `/query/active-app`), and
-  emits `main:deviceUp`, `main:receiverDeviceStatusUpdated`,
-  `main:rokuPlaybackObservation`, `main:receiverDeviceMediaStatusUpdated` back
-  through the connection — i.e. the whole discovery side runs through the real
-  relay.
+-   extension loads unsigned from a sideloaded XPI, bridge handshake completes
+    (`checking for bridge...` → `bridge compatible!`),
+-   three connections appear with distinct PIDs: two version probes (`bridge:/getInfo`)
+    and the persistent discovery connection (`bridge:startDiscovery`),
+-   the discovery process discovers the fake Roku over SSDP, polls it over ECP
+    (`/query/device-info`, then `/query/media-player` + `/query/active-app`), and
+    emits `main:deviceUp`, `main:receiverDeviceStatusUpdated`,
+    `main:rokuPlaybackObservation`, `main:receiverDeviceMediaStatusUpdated` back
+    through the connection — i.e. the whole discovery side runs through the real
+    relay.
 
 Not yet implemented: **the session half**. The red/green test the harness is for
 (session media crossing session host → extension → discovery host) needs a
@@ -700,21 +701,21 @@ Planned assertions for the session half (from the review):
 
 ## Files
 
-- `nativeProtocol.js` — framing (4-byte LE + JSON), used only to parse a copy.
-- `hostWrapper.js` — transparent wrapper, per-connection traces, reaps its child.
-- `installManifest.js` — per-user native manifest install/remove (idempotent).
-- `fakeRoku.js` — SSDP responder + ECP server + control endpoint.
-- `selfTest.js` — plumbing self-proof (no browser).
-- `runFirefox.js` — launches Firefox with the built extension and reports.
+-   `nativeProtocol.js` — framing (4-byte LE + JSON), used only to parse a copy.
+-   `hostWrapper.js` — transparent wrapper, per-connection traces, reaps its child.
+-   `installManifest.js` — per-user native manifest install/remove (idempotent).
+-   `fakeRoku.js` — SSDP responder + ECP server + control endpoint.
+-   `selfTest.js` — plumbing self-proof (no browser).
+-   `runFirefox.js` — launches Firefox with the built extension and reports.
 
 ## Traces
 
 Every run writes to a fresh temp directory (printed at startup):
 
-- `spawns.ndjson` — wrapper PIDs, child PIDs, argv (manifest path), PATH,
-  signals, child exits,
-- `conn-<pid>-in.ndjson` / `conn-<pid>-out.ndjson` — every message in both
-  directions, per connection,
-- `conn-<pid>-err.log` — that host's stderr,
-- `firefox-stdout.log` — browser + extension console,
-- `fake-roku/` — M-SEARCH seen, ECP requests by path, keypresses, launches.
+-   `spawns.ndjson` — wrapper PIDs, child PIDs, argv (manifest path), PATH,
+    signals, child exits,
+-   `conn-<pid>-in.ndjson` / `conn-<pid>-out.ndjson` — every message in both
+    directions, per connection,
+-   `conn-<pid>-err.log` — that host's stderr,
+-   `firefox-stdout.log` — browser + extension console,
+-   `fake-roku/` — M-SEARCH seen, ECP requests by path, keypresses, launches.

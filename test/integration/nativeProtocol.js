@@ -42,7 +42,9 @@ class FrameReader {
                 continue;
             }
             if (this.buffer.length < this.awaiting) return;
-            const body = this.buffer.subarray(0, this.awaiting).toString("utf8");
+            const body = this.buffer
+                .subarray(0, this.awaiting)
+                .toString("utf8");
             this.buffer = this.buffer.subarray(this.awaiting);
             this.awaiting = undefined;
             let parsed;

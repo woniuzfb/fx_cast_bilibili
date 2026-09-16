@@ -1,0 +1,34 @@
+# Prettier's scope for this repo: the code we author.
+#
+# `prettier --write .` does NOT read .gitignore (Prettier 2), so everything that
+# must stay byte-identical to something we do not own is listed here.
+
+# Dependencies and build output
+node_modules/
+bridge/node_modules/
+extension/node_modules/
+dist/
+bridge/dist/
+build/
+bridge/build/
+
+# Vendored third-party code and the upstream GitHub Pages site: reformatting
+# these produces diff noise against sources that are not ours to restyle.
+test/vendor/
+docs/
+
+# npm owns the lockfile's exact layout.
+package-lock.json
+
+# clang-format's own config (indentation-based YAML with CRLF endings), not ours
+# to restyle: Prettier would rewrite its line endings for no benefit.
+.clang-format
+
+# Captured console exports and scratch logs.
+*.log
+
+# Session memory: notes, not code.
+.workbuddy/
+
+# Editor/OS noise
+.DS_Store

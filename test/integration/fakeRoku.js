@@ -126,9 +126,13 @@ const ecp = http.createServer((req, res) => {
     } else if (url.pathname === "/query/active-app") {
         // The media player channel pretending to be Media Assistant (782875),
         // which is what resolvePlayerAppId prefers.
-        body = xml(`<active-app><app id="782875">Media Assistant</app></active-app>`);
+        body = xml(
+            `<active-app><app id="782875">Media Assistant</app></active-app>`
+        );
     } else if (url.pathname === "/query/apps") {
-        body = xml(`<apps><app id="782875" type="md">Media Assistant</app></apps>`);
+        body = xml(
+            `<apps><app id="782875" type="md">Media Assistant</app></apps>`
+        );
     } else if (url.pathname.startsWith("/keypress/")) {
         const key = decodeURIComponent(url.pathname.slice("/keypress/".length));
         keypresses.push({ key, at });
@@ -186,7 +190,14 @@ function notifyAlive() {
         ""
     ].join("\r\n");
     const buffer = Buffer.from(message);
-    ssdp.send(buffer, 0, buffer.length, args.ssdpPort, SSDP_MULTICAST, () => {});
+    ssdp.send(
+        buffer,
+        0,
+        buffer.length,
+        args.ssdpPort,
+        SSDP_MULTICAST,
+        () => {}
+    );
 }
 
 ssdp.on("message", (buffer, rinfo) => {
@@ -199,7 +210,14 @@ ssdp.on("message", (buffer, rinfo) => {
     });
     // Reply unicast to whoever asked: that is what the bridge listens for.
     const response = Buffer.from(ssdpResponse());
-    ssdp.send(response, 0, response.length, rinfo.port, rinfo.address, () => {});
+    ssdp.send(
+        response,
+        0,
+        response.length,
+        rinfo.port,
+        rinfo.address,
+        () => {}
+    );
 });
 
 ssdp.on("error", err => {
@@ -235,7 +253,11 @@ const control = http.createServer((req, res) => {
     }
     if (url.pathname === "/observations") {
         res.writeHead(200).end(
-            JSON.stringify({ state, requests: requests.slice(-200), keypresses })
+            JSON.stringify({
+                state,
+                requests: requests.slice(-200),
+                keypresses
+            })
         );
         return;
     }

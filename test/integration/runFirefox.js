@@ -152,14 +152,21 @@ function buildXpi(harnessDir) {
 }
 
 function makeProfile(harnessDir) {
-    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-prof-"));
+    const profileDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "fx-harness-prof-")
+    );
     fs.mkdirSync(path.join(profileDir, "extensions"), { recursive: true });
 
     const prefs = harnessPrefs();
     fs.writeFileSync(
         path.join(profileDir, "user.js"),
         Object.entries(prefs)
-            .map(([key, value]) => `user_pref(${JSON.stringify(key)}, ${JSON.stringify(value)});`)
+            .map(
+                ([key, value]) =>
+                    `user_pref(${JSON.stringify(key)}, ${JSON.stringify(
+                        value
+                    )});`
+            )
             .join("\n") + "\n"
     );
 
@@ -237,7 +244,9 @@ async function stopChildren({ args, firefox, roku, profileDir }) {
 
 async function main() {
     const args = parseArgs(process.argv.slice(2));
-    const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-run-"));
+    const harnessDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "fx-harness-run-")
+    );
     console.log("harness dir:", harnessDir);
 
     let profileDir;
@@ -340,17 +349,17 @@ async function main() {
     let roku;
     roku = own(
         spawn(
-        process.execPath,
-        [
-            path.join(__dirname, "fakeRoku.js"),
-            "--harness-dir",
-            rokuHarnessDir,
-            // Not 1900: the developer's own bridge searches there, and this
-            // fake device must not appear in their browser.
-            "--ssdp-port",
-            String(19008)
-        ],
-        { stdio: ["ignore", "pipe", "pipe"] }
+            process.execPath,
+            [
+                path.join(__dirname, "fakeRoku.js"),
+                "--harness-dir",
+                rokuHarnessDir,
+                // Not 1900: the developer's own bridge searches there, and this
+                // fake device must not appear in their browser.
+                "--ssdp-port",
+                String(19008)
+            ],
+            { stdio: ["ignore", "pipe", "pipe"] }
         )
     );
     let rokuControlPort;
@@ -390,23 +399,25 @@ async function main() {
     console.log("profile:", profileDir);
     console.log("sideloaded:", target);
 
-    const stdoutLog = fs.createWriteStream(path.join(harnessDir, "firefox-stdout.log"));
+    const stdoutLog = fs.createWriteStream(
+        path.join(harnessDir, "firefox-stdout.log")
+    );
     firefox = own(
         spawn(
-        firefoxPath,
-        // `-headless` keeps the run out of the way; native messaging and
-        // extension background pages work headless.
-        ["-headless", "-no-remote", "-profile", profileDir, "about:blank"],
-        {
-            stdio: ["ignore", "pipe", "pipe"],
-            env: {
-                ...process.env,
-                // Inherited by the native hosts Firefox spawns, which is how the
-                // wrapper learns where to trace.
-                FX_HARNESS_DIR: harnessDir,
-                ...(args.show ? {} : {})
+            firefoxPath,
+            // `-headless` keeps the run out of the way; native messaging and
+            // extension background pages work headless.
+            ["-headless", "-no-remote", "-profile", profileDir, "about:blank"],
+            {
+                stdio: ["ignore", "pipe", "pipe"],
+                env: {
+                    ...process.env,
+                    // Inherited by the native hosts Firefox spawns, which is how the
+                    // wrapper learns where to trace.
+                    FX_HARNESS_DIR: harnessDir,
+                    ...(args.show ? {} : {})
+                }
             }
-        }
         )
     );
     firefox.stdout.pipe(stdoutLog);
@@ -437,27 +448,45 @@ async function main() {
     const spawns = readNdjson(spawnsFile);
 
     const bridged = spawns.filter(entry => entry.event === undefined);
-    const extLog = fs.readFileSync(path.join(harnessDir, "firefox-stdout.log"), "utf8");
+    const extLog = fs.readFileSync(
+        path.join(harnessDir, "firefox-stdout.log"),
+        "utf8"
+    );
 
     console.log("\n--- what the harness observed ---");
     console.log(
         "host connections spawned through the wrapper:",
         bridged.length,
-        JSON.stringify(bridged.map(entry => ({ pid: entry.pid, entry: path.basename(entry.entry) })))
+        JSON.stringify(
+            bridged.map(entry => ({
+                pid: entry.pid,
+                entry: path.basename(entry.entry)
+            }))
+        )
     );
     console.log(
         "distinct PIDs:",
         new Set(bridged.map(entry => entry.pid)).size
     );
     for (const entry of bridged) {
-        const inbound = readNdjson(path.join(harnessDir, `conn-${entry.pid}-in.ndjson`));
-        const outbound = readNdjson(path.join(harnessDir, `conn-${entry.pid}-out.ndjson`));
+        const inbound = readNdjson(
+            path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
+        );
+        const outbound = readNdjson(
+            path.join(harnessDir, `conn-${entry.pid}-out.ndjson`)
+        );
         console.log(
             `  pid ${entry.pid}: ${inbound.length} firefox->host, ${outbound.length} host->firefox`,
             "subjects:",
-            JSON.stringify([
-                ...new Set([...inbound, ...outbound].map(m => m.subject).filter(Boolean))
-            ].slice(0, 12))
+            JSON.stringify(
+                [
+                    ...new Set(
+                        [...inbound, ...outbound]
+                            .map(m => m.subject)
+                            .filter(Boolean)
+                    )
+                ].slice(0, 12)
+            )
         );
     }
     const rokuRequests = readNdjson(
@@ -469,7 +498,8 @@ async function main() {
     }
     console.log(
         "fake roku: " +
-            readNdjson(path.join(rokuHarnessDir, "fake-roku-msearch.ndjson")).length +
+            readNdjson(path.join(rokuHarnessDir, "fake-roku-msearch.ndjson"))
+                .length +
             " M-SEARCH seen, ECP requests by path:",
         JSON.stringify(byPath)
     );

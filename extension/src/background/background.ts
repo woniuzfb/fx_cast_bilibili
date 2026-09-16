@@ -91,7 +91,6 @@ async function notifyBridgeCompat() {
     }
 }
 
-
 let isInitialized = false;
 
 async function init() {

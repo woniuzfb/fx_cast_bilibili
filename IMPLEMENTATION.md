@@ -93,12 +93,12 @@ Since the daemon is just a WebSocket server, it can configured to be used remote
 
 Roku devices (ECP protocol, HTTP port 8060) appear alongside Chromecast receivers in the device list. The integration (referencing [QuickCast's](https://github.com/ace68078/chrome-cast-extension) Roku implementation) lives almost entirely in the bridge under `bridge/src/bridge/components/roku/`:
 
-| Module          | Role                                                                                                                                     |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `ecp.ts`        | ECP HTTP client: `/query/device-info`, `/query/apps`, `/query/media-player`, `/launch/<appId>`, `/keypress/<key>`                          |
-| `deviceBrowser.ts` | SSDP discovery (`M-SEARCH` for `roku:ecp` + NOTIFY alive/byebye) with `/query/device-info` health probes; emits `main:deviceUp/Down`    |
-| `session.ts`    | `RokuSession` — emulates the Chromecast session surface over ECP (see below)                                                              |
-| `remote.ts`     | `RokuRemote` — device-level status polling and session-less popup media controls                                                          |
+| Module             | Role                                                                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `ecp.ts`           | ECP HTTP client: `/query/device-info`, `/query/apps`, `/query/media-player`, `/launch/<appId>`, `/keypress/<key>`                    |
+| `deviceBrowser.ts` | SSDP discovery (`M-SEARCH` for `roku:ecp` + NOTIFY alive/byebye) with `/query/device-info` health probes; emits `main:deviceUp/Down` |
+| `session.ts`       | `RokuSession` — emulates the Chromecast session surface over ECP (see below)                                                         |
+| `remote.ts`        | `RokuRemote` — device-level status polling and session-less popup media controls                                                     |
 
 ### Session emulation
 

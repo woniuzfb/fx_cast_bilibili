@@ -148,7 +148,12 @@ const child = spawn(entry, [], {
     env: childEnv
 });
 
-record("spawns.ndjson", { pid, at: Date.now(), event: "child", childPid: child.pid });
+record("spawns.ndjson", {
+    pid,
+    at: Date.now(),
+    event: "child",
+    childPid: child.pid
+});
 
 child.on("error", err => {
     record("wrapper-errors.ndjson", {

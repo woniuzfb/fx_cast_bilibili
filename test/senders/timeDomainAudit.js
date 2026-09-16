@@ -38,8 +38,7 @@ const esbuildPath = path.join(
 const argv = process.argv.slice(2);
 const PRE_FIX = argv.includes("--pre-fix");
 const revIndex = argv.indexOf("--rev");
-const REV =
-    revIndex >= 0 && argv[revIndex + 1] ? argv[revIndex + 1] : "HEAD";
+const REV = revIndex >= 0 && argv[revIndex + 1] ? argv[revIndex + 1] : "HEAD";
 
 let pass = 0;
 let fail = 0;
@@ -385,11 +384,7 @@ async function makeSender(MediaSender, { pageStart = 400, offset = 32 } = {}) {
                 request,
                 onSuccess,
                 onError,
-                media: makeMedia(
-                    PlayerState.PLAYING,
-                    pageStart + offset,
-                    9
-                )
+                media: makeMedia(PlayerState.PLAYING, pageStart + offset, 9)
             });
         },
         addUpdateListener: noop,
@@ -476,7 +471,10 @@ async function main() {
     );
 
     // ---- 3. a page seek target stays in the page domain --------------------
-    const b = await makeSender(MediaSender, { pageStart: 10.882462, offset: 22 });
+    const b = await makeSender(MediaSender, {
+        pageStart: 10.882462,
+        offset: 22
+    });
     const startsBefore = b.startedMediaServers.length;
     b.sender.seekDashRemux(10.882462);
     await flush();
@@ -501,7 +499,10 @@ async function main() {
     // The popup's play/pause command has no position. What it must never do is
     // arrive at the remux as a seek, which is how a pause click reloaded the
     // receiver: the page's own re-seek inside the transition was forwarded.
-    const c = await makeSender(MediaSender, { pageStart: 10.882462, offset: 22 });
+    const c = await makeSender(MediaSender, {
+        pageStart: 10.882462,
+        offset: 22
+    });
     const cStarts = c.startedMediaServers.length;
     const accepted = c.sender.controlPlayback({ intent: "PAUSE", id: "cmd-1" });
     await flush();
@@ -580,7 +581,9 @@ async function main() {
 
     console.info("");
     if (PRE_FIX) {
-        const expected = failures.filter(name => /remux restart|padded/.test(name));
+        const expected = failures.filter(name =>
+            /remux restart|padded/.test(name)
+        );
         if (expected.length === 0) {
             console.error(
                 `timeDomainAudit: --pre-fix expected a leak at ${REV}, saw none`

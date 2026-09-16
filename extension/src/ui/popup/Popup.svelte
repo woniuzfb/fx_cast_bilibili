@@ -129,8 +129,10 @@
              * mirroring channel). */
             case ReceiverSelectorMediaType.Screen:
                 return (
-                    !!(device.capabilities & ReceiverDeviceCapabilities.VIDEO_OUT) &&
-                    device.deviceType !== "roku"
+                    !!(
+                        device.capabilities &
+                        ReceiverDeviceCapabilities.VIDEO_OUT
+                    ) && device.deviceType !== "roku"
                 );
         }
 
@@ -710,7 +712,11 @@
     {#if selectorStalled}
         <div class="banner banner--info">
             Couldn't open the receiver selector.
-            <button type="button" class="banner__retry" on:click={retrySelector}>
+            <button
+                type="button"
+                class="banner__retry"
+                on:click={retrySelector}
+            >
                 Retry
             </button>
         </div>

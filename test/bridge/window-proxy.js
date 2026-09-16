@@ -125,15 +125,16 @@ const server = http.createServer(async (req, res) => {
                 const { headers, entries } = parseEntries(body);
                 if (anchoredAt === null) anchoredAt = Date.now();
                 const elapsed = (Date.now() - anchoredAt) / 1000;
-                const allEntries = injectPads > 0
-                    ? [
-                          ...Array.from({ length: injectPads }, () => ({
-                              duration: PAD_SECONDS,
-                              file: `pad.ts?g=${generation}`
-                          })),
-                          ...entries
-                      ]
-                    : entries;
+                const allEntries =
+                    injectPads > 0
+                        ? [
+                              ...Array.from({ length: injectPads }, () => ({
+                                  duration: PAD_SECONDS,
+                                  file: `pad.ts?g=${generation}`
+                              })),
+                              ...entries
+                          ]
+                        : entries;
                 const revealTotal = revealSeconds + injectPads * PAD_SECONDS;
                 // Acceptance rule (validated on-device): the seek target must
                 // land at or after the END of the window's middle segment.
@@ -159,7 +160,11 @@ const server = http.createServer(async (req, res) => {
                 }
                 const body2 = lines.join("\n") + "\n";
                 log(
-                    `playlist: ${shown}/${entries.length} entries (${total.toFixed(1)}s visible, middle ${(total / 2).toFixed(1)}s)`
+                    `playlist: ${shown}/${
+                        entries.length
+                    } entries (${total.toFixed(1)}s visible, middle ${(
+                        total / 2
+                    ).toFixed(1)}s)`
                 );
                 res.writeHead(200, {
                     "Access-Control-Allow-Origin": "*",
@@ -180,5 +185,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(listenPort, "0.0.0.0", () =>
-    log(`proxying ${bridgeBase} on :${listenPort}, reveal from ${revealSeconds}s`)
+    log(
+        `proxying ${bridgeBase} on :${listenPort}, reveal from ${revealSeconds}s`
+    )
 );

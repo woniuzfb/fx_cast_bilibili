@@ -73,9 +73,7 @@ const ROOT_PATH = path.join(__dirname, "..");
 if (argv.outDir && argv.package) {
     throw new Error("build: --out-dir cannot be combined with --package");
 }
-const OUT_PATH = argv.outDir
-    ? path.resolve(argv.outDir)
-    : paths.DIST_PATH;
+const OUT_PATH = argv.outDir ? path.resolve(argv.outDir) : paths.DIST_PATH;
 const BUILD_PATH = argv.outDir
     ? path.join(path.dirname(path.resolve(argv.outDir)), "app")
     : path.join(ROOT_PATH, "dist/app");

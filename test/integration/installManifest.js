@@ -146,7 +146,9 @@ function install({ name }) {
     let conflict;
     if (systemPath && fs.existsSync(systemPath)) {
         try {
-            const systemManifest = JSON.parse(fs.readFileSync(systemPath, "utf8"));
+            const systemManifest = JSON.parse(
+                fs.readFileSync(systemPath, "utf8")
+            );
             conflict = { path: systemPath, target: systemManifest.path };
         } catch (err) {
             conflict = { path: systemPath, error: String(err) };
@@ -221,7 +223,9 @@ function restore(snapshotState) {
             return [`removed ${manifestPath}`];
         }
         // Something else replaced it meanwhile; leave that alone.
-        return [`left ${manifestPath} alone (not the harness manifest any more)`];
+        return [
+            `left ${manifestPath} alone (not the harness manifest any more)`
+        ];
     }
 
     if (current === contents) return [`kept ${manifestPath} unchanged`];
@@ -238,7 +242,9 @@ if (require.main === module) {
         const { manifestPath, conflict } = install(args);
         console.log("installed:", manifestPath);
         if (conflict) {
-            console.log("WARNING: a system manifest with the same name exists:");
+            console.log(
+                "WARNING: a system manifest with the same name exists:"
+            );
             console.log("        ", JSON.stringify(conflict));
             console.log(
                 "         If the wrapper never spawns, the system one is winning;"

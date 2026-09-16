@@ -52,7 +52,7 @@ this harness has no capture input).
 
 **The shared remux cut point.** Both inputs are seeked to `contentBaseSeconds`,
 the probed video keyframe (`Math.min(padBaseSeconds, contentBaseSeconds)`), never
-to the raw `startTime`: seeking video and audio to the same *wall-clock* target
+to the raw `startTime`: seeking video and audio to the same _wall-clock_ target
 cuts them at DIFFERENT points (the video input resumes at its keyframe, the audio
 input at the target), which makes the mpegts interleaver drop the first segment's
 audio that precedes its first written video packet. `padBaseSeconds` is NOT the
@@ -146,14 +146,14 @@ only evidence for playback starting.
 Item/quality transitions are logged as a transaction, so a failure can be located
 instead of inferred:
 
-- `DASH item transition tick` — one line per CHANGED tick, with the previous and
-  currently bound `mediaSessionId`, the player state, the receiver's raw position,
-  whether this load's LOAD callback has resolved, and the elapsed time. A receiver
-  that stops reporting shows up as the last tick before the silence.
-- `item transition: LOAD callback resolved` — the callback's own
-  `mediaSessionId`/state plus every id in `session.media`.
-- `receiver media load rejected` — the SDK error with `code`/`description`,
-  the active bridge `requestId`, whether a transition/priming was open, the LOAD
-  position that was sent, and the session ids present at that moment.
-- `DASH item transition window closed` — the reason: `new-media-position`,
-  `load-rejected`, `new-load`, `deadline`, or `stopped`.
+-   `DASH item transition tick` — one line per CHANGED tick, with the previous and
+    currently bound `mediaSessionId`, the player state, the receiver's raw position,
+    whether this load's LOAD callback has resolved, and the elapsed time. A receiver
+    that stops reporting shows up as the last tick before the silence.
+-   `item transition: LOAD callback resolved` — the callback's own
+    `mediaSessionId`/state plus every id in `session.media`.
+-   `receiver media load rejected` — the SDK error with `code`/`description`,
+    the active bridge `requestId`, whether a transition/priming was open, the LOAD
+    position that was sent, and the session ids present at that moment.
+-   `DASH item transition window closed` — the reason: `new-media-position`,
+    `load-rejected`, `new-load`, `deadline`, or `stopped`.

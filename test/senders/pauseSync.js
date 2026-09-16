@@ -100,7 +100,9 @@ async function bundle({ source, outfile, stubDir, workDir }) {
     const entry = path.join(workDir, "entry.js");
     fs.writeFileSync(
         entry,
-        `import MediaSender from ${JSON.stringify(source)};\nexport { MediaSender };\n`
+        `import MediaSender from ${JSON.stringify(
+            source
+        )};\nexport { MediaSender };\n`
     );
     await esbuild.build({
         entryPoints: [entry],
@@ -227,7 +229,9 @@ function makeSender(MediaSender, kind, opts = {}) {
         currentTime: opts.pageTime ?? 0
     });
     const remoteProxy =
-        kind === KIND.CCTV ? { hlsLive: true } : { audioUrl: "https://example.invalid/audio.m4s" };
+        kind === KIND.CCTV
+            ? { hlsLive: true }
+            : { audioUrl: "https://example.invalid/audio.m4s" };
     const sender = new MediaSender({
         mediaUrl: undefined,
         mediaElement: element,
@@ -241,7 +245,10 @@ function makeSender(MediaSender, kind, opts = {}) {
     const sent = [];
     sender.session = {
         receiver: {
-            label: kind === KIND.BILIBILI_CHROMECAST ? "chromecast-test" : "roku-HARNESS0001"
+            label:
+                kind === KIND.BILIBILI_CHROMECAST
+                    ? "chromecast-test"
+                    : "roku-HARNESS0001"
         },
         media: [],
         addUpdateListener: () => {},
@@ -264,17 +271,87 @@ function makeSender(MediaSender, kind, opts = {}) {
 
 function runMatrix(MediaSender) {
     const cases = [
-        [KIND.BILIBILI_ROKU, PlayerState.PAUSED, false, 0, 1, "Bilibili on Roku: receiver PAUSED pauses the page"],
-        [KIND.BILIBILI_ROKU, PlayerState.PLAYING, true, 1, 0, "Bilibili on Roku: receiver PLAYING resumes the page"],
-        [KIND.BILIBILI_ROKU, PlayerState.BUFFERING, true, 1, 0, "Bilibili on Roku: receiver BUFFERING keeps the page playing (watermark)"],
-        [KIND.BILIBILI_ROKU, PlayerState.IDLE, true, 1, 0, "Bilibili on Roku: receiver startup IDLE keeps the page playing (watermark)"],
-        [KIND.CCTV, PlayerState.PAUSED, false, 0, 1, "CCTV: receiver PAUSED pauses the page"],
-        [KIND.CCTV, PlayerState.PLAYING, true, 1, 0, "CCTV: receiver PLAYING resumes the page"],
-        [KIND.CCTV, PlayerState.BUFFERING, true, 1, 0, "CCTV: receiver BUFFERING keeps the page playing (no regression)"],
-        [KIND.BILIBILI_CHROMECAST, PlayerState.BUFFERING, false, 0, 1, "Bilibili on Chromecast: BUFFERING still pauses the page"],
-        [KIND.BILIBILI_CHROMECAST, PlayerState.PAUSED, false, 0, 1, "Bilibili on Chromecast: PAUSED pauses the page"]
+        [
+            KIND.BILIBILI_ROKU,
+            PlayerState.PAUSED,
+            false,
+            0,
+            1,
+            "Bilibili on Roku: receiver PAUSED pauses the page"
+        ],
+        [
+            KIND.BILIBILI_ROKU,
+            PlayerState.PLAYING,
+            true,
+            1,
+            0,
+            "Bilibili on Roku: receiver PLAYING resumes the page"
+        ],
+        [
+            KIND.BILIBILI_ROKU,
+            PlayerState.BUFFERING,
+            true,
+            1,
+            0,
+            "Bilibili on Roku: receiver BUFFERING keeps the page playing (watermark)"
+        ],
+        [
+            KIND.BILIBILI_ROKU,
+            PlayerState.IDLE,
+            true,
+            1,
+            0,
+            "Bilibili on Roku: receiver startup IDLE keeps the page playing (watermark)"
+        ],
+        [
+            KIND.CCTV,
+            PlayerState.PAUSED,
+            false,
+            0,
+            1,
+            "CCTV: receiver PAUSED pauses the page"
+        ],
+        [
+            KIND.CCTV,
+            PlayerState.PLAYING,
+            true,
+            1,
+            0,
+            "CCTV: receiver PLAYING resumes the page"
+        ],
+        [
+            KIND.CCTV,
+            PlayerState.BUFFERING,
+            true,
+            1,
+            0,
+            "CCTV: receiver BUFFERING keeps the page playing (no regression)"
+        ],
+        [
+            KIND.BILIBILI_CHROMECAST,
+            PlayerState.BUFFERING,
+            false,
+            0,
+            1,
+            "Bilibili on Chromecast: BUFFERING still pauses the page"
+        ],
+        [
+            KIND.BILIBILI_CHROMECAST,
+            PlayerState.PAUSED,
+            false,
+            0,
+            1,
+            "Bilibili on Chromecast: PAUSED pauses the page"
+        ]
     ];
-    for (const [kind, state, pagePaused, expectPlay, expectPause, name] of cases) {
+    for (const [
+        kind,
+        state,
+        pagePaused,
+        expectPlay,
+        expectPause,
+        name
+    ] of cases) {
         const sender = makeSender(MediaSender, kind, { pagePaused });
         sender.setReceiverState(state);
         sender.tick();
@@ -303,7 +380,10 @@ function runPositionAuthority(MediaSender) {
         check(
             "Bilibili on Roku: a 30s receiver drift does NOT move the page position (the page is the capture clock)",
             sender.element.currentTime === 100,
-            JSON.stringify({ pageTime: sender.element.currentTime, receiverTime: 130 })
+            JSON.stringify({
+                pageTime: sender.element.currentTime,
+                receiverTime: 130
+            })
         );
     }
     {
@@ -327,7 +407,10 @@ function runPositionAuthority(MediaSender) {
         check(
             "Bilibili on Chromecast: the receiver's drift does NOT move the page position (it is observed, not written)",
             sender.element.currentTime === 100,
-            JSON.stringify({ pageTime: sender.element.currentTime, receiverTime: 130 })
+            JSON.stringify({
+                pageTime: sender.element.currentTime,
+                receiverTime: 130
+            })
         );
     }
 }
@@ -367,7 +450,10 @@ function runSupplyContinuity(MediaSender) {
             sender.element.paused === true &&
                 sender.element.calls.play === 0 &&
                 sender.element.calls.pause === 1,
-            JSON.stringify({ paused: sender.element.paused, calls: sender.element.calls })
+            JSON.stringify({
+                paused: sender.element.paused,
+                calls: sender.element.calls
+            })
         );
 
         // Resume: the page must start producing again, once.
@@ -410,8 +496,13 @@ function runSupplyContinuity(MediaSender) {
         for (let i = 0; i < 100; i++) sender.tick();
         check(
             "receiver BUFFERING for 50s: the page is kept playing and play() is called once, not per tick",
-            sender.element.paused === false && sender.element.calls.play === 1 && sender.element.calls.pause === 0,
-            JSON.stringify({ paused: sender.element.paused, calls: sender.element.calls })
+            sender.element.paused === false &&
+                sender.element.calls.play === 1 &&
+                sender.element.calls.pause === 0,
+            JSON.stringify({
+                paused: sender.element.paused,
+                calls: sender.element.calls
+            })
         );
     }
 }

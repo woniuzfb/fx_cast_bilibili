@@ -94,7 +94,9 @@ export default class CastClient {
         oldClient.removeAllListeners();
         try {
             oldClient.close();
-        } catch { /* never connected */ }
+        } catch {
+            /* never connected */
+        }
     }
 
     /**
@@ -118,7 +120,9 @@ export default class CastClient {
                 } else {
                     try {
                         this.client.close();
-                    } catch { /* already closed */ }
+                    } catch {
+                        /* already closed */
+                    }
                 }
             });
 
@@ -151,13 +155,16 @@ export default class CastClient {
                     });
 
                     // Track PONG replies for connection liveness checks
-                    this.heartbeatChannel.on("message", (message: { type?: string }) => {
-                        if (message?.type === "PONG") {
-                            const report = pongMeter.onPong();
-                            if (report) options?.onPongStats?.(report);
-                            options?.onPong?.();
+                    this.heartbeatChannel.on(
+                        "message",
+                        (message: { type?: string }) => {
+                            if (message?.type === "PONG") {
+                                const report = pongMeter.onPong();
+                                if (report) options?.onPongStats?.(report);
+                                options?.onPong?.();
+                            }
                         }
-                    });
+                    );
 
                     this.connectionChannel.send({ type: "CONNECT" });
                     pongMeter.onPing();
@@ -185,6 +192,8 @@ export default class CastClient {
         try {
             this.connectionChannel?.send({ type: "CLOSE" });
             this.client.close();
-        } catch { /* already closed */ }
+        } catch {
+            /* already closed */
+        }
     }
 }

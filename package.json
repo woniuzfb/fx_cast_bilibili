@@ -21,6 +21,8 @@
         "test:playback": "node test/playback/coordinatorObservation.js --fixed && node test/playback/dashPresentationTime.js && node test/playback/dashStatusPipeline.js && node test/playback/runtimeRelay.js",
         "install-manifest": "cd bridge && npm run install-manifest",
         "remove-manifest": "cd bridge && npm run remove-manifest",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
         "lint": "npm run lint:bridge && npm run lint:extension",
         "lint:bridge": "eslint bridge/src --ext .ts,.js",
         "lint:extension": "eslint extension/src --ext .ts,.js,.svelte"

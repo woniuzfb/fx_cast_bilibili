@@ -200,10 +200,7 @@ export default class Remote extends CastClient {
                         host: this.host,
                         attempt: attempt + 1,
                         retryDelay,
-                        error:
-                            err instanceof Error
-                                ? err.message
-                                : String(err)
+                        error: err instanceof Error ? err.message : String(err)
                     }
                 );
 
@@ -346,10 +343,7 @@ export default class Remote extends CastClient {
 
         // Recreate the app transport if the receiver relaunched the app with
         // a different transport ID.
-        if (
-            this.transportId &&
-            this.transportId !== application.transportId
-        ) {
+        if (this.transportId && this.transportId !== application.transportId) {
             this.clearTransport();
         }
 
@@ -373,9 +367,8 @@ export default class Remote extends CastClient {
     }
 
     private connectTransport(transportId: string, attempt = 0) {
-        const transportClient = new RemoteTransport(
-            transportId,
-            message => this.onMediaMessage(message)
+        const transportClient = new RemoteTransport(transportId, message =>
+            this.onMediaMessage(message)
         );
         this.transportClient = transportClient;
         this.transportId = transportId;
@@ -415,7 +408,10 @@ export default class Remote extends CastClient {
                     error: err instanceof Error ? err.message : String(err)
                 });
 
-                if (retryDelay === undefined || this.transportId !== transportId) {
+                if (
+                    retryDelay === undefined ||
+                    this.transportId !== transportId
+                ) {
                     this.transportId = undefined;
                     return;
                 }
@@ -433,19 +429,13 @@ export default class Remote extends CastClient {
         attempt: number,
         delay = TRANSPORT_RETRY_DELAYS_MS[0]
     ) {
-        if (
-            this.transportRetryTimeoutId ||
-            this.transportId !== transportId
-        ) {
+        if (this.transportRetryTimeoutId || this.transportId !== transportId) {
             return;
         }
 
         this.transportRetryTimeoutId = setTimeout(() => {
             this.transportRetryTimeoutId = undefined;
-            if (
-                this.transportId === transportId &&
-                !this.transportClient
-            ) {
+            if (this.transportId === transportId && !this.transportClient) {
                 this.connectTransport(transportId, attempt);
             }
         }, delay);

@@ -37,7 +37,8 @@ function parseArgs(argv) {
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--host") args.host = argv[++i];
         else if (argv[i] === "--url") args.url = argv[++i];
-        else if (argv[i] === "--current-time") args.currentTime = Number(argv[++i]);
+        else if (argv[i] === "--current-time")
+            args.currentTime = Number(argv[++i]);
         else if (argv[i] === "--duration") args.duration = Number(argv[++i]);
         else if (argv[i] === "--observe-ms") args.observeMs = Number(argv[++i]);
         else if (argv[i] === "--content-type") args.contentType = argv[++i];
@@ -85,18 +86,35 @@ async function main() {
     client.on("error", err => log(`client error: ${err.message}`));
     log("connected");
 
-    const connection = client.createChannel("sender-0", "receiver-0", NS_CONNECTION, "JSON");
+    const connection = client.createChannel(
+        "sender-0",
+        "receiver-0",
+        NS_CONNECTION,
+        "JSON"
+    );
     connection.send({ type: "CONNECT" });
-    const heartbeat = client.createChannel("sender-0", "receiver-0", NS_HEARTBEAT, "JSON");
+    const heartbeat = client.createChannel(
+        "sender-0",
+        "receiver-0",
+        NS_HEARTBEAT,
+        "JSON"
+    );
     heartbeat.on("message", message => {
         if (message.type === "PING") heartbeat.send({ type: "PONG" });
     });
     const pingTimer = setInterval(() => heartbeat.send({ type: "PING" }), 5000);
 
-    receiverChannel = client.createChannel("sender-0", "receiver-0", NS_RECEIVER, "JSON");
+    receiverChannel = client.createChannel(
+        "sender-0",
+        "receiver-0",
+        NS_RECEIVER,
+        "JSON"
+    );
     receiverChannel.on("message", message => {
         if (message.type === "RECEIVER_STATUS") {
-            const app = (message.status.applications || []).find(a => a.appId === APP_ID);
+            const app = (message.status.applications || []).find(
+                a => a.appId === APP_ID
+            );
             if (app && !sessionId) {
                 sessionId = app.sessionId;
                 transportId = app.transportId;
@@ -115,24 +133,47 @@ async function main() {
     await sleep(1500);
     if (sessionId) {
         log(`stopping existing app session ${sessionId}`);
-        receiverChannel.send({ type: "STOP", sessionId, requestId: requestId++ });
+        receiverChannel.send({
+            type: "STOP",
+            sessionId,
+            requestId: requestId++
+        });
         await waitFor(() => !sessionId, 10000, "app stop");
     }
 
     log("launching Default Media Receiver...");
     const launchId = requestId++;
-    receiverChannel.send({ type: "LAUNCH", appId: APP_ID, requestId: launchId });
+    receiverChannel.send({
+        type: "LAUNCH",
+        appId: APP_ID,
+        requestId: launchId
+    });
     await waitFor(() => sessionId, 20000, "app launch");
     log(`app session ${sessionId} transport ${transportId}`);
 
-    const transportConnection = client.createChannel("sender-0", transportId, NS_CONNECTION, "JSON");
+    const transportConnection = client.createChannel(
+        "sender-0",
+        transportId,
+        NS_CONNECTION,
+        "JSON"
+    );
     transportConnection.send({ type: "CONNECT" });
-    const transportHeartbeat = client.createChannel("sender-0", transportId, NS_HEARTBEAT, "JSON");
+    const transportHeartbeat = client.createChannel(
+        "sender-0",
+        transportId,
+        NS_HEARTBEAT,
+        "JSON"
+    );
     transportHeartbeat.on("message", message => {
         if (message.type === "PING") transportHeartbeat.send({ type: "PONG" });
     });
 
-    mediaChannel = client.createChannel("sender-0", transportId, NS_MEDIA, "JSON");
+    mediaChannel = client.createChannel(
+        "sender-0",
+        transportId,
+        NS_MEDIA,
+        "JSON"
+    );
     mediaChannel.on("message", message => {
         if (message.type === "MEDIA_STATUS") {
             for (const status of message.status || []) {
@@ -140,9 +181,13 @@ async function main() {
                 log(
                     `MEDIA_STATUS playerState=${status.playerState}` +
                         ` currentTime=${status.currentTime}` +
-                        (status.idleReason ? ` idleReason=${status.idleReason}` : "") +
+                        (status.idleReason
+                            ? ` idleReason=${status.idleReason}`
+                            : "") +
                         (status.extendedStatus !== undefined
-                            ? ` extended=${JSON.stringify(status.extendedStatus)}`
+                            ? ` extended=${JSON.stringify(
+                                  status.extendedStatus
+                              )}`
                             : "")
                 );
             }
@@ -172,11 +217,19 @@ async function main() {
 
     if (!args.keepApp) {
         if (mediaSessionId !== undefined) {
-            mediaChannel.send({ type: "STOP", mediaSessionId, requestId: requestId++ });
+            mediaChannel.send({
+                type: "STOP",
+                mediaSessionId,
+                requestId: requestId++
+            });
             await sleep(500);
         }
         if (sessionId) {
-            receiverChannel.send({ type: "STOP", sessionId, requestId: requestId++ });
+            receiverChannel.send({
+                type: "STOP",
+                sessionId,
+                requestId: requestId++
+            });
             await sleep(1500);
         }
     }

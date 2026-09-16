@@ -100,7 +100,9 @@ export default class Session extends CastClient {
         // Converts the silent half-dead socket into a detected close.
         try {
             this.client.close();
-        } catch { /* already closed */ }
+        } catch {
+            /* already closed */
+        }
     }
 
     /**
@@ -259,9 +261,7 @@ export default class Session extends CastClient {
                     // echoed locally for a standalone bridge) so this
                     // Session.ts DEFAULT_HEARTBEAT_STALE_MS can be tuned from
                     // live data.
-                    if (
-                        report.suggestedThresholdMs === this.heartbeatStaleMs
-                    ) {
+                    if (report.suggestedThresholdMs === this.heartbeatStaleMs) {
                         return;
                     }
                     console.warn(

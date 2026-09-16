@@ -259,7 +259,11 @@ async function fetchAmoVersionStatus({ apiKey, apiSecret, version }) {
  * @param {string} downloadDir
  * @returns {Promise<{ downloadedFiles: string[] }>}
  */
-async function downloadAmoSignedFile({ apiKey, apiSecret }, fileUrl, downloadDir) {
+async function downloadAmoSignedFile(
+    { apiKey, apiSecret },
+    fileUrl,
+    downloadDir
+) {
     const res = await fetch(fileUrl, {
         headers: {
             Authorization: `JWT ${createAmoAuthToken(apiKey, apiSecret)}`
@@ -297,7 +301,12 @@ async function downloadAmoSignedFile({ apiKey, apiSecret }, fileUrl, downloadDir
  * @returns {Promise<{ downloadedFiles: string[] } | null>} null when the
  * version does not exist at AMO (nothing to recover)
  */
-async function recoverSignedXpiFromAmo({ apiKey, apiSecret, version, downloadDir }) {
+async function recoverSignedXpiFromAmo({
+    apiKey,
+    apiSecret,
+    version,
+    downloadDir
+}) {
     const deadline = Date.now() + RECOVERY_TIMEOUT_MS;
 
     for (let attempt = 0; ; attempt++) {
@@ -380,9 +389,7 @@ function isTransientSigningError(err) {
     const messages = [err.message];
     if (err.cause !== undefined && err.cause !== null) {
         messages.push(
-            err.cause instanceof Error
-                ? err.cause.message
-                : String(err.cause)
+            err.cause instanceof Error ? err.cause.message : String(err.cause)
         );
     }
     const message = messages.join(" ");
@@ -402,7 +409,11 @@ function isTransientSigningError(err) {
     }
 
     // AMO rate limiting / server trouble, across both error formats.
-    if (/too many requests|bad gateway|service unavailable|gateway timeout|internal server error/i.test(message)) {
+    if (
+        /too many requests|bad gateway|service unavailable|gateway timeout|internal server error/i.test(
+            message
+        )
+    ) {
         return true;
     }
 
@@ -526,7 +537,11 @@ if (argv.watch) {
                         // stack returned absolute paths. Normalize.
                         for (const file of result.downloadedFiles ?? []) {
                             console.info(
-                                `Signed extension: ${path.isAbsolute(file) ? file : path.join(signedPath, file)}`
+                                `Signed extension: ${
+                                    path.isAbsolute(file)
+                                        ? file
+                                        : path.join(signedPath, file)
+                                }`
                             );
                         }
 

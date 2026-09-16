@@ -96,10 +96,7 @@ export interface DashPresentation {
      * session id is accepted as the alternative identity for reports that echo
      * an id but no contentId.
      */
-    describes(media: {
-        contentId?: string;
-        mediaSessionId?: number;
-    }): boolean;
+    describes(media: { contentId?: string; mediaSessionId?: number }): boolean;
 
     /** The identities this adapter accepts, for diagnostics and tests. */
     describeBindings(): {
@@ -124,9 +121,7 @@ export function normalizeContentId(contentId: unknown): string | undefined {
  * It is deliberately a real adapter rather than `undefined`, so every consumer
  * has exactly one code path and no "unknown offset" branch to get wrong.
  */
-export function identityPresentation(
-    generationId: string
-): DashPresentation {
+export function identityPresentation(generationId: string): DashPresentation {
     return createDashPresentation({
         generationId,
         pageStart: 0,
@@ -215,10 +210,7 @@ export function createDashPresentation(identity: {
             }
         }
     } as DashPresentation & {
-        bind(media: {
-            contentId?: string;
-            mediaSessionId?: number;
-        }): void;
+        bind(media: { contentId?: string; mediaSessionId?: number }): void;
     };
 }
 

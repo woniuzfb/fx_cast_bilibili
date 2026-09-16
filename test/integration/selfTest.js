@@ -115,7 +115,9 @@ async function waitFor(predicate, timeoutMs, what) {
 }
 
 (async () => {
-    const harnessDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-self-"));
+    const harnessDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "fx-harness-self-")
+    );
     console.log("harness dir:", harnessDir);
 
     // --- the private build must be self-contained --------------------------
@@ -132,7 +134,10 @@ async function waitFor(predicate, timeoutMs, what) {
             String(built.stderr || built.stdout).slice(-400)
         );
         const config = require(path.join(repoRoot, "bridge/config.json"));
-        const manifestPath = path.join(outDir, `${config.applicationName}.json`);
+        const manifestPath = path.join(
+            outDir,
+            `${config.applicationName}.json`
+        );
         let manifest;
         try {
             manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -152,7 +157,11 @@ async function waitFor(predicate, timeoutMs, what) {
                     path.dirname(manifest.path) === outDir &&
                     fs.existsSync(manifest.path)
             ),
-            JSON.stringify({ manifestPath, path: manifest && manifest.path, outDir })
+            JSON.stringify({
+                manifestPath,
+                path: manifest && manifest.path,
+                outDir
+            })
         );
         check(
             "and NOT back into the repo's dist/ (which would undo the isolation)",
@@ -181,7 +190,8 @@ async function waitFor(predicate, timeoutMs, what) {
     );
     check(
         "the reply is the application version",
-        typeof reply.message === "string" && /^\d+\.\d+\.\d+/.test(reply.message),
+        typeof reply.message === "string" &&
+            /^\d+\.\d+\.\d+/.test(reply.message),
         JSON.stringify(reply.message)
     );
 
@@ -222,8 +232,7 @@ async function waitFor(predicate, timeoutMs, what) {
     );
     check(
         "the firefox->host trace is non-empty and holds the request",
-        inboundTrace.length > 0 &&
-            inboundTrace[0].subject === "bridge:getInfo",
+        inboundTrace.length > 0 && inboundTrace[0].subject === "bridge:getInfo",
         JSON.stringify(inboundTrace)
     );
     check(

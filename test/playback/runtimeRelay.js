@@ -93,7 +93,10 @@ function installBrowserStub() {
             lastError: undefined
         },
         storage: {
-            local: { get: () => Promise.resolve({}), set: () => Promise.resolve() },
+            local: {
+                get: () => Promise.resolve({}),
+                set: () => Promise.resolve()
+            },
             onChanged: { addListener: () => {} }
         },
         scripting: { executeScript: () => Promise.resolve([]) },
@@ -133,10 +136,7 @@ async function main() {
         const rev = preFixRev || "HEAD";
         const show = spawnSync(
             "git",
-            [
-                "show",
-                `${rev}:extension/src/background/pageProgressRelay.ts`
-            ],
+            ["show", `${rev}:extension/src/background/pageProgressRelay.ts`],
             { cwd: repoRoot, encoding: "utf8" }
         );
         // Pre-fix there is no relay module at all - and no registration in the

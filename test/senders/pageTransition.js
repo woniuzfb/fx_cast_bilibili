@@ -86,8 +86,7 @@ const check = (name, cond, detail) => {
  * Nothing else is touched.
  */
 function instrumentSource(text) {
-    const entry =
-        `const consumeBleArm = (kind: "play" | "pause" | "seek") => {`;
+    const entry = `const consumeBleArm = (kind: "play" | "pause" | "seek") => {`;
     const exit = "return { ble: armed, page };";
     for (const [anchor, name] of [
         [entry, "the consumeBleArm entry"],
@@ -138,7 +137,9 @@ async function bundle({ source, outfile, stubDir, workDir }) {
     const entry = path.join(workDir, "entry.js");
     fs.writeFileSync(
         entry,
-        `import MediaSender from ${JSON.stringify(source)};\nexport { MediaSender };\n`
+        `import MediaSender from ${JSON.stringify(
+            source
+        )};\nexport { MediaSender };\n`
     );
     await esbuild.build({
         entryPoints: [entry],
@@ -378,7 +379,10 @@ function makeSender(MediaSender, opts = {}) {
     });
     const debugLines = [];
     let senderRef;
-    const media = makeMedia(opts.playerState ?? "PLAYING", opts.estimatedTime ?? 0);
+    const media = makeMedia(
+        opts.playerState ?? "PLAYING",
+        opts.estimatedTime ?? 0
+    );
     const sender = new MediaSender({
         mediaUrl: undefined,
         mediaElement: element,
@@ -477,7 +481,9 @@ function receiverPhases(progressList) {
 }
 
 async function main() {
-    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-page-transition-"));
+    const workDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "fx-page-transition-")
+    );
     const stubDir = path.join(workDir, "stub");
     writeStub(stubDir);
 
@@ -489,10 +495,14 @@ async function main() {
     let label = "media.ts";
     if (preFix) {
         const rev = preFixRev || "HEAD^";
-        const show = spawnSync("git", ["show", `${rev}:extension/src/cast/senders/media.ts`], {
-            cwd: repoRoot,
-            encoding: "utf8"
-        });
+        const show = spawnSync(
+            "git",
+            ["show", `${rev}:extension/src/cast/senders/media.ts`],
+            {
+                cwd: repoRoot,
+                encoding: "utf8"
+            }
+        );
         if (show.status !== 0) {
             console.error("cannot read media.ts from", rev, show.stderr);
             process.exit(1);
@@ -542,8 +552,7 @@ async function main() {
             syncPauseEvent: false
         },
         {
-            label:
-                "page PLAYING, pause() throws AFTER a re-entrant command B armed",
+            label: "page PLAYING, pause() throws AFTER a re-entrant command B armed",
             pagePaused: false,
             gesture: true,
             playerState: "PLAYING",
@@ -558,16 +567,30 @@ async function main() {
     for (const r of results) {
         console.log(`\n[${r.label}]`);
         console.log("  controlPlayback ->", JSON.stringify(r.accepted));
-        console.log("  lastPlaybackDispatch ->", JSON.stringify(r.dispatchOutcome));
+        console.log(
+            "  lastPlaybackDispatch ->",
+            JSON.stringify(r.dispatchOutcome)
+        );
         console.log("  element listeners:", "(see above)");
-        console.log("  after dispatch: page calls", JSON.stringify(r.afterDispatch.elementCalls),
-            "cast calls", JSON.stringify(r.afterDispatch.castCalls),
-            "progress", JSON.stringify(r.afterDispatch.progress));
-        console.log("  after page pause event: page calls", JSON.stringify(r.afterEvent.elementCalls),
-            "cast calls", JSON.stringify(r.afterEvent.castCalls),
-            "progress", JSON.stringify(r.afterEvent.progress));
+        console.log(
+            "  after dispatch: page calls",
+            JSON.stringify(r.afterDispatch.elementCalls),
+            "cast calls",
+            JSON.stringify(r.afterDispatch.castCalls),
+            "progress",
+            JSON.stringify(r.afterDispatch.progress)
+        );
+        console.log(
+            "  after page pause event: page calls",
+            JSON.stringify(r.afterEvent.elementCalls),
+            "cast calls",
+            JSON.stringify(r.afterEvent.castCalls),
+            "progress",
+            JSON.stringify(r.afterEvent.progress)
+        );
         console.log("  consumeBleArm probe:", JSON.stringify(r.armProbe));
-        if (r.debugLines.length) console.log("  debug:", JSON.stringify(r.debugLines.slice(-6)));
+        if (r.debugLines.length)
+            console.log("  debug:", JSON.stringify(r.debugLines.slice(-6)));
     }
 
     console.log("\n=== segmented facts ===");
@@ -668,14 +691,12 @@ async function main() {
                     p.kind === "pause" &&
                     p.pageArmPresentBefore === false &&
                     p.hasPage === false
-            ) &&
-                delayedCase.afterEvent.progress.length === 0,
+            ) && delayedCase.afterEvent.progress.length === 0,
             JSON.stringify({
                 progress: delayedCase.afterEvent.progress,
                 armProbe: delayedCase.armProbe
             })
         );
-
     }
 
     check(
@@ -720,10 +741,26 @@ async function main() {
     const bDisposition = reentrantCase.reentrantResult;
     console.log("\n=== synchronous-throw scenarios ===");
     console.log(
-        `  4A plain throw: threw=${JSON.stringify(throwCase.threw)} accepted=${JSON.stringify(throwCase.accepted)} castPause=${throwCastPause} progress=${JSON.stringify(throwCase.afterEvent.progress)} probe=${JSON.stringify(throwCase.armProbe)}`
+        `  4A plain throw: threw=${JSON.stringify(
+            throwCase.threw
+        )} accepted=${JSON.stringify(
+            throwCase.accepted
+        )} castPause=${throwCastPause} progress=${JSON.stringify(
+            throwCase.afterEvent.progress
+        )} probe=${JSON.stringify(throwCase.armProbe)}`
     );
     console.log(
-        `  4B re-entrant:  threw=${JSON.stringify(reentrantCase.threw)} accepted=${JSON.stringify(reentrantCase.accepted)} B=${JSON.stringify(bDisposition)} Bclaimed=${bClaimed} Bprogress=${JSON.stringify(reentrantCase.afterEvent.progress.filter(m => m && m.commandId === 2))}`
+        `  4B re-entrant:  threw=${JSON.stringify(
+            reentrantCase.threw
+        )} accepted=${JSON.stringify(
+            reentrantCase.accepted
+        )} B=${JSON.stringify(
+            bDisposition
+        )} Bclaimed=${bClaimed} Bprogress=${JSON.stringify(
+            reentrantCase.afterEvent.progress.filter(
+                m => m && m.commandId === 2
+            )
+        )}`
     );
     if (fixedExpectation) {
         check(
@@ -795,7 +832,9 @@ async function main() {
     }
 
     console.log(
-        `\n=== timing matrix (consumeBleArm boundary; mode=${fixedExpectation ? "fixed" : "gap"}) ===`
+        `\n=== timing matrix (consumeBleArm boundary; mode=${
+            fixedExpectation ? "fixed" : "gap"
+        }) ===`
     );
     for (const r of results) {
         console.log(`  ${r.label}`);

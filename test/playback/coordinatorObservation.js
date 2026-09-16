@@ -263,8 +263,7 @@ async function runReturnScenario(mod, PlayerState, clock) {
         "PAUSE",
         mediaStatus(PlayerState, PlayerState.PLAYING, 10)
     );
-    const dispatchedAt =
-        device.playbackCommand.receiverDispatchStartedAt ?? 0;
+    const dispatchedAt = device.playbackCommand.receiverDispatchStartedAt ?? 0;
 
     const oppositeStatus = mediaStatus(PlayerState, PlayerState.PLAYING, 12);
     mod.acceptReceiverObservation(
@@ -501,7 +500,8 @@ async function main() {
         );
         check(
             "the button only flips once the receiver watchdog terminates the command",
-            opposite.afterObservation.intent !== opposite.afterWatchdog.intent &&
+            opposite.afterObservation.intent !==
+                opposite.afterWatchdog.intent &&
                 opposite.afterWatchdog.lifecycle === "terminal",
             JSON.stringify({
                 before: opposite.afterObservation.intent,

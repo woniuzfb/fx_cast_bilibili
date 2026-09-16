@@ -124,8 +124,9 @@
              *  The mark is only ever set by an instrumented test build. */
             window.__HARNESS_CONTENT_INITIAL_MARK__ = function () {
                 return {
-                    wrappedJSObject:
-                        Boolean(window.__FX_CAST_CONTENT_INITIAL_RAN__),
+                    wrappedJSObject: Boolean(
+                        window.__FX_CAST_CONTENT_INITIAL_RAN__
+                    ),
                     head: document.documentElement.getAttribute(
                         "data-fx-harness-ci-head"
                     ),
@@ -148,7 +149,8 @@
             };
 
             window.__HARNESS_SNAPSHOT__ = function () {
-                result.contentInitialRan = window.__HARNESS_CONTENT_INITIAL_MARK__();
+                result.contentInitialRan =
+                    window.__HARNESS_CONTENT_INITIAL_MARK__();
                 result.effectiveSrc = script.src;
                 window.__HARNESS_COLLECT_RESOURCES__();
                 return result;
@@ -254,7 +256,8 @@
                         // Must be a real http(s) URL: RokuSession.handleLoad()
                         // rejects anything else with LOAD_FAILED before it
                         // launches, registers session media or publishes it.
-                        contentId: (overrides && overrides.contentId) ||
+                        contentId:
+                            (overrides && overrides.contentId) ||
                             location.origin + "/harness-stage2.m3u8",
                         contentType: "application/vnd.apple.mpegurl",
                         streamType: "BUFFERED",
@@ -290,7 +293,8 @@
                             },
                             err => {
                                 result.loadError = String(
-                                    (err && (err.description || err.code)) || err
+                                    (err && (err.description || err.code)) ||
+                                        err
                                 );
                                 result.errors.push("load: " + result.loadError);
                                 reject(err);
@@ -390,7 +394,11 @@
                             // started right here.
                             if (window.__HARNESS_REISSUE_ON_CANCEL__) {
                                 window.__HARNESS_REISSUE_ON_CANCEL__ = false;
-                                startRequest("B", () => {}, () => {});
+                                startRequest(
+                                    "B",
+                                    () => {},
+                                    () => {}
+                                );
                             }
                             fail("requestSession", err);
                             reject(err);
@@ -408,7 +416,6 @@
                     startRequest("A", resolve, reject);
                 });
             };
-
         </script>
     </body>
 </html>
