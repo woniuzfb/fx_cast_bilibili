@@ -147,12 +147,32 @@ interface EventMap {
     applicationClosed: { deviceId: string; appId: string; sessionId: string };
 }
 
+/**
+ * How long a device may report NO receiver application (or a Roku home screen)
+# while this extension still owns a session, before that is treated as the
+ * session really ending.
+ *
+ * A Roku DASH remux LOAD relaunches the player app, so the device reports an
+ * empty application list for a moment. Tearing the session down on that report
+ * cleared `device.mediaStatus`, which is the popup's progress bar, and dropped
+ * the transport ownership, which turned the popup's Stop button back into a
+ * Cast button — measured on-device during a mid-video seek (2026-09-17 02:17),
+ * where the bar vanished and the popup looked freshly opened.
+ */
+const RECEIVER_APP_GONE_GRACE_MS = 8000;
+
 export default new (class extends TypedEventTarget<EventMap> {
     /**
      * Map of receiver device IDs to devices. Updated as receiverDevice
      * messages are received from the bridge.
      */
     private receiverDevices = new Map<string, ReceiverDevice>();
+
+    /**
+     * When each device first reported no usable receiver application while this
+     * extension still owned a session (see RECEIVER_APP_GONE_GRACE_MS).
+     */
+    private receiverAppGoneAt = new Map<string, number>();
 
     /**
      * LOAD media published by emulated Roku sessions via
@@ -550,6 +570,20 @@ export default new (class extends TypedEventTarget<EventMap> {
      * timeline on it (isOptimisticRelayMedia blocks the elapsed clock), which
      * is the "progress bar never moves" symptom.
      */
+    /**
+     * Does this device have a cast this extension still owns? Used to tell a
+     * transient receiver-app report (the relaunch a DASH remux LOAD performs)
+     * apart from a real teardown: EITHER a LOAD is in flight, OR the receiver's
+     * media is already recorded for it. Checking only one of the two would miss
+     * the window before the receiver publishes its media.
+     */
+    private hasOwnedSession(deviceId: string): boolean {
+        return (
+            this.rokuSessionMedia.has(deviceId) ||
+            this.pendingRokuMediaLoads.has(deviceId)
+        );
+    }
+
     clearOptimisticRelayMedia(deviceId: string) {
         // Roku keeps it: its real LOAD arrives seconds later and this entry is
         // the only thing putting a bar on screen before then.
@@ -1118,6 +1152,33 @@ export default new (class extends TypedEventTarget<EventMap> {
 
                 // Clear media status when app status changes
                 const application = status.applications?.[0];
+                // Is this the RELAUNCH a DASH remux LOAD performs, or the cast
+                // really ending? An app that disappears while this extension owns
+                // a session is the former: tearing down on that report deleted the
+                // popup's media status (its progress bar) and dropped the
+                // transport ownership (Stop became Cast) mid-seek — measured
+                // on-device 2026-09-17 02:17.
+                const appDisappeared =
+                    (!application || application.isIdleScreen) &&
+                    oldApplication !== undefined &&
+                    !oldApplication.isIdleScreen;
+                if (appDisappeared) {
+                    const goneSince = this.receiverAppGoneAt.get(deviceId);
+                    if (goneSince === undefined) {
+                        this.receiverAppGoneAt.set(deviceId, Date.now());
+                    }
+                    const stillSettling =
+                        Date.now() - (goneSince ?? Date.now()) <
+                        RECEIVER_APP_GONE_GRACE_MS;
+                    if (stillSettling && this.hasOwnedSession(deviceId)) {
+                        // Keep the last known status (the popup reads the app and
+                        // the ownership from it) and skip the teardown entirely;
+                        // the next report either restores the app or, once the
+                        // window expires, tears down for real.
+                        break;
+                    }
+                    this.receiverAppGoneAt.delete(deviceId);
+                }
                 if (!application || application.isIdleScreen) {
                     delete device.mediaStatus;
 
@@ -1135,6 +1196,7 @@ export default new (class extends TypedEventTarget<EventMap> {
                     }
                 }
 
+                this.receiverAppGoneAt.delete(deviceId);
                 device.status = status;
 
                 this.dispatchEvent(

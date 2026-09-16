@@ -319,6 +319,16 @@ function sendMediaStatus(modules, device, status) {
     });
 }
 
+function sendReceiverStatus(modules, device, applications) {
+    stubDispatcher()({
+        subject: "main:receiverDeviceStatusUpdated",
+        data: {
+            deviceId: device.id,
+            status: { applications, volume: { level: 1 } }
+        }
+    });
+}
+
 function makeStatus({
     currentTime,
     customData,
@@ -492,16 +502,6 @@ async function main() {
         })
     );
     await flush();
-    console.info(
-        "DEBUG unknown-gen: status=" +
-            JSON.stringify(
-                modules.deviceManager.getDeviceById(chromecast.id)?.mediaStatus
-                    ?.media?.contentId
-            ) +
-            " published=" +
-            modules.deviceManager.getDeviceById(chromecast.id)?.mediaStatus
-                ?.currentTime
-    );
     check(
         "Chromecast: a report from an unknown media generation is NOT converted (no guessed shift)",
         modules.deviceManager.getDeviceById(chromecast.id)?.mediaStatus
@@ -535,6 +535,74 @@ async function main() {
             published: rokuTime,
             note: "no Roku session media registered here, so it stays as reported"
         })
+    );
+
+    // ---- a receiver relaunch must not look like the end of the cast ---------
+    // A Roku DASH remux LOAD relaunches the player app, so the device reports no
+    // application for a moment. Treating that as the end tore the media status
+    // (the popup's progress bar) down and dropped the transport ownership (Stop
+    // back to Cast) mid-seek — observed on-device 2026-09-17 02:17.
+    const relaunchDevice = await registerDevice(modules, {
+        ...ROKU,
+        id: "roku-relaunch-test"
+    });
+    modules.deviceManager.setRokuSessionMedia(
+        relaunchDevice.id,
+        "roku-session-test",
+        {
+            contentId: "http://10.0.0.111:9555/s/relaunch/index.m3u8?v=1",
+            duration: 6022,
+            customData: {
+                dashRemux: true,
+                dashStart: 100,
+                presentationOffsetSeconds: 0
+            }
+        }
+    );
+    await flush();
+    // The app must be running first: the grace only applies to an app that
+    // DISAPPEARS, which is the relaunch case.
+    sendReceiverStatus(modules, relaunchDevice, [
+        {
+            appId: "CC1AD845",
+            isIdleScreen: false,
+            transportId: "roku-relaunch-transport"
+        }
+    ]);
+    await flush();
+    const beforeAppGone = modules.deviceManager.getDeviceById(relaunchDevice.id)
+        ?.mediaStatus?.media?.contentId;
+    sendReceiverStatus(modules, relaunchDevice, []);
+    await flush();
+    check(
+        "relaunch: a device that reports no app while a cast is owned keeps its media status",
+        modules.deviceManager.getDeviceById(relaunchDevice.id)?.mediaStatus
+            ?.media?.contentId === beforeAppGone && beforeAppGone !== undefined,
+        JSON.stringify({
+            before: beforeAppGone,
+            after: modules.deviceManager.getDeviceById(relaunchDevice.id)
+                ?.mediaStatus?.media?.contentId
+        })
+    );
+    // ...but a genuinely closed app must still tear down. The window is a
+    // constant in the module, so the check is asserted against the real source
+    // rather than by waiting 8s.
+    const deviceManagerSource = fs.readFileSync(
+        path.join(
+            path.resolve(__dirname, "..", ".."),
+            "extension/src/background/deviceManager.ts"
+        ),
+        "utf8"
+    );
+    check(
+        "relaunch: the hold is bounded (an app that stays gone still tears down)",
+        /RECEIVER_APP_GONE_GRACE_MS = \d+;/.test(deviceManagerSource) &&
+            Number(
+                /RECEIVER_APP_GONE_GRACE_MS = (\d+);/.exec(
+                    deviceManagerSource
+                )?.[1]
+            ) >= 4000,
+        "the relaunch hold has no bound"
     );
 
     // ---- the device-media merge must not lose the converted value ----------
