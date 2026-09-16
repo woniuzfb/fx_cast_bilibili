@@ -70,13 +70,6 @@ const MEDIA_POLL_INTERVAL_MS = 2500;
  * sender would see the intent flicker.
  */
 const SESSION_PLAYER_INTENT_WINDOW_MS = 6_000;
-/**
- * How long a PAUSE intent survives a PLAYING observation before it is treated
- * as refused. A DASH remux LOAD relaunches the Roku player, and the relaunched
- * item starts playing, so the pause the sender issues just before the LOAD is
- * observed as PLAYING a moment later — that is the launch, not a refusal.
- */
-const PAUSE_RESUME_SETTLE_MS = 2_500;
 /** How long after a launch an idle /query/media-player is treated as
  * "player starting" rather than "media ended/dismissed". Covers slow HLS
  * starts and channels that briefly report idle before playback. */
@@ -209,18 +202,9 @@ export default class RokuSession {
     private pendingPlayerIntent?: {
         intent: "PLAY" | "PAUSE";
         requestedState: PlayerState;
-        /** When the keypress landed, so a resume we did not ask for can be told
-         *  apart from the device refusing the intent (see
-         *  reconcilePendingIntentFromObservation). */
-        requestedAtMs: number;
     };
     /** Cancels a pending intent when a newer transport starts. */
     private playbackIntentToken = 0;
-    /**
-     * Set when a LOAD arrives while a PAUSE was pending: the launch resumes, so
-     * the pause is re-issued when it settles.
-     */
-    private reapplyPauseAfterLaunch = false;
     private pendingIntentTimer?: NodeJS.Timeout;
     private lastPosition?: number;
     /** Bilibili DASH uses a remux-relative monotonic clock after the first
@@ -469,19 +453,8 @@ export default class RokuSession {
         const requestId = message.requestId ?? 0;
         // A new media object: a PLAY/PAUSE intent for the previous one must not
         // colour its status. The LOAD path below establishes the new baseline.
-        //
-        // A PENDING PAUSE is the exception, and it is remembered rather than
-        // dropped: the launch below resumes playback on its own (the new item
-        // starts playing), so without re-applying it the user's seek shows a
-        // pause overlay and then playback resumes by itself (on-device
-        // 2026-09-17 02:25). The intent is re-issued once the launch settles.
-        const pendingPause =
-            this.pendingPlayerIntent?.intent === "PAUSE" ? true : false;
         this.playbackIntentToken++;
         this.clearPendingPlayerIntent();
-        if (pendingPause) {
-            this.reapplyPauseAfterLaunch = true;
-        }
         const url = message.media?.contentId;
         if (!url || !/^https?:\/\//i.test(url)) {
             this.messaging.sendMessage({
@@ -605,7 +578,6 @@ export default class RokuSession {
                         ? PlayerState.PAUSED
                         : PlayerState.PLAYING;
                 this.sendMediaStatus(requestId);
-                void this.reapplyPauseAfterLaunchIfArmed();
             }
         } catch (err) {
             console.error("[fx_cast_bilibili] Roku launch failed", {
@@ -751,7 +723,6 @@ export default class RokuSession {
 
         this.sendMediaStatus(this.deferredRequestId);
         this.deferredRequestId = undefined;
-        void this.reapplyPauseAfterLaunchIfArmed();
         // Startup polling is intentionally aggressive; once the new Roku
         // media session is confirmed, return to the normal cadence so ECP
         // itself cannot become a source of load or instability.
@@ -843,59 +814,10 @@ export default class RokuSession {
         if (!pending) return;
         if (observed === PlayerState.BUFFERING) return;
         const matched = observed === pending.requestedState;
-        // A Roku RESUME that follows a PAUSE within the intent window is the
-        // item change / relaunch (a DASH remux LOAD relaunches the player, which
-        // starts the new item playing), not the device refusing the intent: the
-        // user sees the pause overlay appear and then playback resume
-        // (on-device 2026-09-17 02:25). Keep the intent so it is applied again
-        // once the launch settles; a resume that persists past the window still
-        // refutes it, as does an immediate resume right after a PLAY.
         const opposite =
             (pending.intent === "PLAY" && observed === PlayerState.PAUSED) ||
-            (pending.intent === "PAUSE" &&
-                observed === PlayerState.PLAYING &&
-                Date.now() - pending.requestedAtMs >= PAUSE_RESUME_SETTLE_MS);
+            (pending.intent === "PAUSE" && observed === PlayerState.PLAYING);
         if (matched || opposite) this.clearPendingPlayerIntent();
-    }
-
-    /**
-     * Re-issues the pause the user asked for before this LOAD, once the launch
-     * has settled.
-     *
-     * The relaunch starts the new item playing, and an ECP `Pause` sent before
-     * it is lost with the old item, so the press has to be repeated on the new
-     * one. The Cast intent is then active again, which is what the sender's
-     * PLAY/PAUSE reconciliation expects: it resumes playback itself when the
-     * cast is meant to be playing.
-     */
-    private async reapplyPauseAfterLaunchIfArmed() {
-        if (!this.reapplyPauseAfterLaunch) return;
-        this.reapplyPauseAfterLaunch = false;
-        if (this.tornDown) return;
-        const token = ++this.playbackIntentToken;
-        try {
-            await keypress(this.receiverDevice.host, "Pause");
-            if (this.tornDown || token !== this.playbackIntentToken) return;
-            this.pendingPlayerIntent = {
-                intent: "PAUSE",
-                requestedState: PlayerState.PAUSED,
-                requestedAtMs: Date.now()
-            };
-            this.pendingIntentTimer = setTimeout(() => {
-                this.pendingIntentTimer = undefined;
-                this.sendMediaStatus();
-            }, SESSION_PLAYER_INTENT_WINDOW_MS);
-            this.pendingIntentTimer.unref?.();
-            this.sendMediaStatus();
-        } catch (err) {
-            console.error(
-                "[fx_cast_bilibili] Roku re-pause after launch failed",
-                {
-                    host: this.receiverDevice.host,
-                    error: err instanceof Error ? err.message : String(err)
-                }
-            );
-        }
     }
 
     private clearPendingPlayerIntent() {
@@ -934,10 +856,7 @@ export default class RokuSession {
             this.pendingPlayerIntent = {
                 intent,
                 requestedState:
-                    intent === "PLAY"
-                        ? PlayerState.PLAYING
-                        : PlayerState.PAUSED,
-                requestedAtMs: Date.now()
+                    intent === "PLAY" ? PlayerState.PLAYING : PlayerState.PAUSED
             };
             this.pendingIntentTimer = setTimeout(() => {
                 this.pendingIntentTimer = undefined;
