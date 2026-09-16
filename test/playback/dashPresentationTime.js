@@ -274,6 +274,62 @@ function main(modules) {
         })
     );
 
+    // ---- the old generation must not pull the bar back after a seek -------
+    //
+    // On-device (2026-09-17 02:25) the timeline went 293.1 -> 1207.6 -> 297.8
+    // right after a seek: the receiver kept reporting the PREVIOUS generation
+    // (still playing while the new playlist loaded), and its position was
+    // neither the target nor near it, so the confirm window accepted it.
+    const { createSeekedTimeline } = modules;
+    const preSeek = {
+        mediaId: "gen-old",
+        currentTime: 1195,
+        updatedAt: 1_000_000,
+        duration: 6022,
+        contentId: "http://10.0.0.111:9555/s/gen-old/index.m3u8?v=1"
+    };
+    const seeking = createSeekedTimeline(preSeek, 293.1007, 1_000_000, {
+        contentId: preSeek.contentId,
+        mediaId: preSeek.mediaId
+    });
+    const stillOld = updatePopupMediaTimeline(seeking, {
+        mediaId: preSeek.mediaId,
+        contentId: preSeek.contentId,
+        currentTime: 1207.58824,
+        duration: 6022,
+        now: 1_000_500,
+        playerSettled: true,
+        isPlaying: true,
+        dashRemux: true,
+        dashStart: 1181.855
+    });
+    check(
+        "popup timeline: the pre-seek generation cannot pull the bar back after a seek",
+        stillOld.currentTime === 293.1007,
+        JSON.stringify({
+            stored: stillOld.currentTime,
+            seekTarget: stillOld.seekTarget,
+            oldReport: 1207.58824
+        })
+    );
+    const fromNewGeneration = updatePopupMediaTimeline(stillOld, {
+        mediaId: "gen-new",
+        contentId: "http://10.0.0.111:9555/s/gen-new/index.m3u8?v=2",
+        currentTime: 297.8337,
+        duration: 6022,
+        now: 1_001_000,
+        playerSettled: true,
+        isPlaying: true,
+        dashRemux: true,
+        dashStart: 293.1007
+    });
+    check(
+        "popup timeline: the new generation confirms the seek and takes over",
+        Math.abs(fromNewGeneration.currentTime - 297.8337) < 1e-4 &&
+            fromNewGeneration.seekTarget === undefined,
+        JSON.stringify(fromNewGeneration)
+    );
+
     // ---- the popup must not own a conversion at all ----------------------
     const popupSource = fs.readFileSync(
         path.join(extensionSrc, "ui/popup/ReceiverMedia.svelte"),
