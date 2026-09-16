@@ -133,7 +133,11 @@ async function handleStreamLine(line: string) {
         });
         return;
     }
-    await debugLog("message", message);
+    // KEEPALIVE lines arrive continuously; logging each one floods the
+    // console with no information beyond "the stream is alive".
+    if (message?.type !== "KEEPALIVE") {
+        await debugLog("message", message);
+    }
     if (message?.type !== "BLE_REMOTE") return;
     if (
         !["seek_backward", "seek_forward", "pause", "play"].includes(

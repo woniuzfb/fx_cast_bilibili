@@ -84,7 +84,10 @@ function restoreManifest(reason) {
     }
 }
 
-const webdriver = require(path.join(repoRoot, "node_modules/selenium-webdriver"));
+const webdriver = require(path.join(
+    repoRoot,
+    "node_modules/selenium-webdriver"
+));
 const firefox = require(path.join(
     repoRoot,
     "node_modules/selenium-webdriver/firefox"
@@ -100,10 +103,7 @@ const ownedGeckodrivers = [];
 /** Children the harness spawned (the fake Roku), reaped on any exit path. */
 const ownedChildren = [];
 
-const SELENIUM_CACHE = path.join(
-    os.tmpdir(),
-    "fx-harness-selenium-cache"
-);
+const SELENIUM_CACHE = path.join(os.tmpdir(), "fx-harness-selenium-cache");
 
 const FAKE_DEVICE_ID = "roku-HARNESS0001";
 const FAKE_DEVICE_NAME = "Harness Roku";
@@ -270,7 +270,8 @@ function parseArgs(argv) {
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--keep-profile") args.keepProfile = true;
         else if (argv[i] === "--phase-a-only") args.phaseAOnly = true;
-        else if (argv[i] === "--startup-synthesis") args.startupSynthesis = true;
+        else if (argv[i] === "--startup-synthesis")
+            args.startupSynthesis = true;
         else if (argv[i] === "--media-before-generation")
             args.mediaBeforeGeneration = true;
         else if (argv[i] === "--generation-advance")
@@ -316,8 +317,7 @@ function parseArgs(argv) {
             }
             args.failStage = value;
             i++;
-        }
-        else if (argv[i] === "--create-failure-gap") {
+        } else if (argv[i] === "--create-failure-gap") {
             args.createFailure = true;
             args.expectReleased = false;
         } else if (argv[i] === "--create-failure-fixed") {
@@ -427,7 +427,9 @@ function startSenderServer() {
 }
 
 function makeProfile(harnessDir, extensionDir) {
-    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-harness-sess-"));
+    const profileDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "fx-harness-sess-")
+    );
     fs.mkdirSync(path.join(profileDir, "extensions"), { recursive: true });
 
     const prefs = {
@@ -526,7 +528,8 @@ async function startFirefox(options, label, harnessDir) {
             socket.on("error", () => resolve(false));
         });
         if (reachable) break;
-        if (Date.now() > deadline) throw new Error("geckodriver did not listen");
+        if (Date.now() > deadline)
+            throw new Error("geckodriver did not listen");
         await sleep(200);
     }
 
@@ -766,7 +769,9 @@ async function main() {
             rokuControlPort = JSON.parse(line).controlPort;
         }
     });
-    roku.stderr.on("data", chunk => process.stderr.write("[fake-roku] " + chunk));
+    roku.stderr.on("data", chunk =>
+        process.stderr.write("[fake-roku] " + chunk)
+    );
     for (let i = 0; i < 60 && !rokuReady; i++) await sleep(100);
     if (!rokuReady) {
         roku.kill("SIGKILL");
@@ -871,7 +876,9 @@ async function main() {
     );
     if (missingMarkers.length) {
         throw new Error(
-            `sessionHarness: the extension bundle is stale - missing ${missingMarkers.join(", ")}`
+            `sessionHarness: the extension bundle is stale - missing ${missingMarkers.join(
+                ", "
+            )}`
         );
     }
     const bundleHash = require("crypto")
@@ -900,7 +907,7 @@ async function main() {
 
     // --- ungated instrumentation of the TEST COPY only --------------------
     //
-    // `logRokuDebug` is gated by a debug option whose timing made an earlier
+    // `logMediaDebug` is gated by a debug option whose timing made an earlier
     // "the log line is absent" conclusion unreliable, so these markers use
     // console.log, which is not gated, and read state at the call site instead
     // of inferring it. The copy lives in the harness directory; dist/ is never
@@ -948,7 +955,9 @@ async function main() {
             patch(
                 "background/background.js",
                 "setRokuLoadGenerationOnBridge(deviceId, loadGeneration) {",
-                () => "\n" + `if (deviceId === 'roku-HARNESS0001') { const self = this; self.__fxHarnessHolds = self.__fxHarnessHolds || {}; self.__fxHarnessReleased = self.__fxHarnessReleased || {}; const key = deviceId + ':' + loadGeneration; if (!self.__fxHarnessReleased[key]) { let entry = self.__fxHarnessHolds[key]; if (!entry) { entry = { deviceId: deviceId, loadGeneration: loadGeneration }; self.__fxHarnessHolds[key] = entry; entry.timer = setInterval(() => { browser.storage.local.get(['__fxHarnessReleaseHeldGeneration', '__fxHarnessDiagnosticRunId']).then(r => { const rel = r && r.__fxHarnessReleaseHeldGeneration; const runId = r && r.__fxHarnessDiagnosticRunId; if (!rel || rel.deviceId !== entry.deviceId || rel.loadGeneration !== entry.loadGeneration || rel.runId !== runId) return; const port = entry.latestBridgePort || self.bridgePort; try { port.postMessage({ subject: 'bridge:rokuSetLoadGeneration', data: { deviceId: entry.deviceId, loadGeneration: entry.loadGeneration } }); clearInterval(entry.timer); self.__fxHarnessReleased[key] = true; delete self.__fxHarnessHolds[key]; void browser.storage.local.set({ __fxHarnessGenerationReleased: { runId: runId, deviceId: entry.deviceId, loadGeneration: entry.loadGeneration, at: Date.now() } }); } catch (e) { void browser.storage.local.set({ __fxHarnessReleaseFailed: { runId: runId, deviceId: entry.deviceId, loadGeneration: entry.loadGeneration, error: String(e) } }); } }).catch(() => {}); }, 200); } entry.latestBridgePort = this.bridgePort; void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ __fxHarnessHeldGeneration: { runId: r && r.__fxHarnessDiagnosticRunId, deviceId: deviceId, loadGeneration: loadGeneration, at: Date.now() } })).catch(() => {}); return; } }`
+                () =>
+                    "\n" +
+                    `if (deviceId === 'roku-HARNESS0001') { const self = this; self.__fxHarnessHolds = self.__fxHarnessHolds || {}; self.__fxHarnessReleased = self.__fxHarnessReleased || {}; const key = deviceId + ':' + loadGeneration; if (!self.__fxHarnessReleased[key]) { let entry = self.__fxHarnessHolds[key]; if (!entry) { entry = { deviceId: deviceId, loadGeneration: loadGeneration }; self.__fxHarnessHolds[key] = entry; entry.timer = setInterval(() => { browser.storage.local.get(['__fxHarnessReleaseHeldGeneration', '__fxHarnessDiagnosticRunId']).then(r => { const rel = r && r.__fxHarnessReleaseHeldGeneration; const runId = r && r.__fxHarnessDiagnosticRunId; if (!rel || rel.deviceId !== entry.deviceId || rel.loadGeneration !== entry.loadGeneration || rel.runId !== runId) return; const port = entry.latestBridgePort || self.bridgePort; try { port.postMessage({ subject: 'bridge:rokuSetLoadGeneration', data: { deviceId: entry.deviceId, loadGeneration: entry.loadGeneration } }); clearInterval(entry.timer); self.__fxHarnessReleased[key] = true; delete self.__fxHarnessHolds[key]; void browser.storage.local.set({ __fxHarnessGenerationReleased: { runId: runId, deviceId: entry.deviceId, loadGeneration: entry.loadGeneration, at: Date.now() } }); } catch (e) { void browser.storage.local.set({ __fxHarnessReleaseFailed: { runId: runId, deviceId: entry.deviceId, loadGeneration: entry.loadGeneration, error: String(e) } }); } }).catch(() => {}); }, 200); } entry.latestBridgePort = this.bridgePort; void browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ __fxHarnessHeldGeneration: { runId: r && r.__fxHarnessDiagnosticRunId, deviceId: deviceId, loadGeneration: loadGeneration, at: Date.now() } })).catch(() => {}); return; } }`
             );
         }
         patch(
@@ -989,32 +998,23 @@ async function main() {
                     "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null"
                 )
         );
-        patch(
-            "background/background.js",
-            "onBridgeDisconnect = () => {",
-            () =>
-                storageMarker(
-                    "__fxHarnessBridgeDisconnected",
-                    "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null, bridgePortStillSet: Boolean(this.bridgePort), portError: this.bridgePort && this.bridgePort.error ? String(this.bridgePort.error.message || this.bridgePort.error) : null"
-                )
+        patch("background/background.js", "onBridgeDisconnect = () => {", () =>
+            storageMarker(
+                "__fxHarnessBridgeDisconnected",
+                "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null, bridgePortStillSet: Boolean(this.bridgePort), portError: this.bridgePort && this.bridgePort.error ? String(this.bridgePort.error.message || this.bridgePort.error) : null"
+            )
         );
-        patch(
-            "background/background.js",
-            "async refresh() {",
-            () =>
-                storageMarker(
-                    "__fxHarnessBridgeRefresh",
-                    "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null"
-                )
+        patch("background/background.js", "async refresh() {", () =>
+            storageMarker(
+                "__fxHarnessBridgeRefresh",
+                "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null"
+            )
         );
-        patch(
-            "background/background.js",
-            "replayRokuLoadGenerations() {",
-            () =>
-                storageMarker(
-                    "__fxHarnessBridgeReplay",
-                    "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null, identityCount: currentRokuMediaIdentities().length"
-                )
+        patch("background/background.js", "replayRokuLoadGenerations() {", () =>
+            storageMarker(
+                "__fxHarnessBridgeReplay",
+                "bridgeGeneration: this.__fxHarnessBridgeGeneration ?? null, identityCount: currentRokuMediaIdentities().length"
+            )
         );
         // The click-time state snapshot goes through popupLog's runtime channel,
         // the only one proven to reach the captured output (the popup's own
@@ -1062,41 +1062,45 @@ async function main() {
             // before the remove lands and advance the generation twice, and
             // (c) only works if another bridge message happens to arrive. The
             // listener does nothing at all until a request is written.
-            patch("background/background.js", "onBridgeMessage = (message) => {", () => {
-                const code =
-                    "\nif (!this.__fxHarnessControlInstalled) { this.__fxHarnessControlInstalled = true; this.__fxHarnessHandledRequests = this.__fxHarnessHandledRequests || {};" +
-                    " try { browser.storage.onChanged.addListener((changes, area) => { if (area !== 'local') return; const self = this;" +
-                    " browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => { const runId = r && r.__fxHarnessDiagnosticRunId;" +
-                    " const adv = changes.__fxHarnessAdvanceGenerationRequest && changes.__fxHarnessAdvanceGenerationRequest.newValue;" +
-                    " if (adv && adv.runId === runId && adv.deviceId && !self.__fxHarnessHandledRequests[adv.requestId]) {" +
-                    " self.__fxHarnessHandledRequests[adv.requestId] = true;" +
-                    " const readGen = () => { try { const id = (typeof currentRokuMediaIdentity === 'function') ? currentRokuMediaIdentity(adv.deviceId) : null; return id ? id.loadGeneration : null; } catch (e) { return null; } };" +
-                    " const beforeGeneration = readGen();" +
-                    " if (beforeGeneration !== adv.expectedCurrentGeneration) {" +
-                    " void browser.storage.local.set({ __fxHarnessAdvanceFailed: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, expected: adv.expectedCurrentGeneration, actual: beforeGeneration, at: Date.now() } }); }" +
-                    " else {" +
-                    " try { self.beginRokuMediaLoad(adv.deviceId); } catch (e) {}" +
-                    " void browser.storage.local.set({ __fxHarnessGenerationAdvanced: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, previousGeneration: beforeGeneration, newGeneration: readGen(), at: Date.now() } }); } }" +
-                    " const rep = changes.__fxHarnessReplayMediaRequest && changes.__fxHarnessReplayMediaRequest.newValue;" +
-                    " if (rep && rep.runId === runId && rep.deviceId && !self.__fxHarnessHandledRequests[rep.requestId]) {" +
-                    " self.__fxHarnessHandledRequests[rep.requestId] = true;" +
-                    " try { self.bridgePort.postMessage({ subject: 'bridge:rokuSetSessionMedia', data: { deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, ownerId: rep.ownerId, media: rep.media } });" +
-                    " void browser.storage.local.set({ __fxHarnessMediaPosted: { runId: runId, requestId: rep.requestId, deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, marker: rep.media && rep.media.customData && rep.media.customData.harnessMarker, at: Date.now() } }); }" +
-                    " catch (e) { void browser.storage.local.set({ __fxHarnessMediaPostFailed: { runId: runId, requestId: rep.requestId, loadGeneration: rep.loadGeneration, error: String(e) } }); } }" +
-                    " }).catch(() => {}); }); } catch (e) {} }" +
-                    // Harness-triggered probe: the harness sends this AFTER it has
-                    // written the run id, so the ack cannot be attributed to an
-                    // early lifecycle event, and the ack carries the run id and
-                    // probe id straight from the message. It proves, in this run,
-                    // that the background executed and could write storage - the
-                    // piece the popup-side control cannot prove.
-                    "\nif (!this.__fxHarnessProbeInstalled) { this.__fxHarnessProbeInstalled = true;" +
-                    " try { browser.runtime.onMessage.addListener((msg) => {" +
-                    " if (!msg || msg.subject !== 'harness:backgroundStorageProbe') return;" +
-                    " void browser.storage.local.set({ __fxHarnessBackgroundStorageControl: { runId: msg.data && msg.data.runId, probeId: msg.data && msg.data.probeId, at: Date.now() } }).catch(() => {});" +
-                    " }); } catch (e) {} }";
-                return code;
-            });
+            patch(
+                "background/background.js",
+                "onBridgeMessage = (message) => {",
+                () => {
+                    const code =
+                        "\nif (!this.__fxHarnessControlInstalled) { this.__fxHarnessControlInstalled = true; this.__fxHarnessHandledRequests = this.__fxHarnessHandledRequests || {};" +
+                        " try { browser.storage.onChanged.addListener((changes, area) => { if (area !== 'local') return; const self = this;" +
+                        " browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => { const runId = r && r.__fxHarnessDiagnosticRunId;" +
+                        " const adv = changes.__fxHarnessAdvanceGenerationRequest && changes.__fxHarnessAdvanceGenerationRequest.newValue;" +
+                        " if (adv && adv.runId === runId && adv.deviceId && !self.__fxHarnessHandledRequests[adv.requestId]) {" +
+                        " self.__fxHarnessHandledRequests[adv.requestId] = true;" +
+                        " const readGen = () => { try { const id = (typeof currentRokuMediaIdentity === 'function') ? currentRokuMediaIdentity(adv.deviceId) : null; return id ? id.loadGeneration : null; } catch (e) { return null; } };" +
+                        " const beforeGeneration = readGen();" +
+                        " if (beforeGeneration !== adv.expectedCurrentGeneration) {" +
+                        " void browser.storage.local.set({ __fxHarnessAdvanceFailed: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, expected: adv.expectedCurrentGeneration, actual: beforeGeneration, at: Date.now() } }); }" +
+                        " else {" +
+                        " try { self.beginRokuMediaLoad(adv.deviceId); } catch (e) {}" +
+                        " void browser.storage.local.set({ __fxHarnessGenerationAdvanced: { runId: runId, requestId: adv.requestId, deviceId: adv.deviceId, previousGeneration: beforeGeneration, newGeneration: readGen(), at: Date.now() } }); } }" +
+                        " const rep = changes.__fxHarnessReplayMediaRequest && changes.__fxHarnessReplayMediaRequest.newValue;" +
+                        " if (rep && rep.runId === runId && rep.deviceId && !self.__fxHarnessHandledRequests[rep.requestId]) {" +
+                        " self.__fxHarnessHandledRequests[rep.requestId] = true;" +
+                        " try { self.bridgePort.postMessage({ subject: 'bridge:rokuSetSessionMedia', data: { deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, ownerId: rep.ownerId, media: rep.media } });" +
+                        " void browser.storage.local.set({ __fxHarnessMediaPosted: { runId: runId, requestId: rep.requestId, deviceId: rep.deviceId, loadGeneration: rep.loadGeneration, marker: rep.media && rep.media.customData && rep.media.customData.harnessMarker, at: Date.now() } }); }" +
+                        " catch (e) { void browser.storage.local.set({ __fxHarnessMediaPostFailed: { runId: runId, requestId: rep.requestId, loadGeneration: rep.loadGeneration, error: String(e) } }); } }" +
+                        " }).catch(() => {}); }); } catch (e) {} }" +
+                        // Harness-triggered probe: the harness sends this AFTER it has
+                        // written the run id, so the ack cannot be attributed to an
+                        // early lifecycle event, and the ack carries the run id and
+                        // probe id straight from the message. It proves, in this run,
+                        // that the background executed and could write storage - the
+                        // piece the popup-side control cannot prove.
+                        "\nif (!this.__fxHarnessProbeInstalled) { this.__fxHarnessProbeInstalled = true;" +
+                        " try { browser.runtime.onMessage.addListener((msg) => {" +
+                        " if (!msg || msg.subject !== 'harness:backgroundStorageProbe') return;" +
+                        " void browser.storage.local.set({ __fxHarnessBackgroundStorageControl: { runId: msg.data && msg.data.runId, probeId: msg.data && msg.data.probeId, at: Date.now() } }).catch(() => {});" +
+                        " }); } catch (e) {} }";
+                    return code;
+                }
+            );
         }
         {
             // Shared by EVERY mode: it is the Gate B diagnostic, not
@@ -1211,7 +1215,9 @@ async function main() {
                     .slice(Math.max(0, callAt - 160), callAt)
                     .replace(/\s+/g, " ")
                     .trim();
-                cancelSiteLabels.push(`${cancelSites + 1}: ...${siteHint.slice(-70)}`);
+                cancelSiteLabels.push(
+                    `${cancelSites + 1}: ...${siteHint.slice(-70)}`
+                );
                 cancelPatched +=
                     cancelText.slice(cancelCursor, statementEnd) +
                     " " +
@@ -1630,12 +1636,11 @@ async function main() {
                 // counters in the background are invisible to the harness, and
                 // "the cleanup reached this step" must be a fact the run can read
                 // (it is what makes the fault marker's absence meaningful).
-                const siteEntry =
-                    `\n          try { await browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ ${JSON.stringify(
-                        `__fxHarnessCleanupSiteEntered_${fault.id}`
-                    )}: { runId: r && r.__fxHarnessDiagnosticRunId, site: ${JSON.stringify(
-                        fault.site
-                    )}, at: Date.now() } })); } catch (e) {}`;
+                const siteEntry = `\n          try { await browser.storage.local.get('__fxHarnessDiagnosticRunId').then(r => browser.storage.local.set({ ${JSON.stringify(
+                    `__fxHarnessCleanupSiteEntered_${fault.id}`
+                )}: { runId: r && r.__fxHarnessDiagnosticRunId, site: ${JSON.stringify(
+                    fault.site
+                )}, at: Date.now() } })); } catch (e) {}`;
                 const gate =
                     siteEntry +
                     ` await __fxHarnessCleanupGate(${JSON.stringify(
@@ -1643,11 +1648,7 @@ async function main() {
                     )}, ${JSON.stringify(fault.message)}, ${JSON.stringify(
                         fault.site
                     )});\n          `;
-                return (
-                    text.slice(0, insertAt) +
-                    gate +
-                    text.slice(insertAt)
-                );
+                return text.slice(0, insertAt) + gate + text.slice(insertAt);
             };
             /**
              * The gate itself: hoisted function declaration (so its position in
@@ -1741,17 +1742,18 @@ async function main() {
                 )}, runId: r && r.__fxHarnessDiagnosticRunId, message: String((err && err.message) || err), at: Date.now() } })).catch(() => {}); } catch (e) {}`;
             for (const outer of [
                 {
-                    anchor:
-                        '} catch (err) {\n          pendingRokuMedia?.release();',
+                    anchor: "} catch (err) {\n          pendingRokuMedia?.release();",
                     name: "requestSessionHandler"
                 },
                 {
-                    anchor: '} catch (err) {\n          rokuLoad?.release();',
+                    anchor: "} catch (err) {\n          rokuLoad?.release();",
                     name: "loadSender"
                 }
             ]) {
-                patch("background/background.js", outer.anchor, () =>
-                    `\n          ${outerCaughtMarker(outer.name)}\n`
+                patch(
+                    "background/background.js",
+                    outer.anchor,
+                    () => `\n          ${outerCaughtMarker(outer.name)}\n`
                 );
             }
             // triggerCast's catch holds a single logging CALL, so its marker
@@ -1759,7 +1761,10 @@ async function main() {
             // closes - located by matching braces instead of spelling out the
             // catch block's shape, which changes with every reformat.
             {
-                const file = path.join(extensionDir, "background/background.js");
+                const file = path.join(
+                    extensionDir,
+                    "background/background.js"
+                );
                 const text = fs.readFileSync(file, "utf8");
                 const site = text.indexOf(
                     'logger_default.error("loadSender failed (triggerCast)"'
@@ -1832,7 +1837,11 @@ async function main() {
     let phaseAOnlyDone = false;
     try {
         // --- phase A: whitelist, then restart ---------------------------------
-        let started = await startFirefox(options, "phase A: whitelist", harnessDir);
+        let started = await startFirefox(
+            options,
+            "phase A: whitelist",
+            harnessDir
+        );
         driver = started.driver;
         const phaseAConsole = started.consoleLog;
         await driver.get(optionsUrl);
@@ -1941,9 +1950,8 @@ async function main() {
         // rewrite (and therefore the whole session flow) cannot happen.
         // The id alternates between -a and -b by design (that is what makes the
         // replacement atomic), so match the family rather than one id.
-        const whitelistEntry = (whitelisted && whitelisted.after
-            ? whitelisted.after
-            : []
+        const whitelistEntry = (
+            whitelisted && whitelisted.after ? whitelisted.after : []
         ).find(script => /^whitelist-content(-[ab])?$/.test(script.id));
         check(
             "the extension re-registered its whitelist content script",
@@ -2011,7 +2019,9 @@ async function main() {
         );
 
         if (args.phaseAOnly) {
-            console.log("(--phase-a-only: stopping after the whitelist checks)");
+            console.log(
+                "(--phase-a-only: stopping after the whitelist checks)"
+            );
             phaseAOnlyDone = true;
         }
         await driver.quit();
@@ -2207,17 +2217,25 @@ async function main() {
         );
         const t1 = armASnapshot;
         const injected = state =>
-            Boolean(state && state.contentInitialRan &&
-                (state.contentInitialRan.head || state.contentInitialRan.tail));
+            Boolean(
+                state &&
+                    state.contentInitialRan &&
+                    (state.contentInitialRan.head ||
+                        state.contentInitialRan.tail)
+            );
         console.log(
             "timing verdict:",
             injected(t0)
                 ? "T0 was already injected -> ordering is NOT the explanation"
                 : injected(t1)
                 ? "T0 not injected, T1 injected -> PAGE BEAT THE REGISTRATION"
-                : t1.contentInitialRan && t1.contentInitialRan.head && !t1.contentInitialRan.tail
+                : t1.contentInitialRan &&
+                  t1.contentInitialRan.head &&
+                  !t1.contentInitialRan.tail
                 ? "T1 injected and threw partway -> contentInitial itself throws"
-                : t1.contentInitialRan && t1.contentInitialRan.head && t1.contentInitialRan.tail
+                : t1.contentInitialRan &&
+                  t1.contentInitialRan.head &&
+                  t1.contentInitialRan.tail
                 ? "T1 fully executed -> the src patch is what does not take"
                 : "T1 still not injected -> ordering excluded; run the executeScript positive control"
         );
@@ -2347,7 +2365,10 @@ async function main() {
                 try {
                     await browser.storage.local.remove(${JSON.stringify(
                         diagnosticKeys
-                    ).replace('"]', '", "__fxHarnessHeldGeneration", "__fxHarnessReleaseHeldGeneration", "__fxHarnessGenerationReleased", "__fxHarnessReleaseFailed", "__fxHarnessBackgroundStorageControl"]')});
+                    ).replace(
+                        '"]',
+                        '", "__fxHarnessHeldGeneration", "__fxHarnessReleaseHeldGeneration", "__fxHarnessGenerationReleased", "__fxHarnessReleaseFailed", "__fxHarnessBackgroundStorageControl"]'
+                    )});
                     await browser.storage.local.set({
                         __fxHarnessDiagnosticRunId: ${JSON.stringify(
                             diagnosticRunId
@@ -2491,15 +2512,21 @@ async function main() {
                  browser.storage.local
                     .set({ __fxHarnessCreateSessionControl: { runId: ${JSON.stringify(
                         diagnosticRunId
-                    )}, calls: ${JSON.stringify(calls)}, stage: ${JSON.stringify(
-                        args.failStage
-                    )}, at: Date.now() } })
+                    )}, calls: ${JSON.stringify(
+                    calls
+                )}, stage: ${JSON.stringify(
+                    args.failStage
+                )}, at: Date.now() } })
                     .then(() => done(true), err => done(String(err)));`
             );
             check(
                 `session-failure mode: the createCastSession injection is armed for this run (stage ${args.failStage})`,
                 armedInjection === true,
-                JSON.stringify({ armed: armedInjection, calls, stage: args.failStage })
+                JSON.stringify({
+                    armed: armedInjection,
+                    calls,
+                    stage: args.failStage
+                })
             );
             if (args.cleanupFault !== undefined) {
                 // Armed together with the stage gate and before the click, so
@@ -2512,8 +2539,8 @@ async function main() {
                         .set({ __fxHarnessCleanupFaultControl: { runId: ${JSON.stringify(
                             diagnosticRunId
                         )}, fault: ${JSON.stringify(
-                            args.cleanupFault
-                        )}, callIndex: 1, at: Date.now() } })
+                        args.cleanupFault
+                    )}, callIndex: 1, at: Date.now() } })
                         .then(() => done(true), err => done(String(err)));`
                 );
                 check(
@@ -2578,9 +2605,8 @@ async function main() {
                 failureActionBaseline = {
                     cancelled: countTrace("load-generation-cancelled"),
                     refused: (
-                        consoleText.match(
-                            /Roku media load release ignored/g
-                        ) || []
+                        consoleText.match(/Roku media load release ignored/g) ||
+                        []
                     ).length
                 };
                 console.log(
@@ -2607,7 +2633,9 @@ async function main() {
                 );
                 check(
                     "interleave mode: the sender tab is addressable with its window",
-                    Boolean(senderTabInfo && typeof senderTabInfo.id === "number"),
+                    Boolean(
+                        senderTabInfo && typeof senderTabInfo.id === "number"
+                    ),
                     JSON.stringify(senderTabInfo)
                 );
             }
@@ -2844,16 +2872,16 @@ async function main() {
         // browser stdout -> log file, so it is not there the instant the click
         // returns; reading once made Gate A report "(no click-state marker)" for
         // a click that had in fact happened. Bounded polling, not a sleep.
-            /**
-             * Every `cast:sessionRequestCancelled` post of THIS run, in post
-             * order, each carrying the IDENTITY of the site that posted it and
-             * (where a `catch` binding is in scope) the error it was handling.
-             * A bare count could not distinguish "the page was settled by its own
-             * failed start" from "by the selector that replaced it".
-             */
-            const readCancelState = () =>
-                driver.executeAsyncScript(
-                    `const done = arguments[arguments.length - 1];
+        /**
+         * Every `cast:sessionRequestCancelled` post of THIS run, in post
+         * order, each carrying the IDENTITY of the site that posted it and
+         * (where a `catch` binding is in scope) the error it was handling.
+         * A bare count could not distinguish "the page was settled by its own
+         * failed start" from "by the selector that replaced it".
+         */
+        const readCancelState = () =>
+            driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
                      browser.storage.local.get(null).then(all => {
                         const runId = all && all.__fxHarnessDiagnosticRunId;
                         const keys = Object.keys(all || {}).filter(k => k.indexOf("__fxHarnessCancelPost_") === 0);
@@ -2873,7 +2901,7 @@ async function main() {
                                 }))
                         });
                      }, err => done({ error: String(err) }));`
-                );
+            );
 
         let clickStateRaw;
         const clickStateDeadline = Date.now() + 8000;
@@ -2892,9 +2920,9 @@ async function main() {
         }
         const field = name => {
             if (!clickStateRaw) return undefined;
-            const match = new RegExp(`${name}\\s*:\\s*(\\{[^}]*\\}|[^,)}]+)`).exec(
-                clickStateRaw
-            );
+            const match = new RegExp(
+                `${name}\\s*:\\s*(\\{[^}]*\\}|[^,)}]+)`
+            ).exec(clickStateRaw);
             return match ? match[1].trim() : undefined;
         };
         const pathA =
@@ -2906,7 +2934,9 @@ async function main() {
             "Gate A: the click used the bound selector (path A, not the generic popup)",
             pathA,
             JSON.stringify({
-                raw: clickStateRaw ? clickStateRaw.slice(-220) : "(no click-state marker)",
+                raw: clickStateRaw
+                    ? clickStateRaw.slice(-220)
+                    : "(no click-state marker)",
                 hasSelectorContext: field("hasSelectorContext"),
                 selectionRequiresRefresh: field("selectionRequiresRefresh"),
                 mediaType: field("mediaType"),
@@ -3017,8 +3047,8 @@ async function main() {
         const pageRoute = controlledRoute
             ? controlledRoute
             : deliveredByListener
-              ? "queued"
-              : "selector";
+            ? "queued"
+            : "selector";
         const pageOwnership = pageSessionOwnership(pageRoute, pageResult);
         // `--request-settlement-reentrant` issues TWO requests on purpose (the
         // second from inside the first one's error callback), so the
@@ -3079,7 +3109,8 @@ async function main() {
                         : "default"
                 }):`,
                 JSON.stringify({
-                    requestSessionCalls: pageResult && pageResult.requestSessionCalls,
+                    requestSessionCalls:
+                        pageResult && pageResult.requestSessionCalls,
                     successCount: pageResult && pageResult.successCount,
                     errorCount: pageResult && pageResult.errorCount,
                     settleType: pageResult && pageResult.settleType,
@@ -3087,14 +3118,17 @@ async function main() {
                     backgroundCancels: cancelState.maxCount,
                     cancelMarkers: cancelState.markersForRun,
                     cancelSites: cancelState.posts,
-                    callbacks: ((pageResult && pageResult.sessionCallbacks) || []).map(
-                        c => ({
-                            type: c.type,
-                            code: c.payload && c.payload.code
-                        })
-                    ),
-                    sessionListenerCalls: pageResult && pageResult.sessionListenerCalls,
-                    listenerSessions: (pageResult && pageResult.listenerSessions) || []
+                    callbacks: (
+                        (pageResult && pageResult.sessionCallbacks) ||
+                        []
+                    ).map(c => ({
+                        type: c.type,
+                        code: c.payload && c.payload.code
+                    })),
+                    sessionListenerCalls:
+                        pageResult && pageResult.sessionListenerCalls,
+                    listenerSessions:
+                        (pageResult && pageResult.listenerSessions) || []
                 })
             );
         }
@@ -3124,7 +3158,8 @@ async function main() {
             const sessionId = (pageResult && pageResult.sessionId) || null;
             const sites = cancelState.posts.map(p => p.site);
             const facts = {
-                requestSessionCalls: pageResult && pageResult.requestSessionCalls,
+                requestSessionCalls:
+                    pageResult && pageResult.requestSessionCalls,
                 successCount: pageResult && pageResult.successCount,
                 errorCount: pageResult && pageResult.errorCount,
                 settleType: pageResult && pageResult.settleType,
@@ -3142,8 +3177,8 @@ async function main() {
                     expectDoubleSettlement
                         ? "gap"
                         : args.requestSettlementReentrant
-                          ? "reentrant"
-                          : "fixed"
+                        ? "reentrant"
+                        : "fixed"
                 }):`,
                 JSON.stringify(facts)
             );
@@ -3219,7 +3254,8 @@ async function main() {
                 // request arriving after the second was created cannot be
                 // attributed. That is a separate protocol gap and outside this
                 // minimal fix.
-                const attempts = (pageResult && pageResult.requestAttempts) || [];
+                const attempts =
+                    (pageResult && pageResult.requestAttempts) || [];
                 const first = attempts.find(a => a.label === "A");
                 const second = attempts.find(a => a.label === "B");
                 const settledTypes = a =>
@@ -3299,7 +3335,9 @@ async function main() {
                     "request-settlement-fixed: the extension-created session reached the page through sessionListener, exactly once, with a session id",
                     listenerCalls === 1 &&
                         listenerSessions.length === 1 &&
-                        Boolean(listenerSessions[0] && listenerSessions[0].sessionId),
+                        Boolean(
+                            listenerSessions[0] && listenerSessions[0].sessionId
+                        ),
                     JSON.stringify({
                         sessionListenerCalls: listenerCalls,
                         listenerSessions
@@ -3318,7 +3356,9 @@ async function main() {
         );
         check(
             "the clicked selector row was the fake device",
-            Boolean(clicked && clicked.ok && /Harness Roku/.test(clicked.text || "")),
+            Boolean(
+                clicked && clicked.ok && /Harness Roku/.test(clicked.text || "")
+            ),
             JSON.stringify(clicked && clicked.text)
         );
 
@@ -3336,8 +3376,14 @@ async function main() {
             const lines = fs
                 .readFileSync(file, "utf8")
                 .split("\n")
-                .filter(line => /fx_cast|whitelist|registerContentScripts|Error|error/i.test(line));
-            console.log(`--- ${label} console (${lines.length} interesting lines) ---`);
+                .filter(line =>
+                    /fx_cast|whitelist|registerContentScripts|Error|error/i.test(
+                        line
+                    )
+                );
+            console.log(
+                `--- ${label} console (${lines.length} interesting lines) ---`
+            );
             for (const line of lines.slice(-25)) {
                 console.log("   |", line.slice(0, 220));
             }
@@ -3376,11 +3422,15 @@ async function main() {
             console.log(
                 `discovery connection ${conn.pid}:`,
                 JSON.stringify({
-                    startedAt: (conn.inbound.find(
-                        m => m.subject === "bridge:startDiscovery"
-                    ) || {}).at,
+                    startedAt: (
+                        conn.inbound.find(
+                            m => m.subject === "bridge:startDiscovery"
+                        ) || {}
+                    ).at,
                     lastInboundAt: (conn.inbound.slice(-1)[0] || {}).at,
-                    subjects: [...new Set(conn.inbound.map(m => m.subject))].slice(0, 14)
+                    subjects: [
+                        ...new Set(conn.inbound.map(m => m.subject))
+                    ].slice(0, 14)
                 })
             );
         }
@@ -3416,9 +3466,7 @@ async function main() {
             );
             check(
                 "the session PID is none of the discovery PIDs",
-                Boolean(
-                    session && !discoveryPids.has(session.pid)
-                ),
+                Boolean(session && !discoveryPids.has(session.pid)),
                 JSON.stringify({
                     session: session && session.pid,
                     discovery: [...discoveryPids]
@@ -3474,7 +3522,8 @@ async function main() {
                         (data.message && data.message.type) || undefined;
                     if (
                         ACTION_SUBJECTS.has(String(message.subject)) ||
-                        (String(message.subject) === "bridge:sendMediaMessage" &&
+                        (String(message.subject) ===
+                            "bridge:sendMediaMessage" &&
                             COMMAND_MEDIA_TYPES.has(String(mediaType)))
                     ) {
                         actedOn.push(`${data.deviceId}:${mediaType ?? ""}`);
@@ -3496,7 +3545,10 @@ async function main() {
             "deviceIds on the wire:",
             JSON.stringify([...new Set(deviceIds)])
         );
-        console.log("deviceIds acted on:", JSON.stringify([...new Set(actedOn)]));
+        console.log(
+            "deviceIds acted on:",
+            JSON.stringify([...new Set(actedOn)])
+        );
         console.log(
             "confirmation polls targeted:",
             JSON.stringify([...new Set(polledDevices)])
@@ -3538,13 +3590,18 @@ async function main() {
             );
         const markerFor = (markers, key) => {
             const marker = markers && markers[key];
-            return marker && marker.runId === diagnosticRunId ? marker : undefined;
+            return marker && marker.runId === diagnosticRunId
+                ? marker
+                : undefined;
         };
         let gateMarkers;
         const gateDeadline = Date.now() + 15000;
         for (;;) {
             gateMarkers = await readGateMarkers();
-            const control = markerFor(gateMarkers, "__fxHarnessClickStorageControl");
+            const control = markerFor(
+                gateMarkers,
+                "__fxHarnessClickStorageControl"
+            );
             const selection = markerFor(
                 gateMarkers,
                 "__fxHarnessSelectionAtRokuBranch"
@@ -3611,7 +3668,9 @@ async function main() {
         // start announced, whose release was refused).
         if (args.createFailure && !args.interleave) {
             check(
-                `request-source ${args.requestSource}: supporting evidence - the Roku-branch marker of main:requestSession is ${
+                `request-source ${
+                    args.requestSource
+                }: supporting evidence - the Roku-branch marker of main:requestSession is ${
                     args.requestSource === "selector" ? "present" : "absent"
                 } (the authoritative caller check is the outer-catch assertion)`,
                 args.requestSource === "selector"
@@ -3639,7 +3698,8 @@ async function main() {
             JSON.stringify({
                 popup: clickControl && clickControl.deviceType,
                 background: selectionMarker && selectionMarker.deviceType,
-                backgroundMediaType: selectionMarker && selectionMarker.mediaType
+                backgroundMediaType:
+                    selectionMarker && selectionMarker.mediaType
             })
         );
         const began = markerFor(gateMarkers, "__fxHarnessLoadGenerationBegan");
@@ -3676,16 +3736,18 @@ async function main() {
                 markerPresent: Boolean(began),
                 marker: began ?? null,
                 expectedRunId: diagnosticRunId,
-                runIdMatches: Boolean(
-                    began && began.runId === diagnosticRunId
-                )
+                runIdMatches: Boolean(began && began.runId === diagnosticRunId)
             })
         );
         if (pathBWasTaken) {
             console.log(
                 "selector click used the path that does not create a load generation; " +
                     "Stage 2 assertions would be meaningless, so they are skipped " +
-                    "(Gate A ok:", pathA, "Gate B ok:", gateBOk, ")"
+                    "(Gate A ok:",
+                pathA,
+                "Gate B ok:",
+                gateBOk,
+                ")"
             );
         }
 
@@ -4060,7 +4122,10 @@ async function main() {
                             path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
                         ),
                         outbound: readNdjson(
-                            path.join(harnessDir, `conn-${entry.pid}-out.ndjson`)
+                            path.join(
+                                harnessDir,
+                                `conn-${entry.pid}-out.ndjson`
+                            )
                         )
                     }));
             const wireStatusSamples = conns =>
@@ -4133,8 +4198,12 @@ async function main() {
                                     data: {
                                         selection: {
                                             device: {
-                                                id: ${JSON.stringify(FAKE_DEVICE_ID)},
-                                                name: ${JSON.stringify(FAKE_DEVICE_NAME)},
+                                                id: ${JSON.stringify(
+                                                    FAKE_DEVICE_ID
+                                                )},
+                                                name: ${JSON.stringify(
+                                                    FAKE_DEVICE_NAME
+                                                )},
                                                 deviceType: "roku"
                                             },
                                             mediaType: 1
@@ -4196,7 +4265,8 @@ async function main() {
                         "interleave mode: the popup's window has the sender tab active (what the background resolves)",
                         Array.isArray(resolvedTarget) &&
                             resolvedTarget.some(
-                                t => t.id === (senderTabInfo && senderTabInfo.id)
+                                t =>
+                                    t.id === (senderTabInfo && senderTabInfo.id)
                             ),
                         JSON.stringify({ resolvedTarget, senderTabInfo })
                     );
@@ -4232,7 +4302,10 @@ async function main() {
                             heldSecond.callIndex === 2 &&
                             heldFirst.at <= heldSecond.at
                     ),
-                    JSON.stringify({ heldFirst: heldFirst || null, heldSecond: heldSecond || null })
+                    JSON.stringify({
+                        heldFirst: heldFirst || null,
+                        heldSecond: heldSecond || null
+                    })
                 );
             }
 
@@ -4294,12 +4367,12 @@ async function main() {
             // arming-time baseline instead, or `cancelDelta` would be 0 for a
             // CORRECT implementation.
             const cancelledBaseline = failureActionBaseline.cancelled;
-            const blockedDrivenBaseline = traceLines("remote-status-blocked").filter(
-                drivenInput
-            ).length;
-            const inputDrivenBaseline = traceLines("remote-status-input").filter(
-                drivenInput
-            ).length;
+            const blockedDrivenBaseline = traceLines(
+                "remote-status-blocked"
+            ).filter(drivenInput).length;
+            const inputDrivenBaseline = traceLines(
+                "remote-status-input"
+            ).filter(drivenInput).length;
             const sampleStartedAt = Date.now();
             await post("/state", {
                 playerState: "play",
@@ -4347,7 +4420,8 @@ async function main() {
             );
             const cancels = traceLines("load-generation-cancelled").length;
             const cancelDelta = cancels - cancelledBaseline;
-            const blockedDrivenDelta = blockedDriven.length - blockedDrivenBaseline;
+            const blockedDrivenDelta =
+                blockedDriven.length - blockedDrivenBaseline;
             const inputDrivenDelta = inputDriven.length - inputDrivenBaseline;
             if (gateOpensAfterFailure) {
                 check(
@@ -4437,7 +4511,8 @@ async function main() {
                 JSON.stringify({
                     generations,
                     uniqueGenerations,
-                    announced: generationMarker && generationMarker.loadGeneration
+                    announced:
+                        generationMarker && generationMarker.loadGeneration
                 })
             );
 
@@ -4755,8 +4830,7 @@ async function main() {
                 } else if (args.expectResidue) {
                     check(
                         `session-failure mode (${args.failStage}, pre-fix expectation): exactly one NEW IDLE native host, still alive (the port bridge.connect() created and nobody uses)`,
-                        idleNewHosts.length === 1 &&
-                            idleNewAlive.length === 1,
+                        idleNewHosts.length === 1 && idleNewAlive.length === 1,
                         JSON.stringify({
                             newHosts: newHosts.map(h => h.pid),
                             idleNewHosts: idleNewHosts.map(h => h.pid),
@@ -4882,8 +4956,7 @@ async function main() {
                             !sessionPidsBefore.has(c.pid) &&
                             c.inbound.some(
                                 m =>
-                                    m.subject ===
-                                        "bridge:createCastSession" &&
+                                    m.subject === "bridge:createCastSession" &&
                                     m.at >=
                                         (releasedSecond
                                             ? releasedSecond.at
@@ -4936,477 +5009,535 @@ async function main() {
             );
         }
         if (!pathBWasTaken) {
-        // The startup synthesis only exists while ECP still reports idle, so the
-        // device is pinned there: a device that flips to buffer/play on its own
-        // would quietly bypass the boundary under test.
-        await post("/state", { playerState: "idle", position: undefined, duration: undefined });
-        console.log("fake roku pinned to idle for the LOAD");
+            // The startup synthesis only exists while ECP still reports idle, so the
+            // device is pinned there: a device that flips to buffer/play on its own
+            // would quietly bypass the boundary under test.
+            await post("/state", {
+                playerState: "idle",
+                position: undefined,
+                duration: undefined
+            });
+            console.log("fake roku pinned to idle for the LOAD");
 
-        await driver.switchTo().window(senderTab);
-        // Everything below is this LOAD's: the discovery connection has been
-        // polling since Stage 1, so an unfiltered `.find()` would happily return
-        // an observation from before the media ever arrived - a real message
-        // from the wrong lifecycle, which is its own kind of false green.
-        const loadStartedAt = Date.now();
-        const HARNESS_MARKER = args.mediaBeforeGeneration
-            ? "stage3-media-first"
-            : args.generationAdvance
-            ? "stage3-generation-N"
-            : "stage2";
-        const NEXT_MARKER = "stage3-generation-N-plus-1";
+            await driver.switchTo().window(senderTab);
+            // Everything below is this LOAD's: the discovery connection has been
+            // polling since Stage 1, so an unfiltered `.find()` would happily return
+            // an observation from before the media ever arrived - a real message
+            // from the wrong lifecycle, which is its own kind of false green.
+            const loadStartedAt = Date.now();
+            const HARNESS_MARKER = args.mediaBeforeGeneration
+                ? "stage3-media-first"
+                : args.generationAdvance
+                ? "stage3-generation-N"
+                : "stage2";
+            const NEXT_MARKER = "stage3-generation-N-plus-1";
 
-        // Helpers first: they are pure predicates over the trace entries, and
-        // their bodies only read the vars above once called, so defining them
-        // here removes any chance of a use-before-declaration (which has now
-        // bitten this file three times).
-        const afterLoad = entry => entry.at >= loadStartedAt;
-        const afterSessionRequest = entry => entry.at >= requestAtSession;
-        const markerOf = media =>
-            media && media.customData && media.customData.harnessMarker;
+            // Helpers first: they are pure predicates over the trace entries, and
+            // their bodies only read the vars above once called, so defining them
+            // here removes any chance of a use-before-declaration (which has now
+            // bitten this file three times).
+            const afterLoad = entry => entry.at >= loadStartedAt;
+            const afterSessionRequest = entry => entry.at >= requestAtSession;
+            const markerOf = media =>
+                media && media.customData && media.customData.harnessMarker;
 
-        /** The Stage 2 hops assume the generation was relayed with the media,
-         *  which the reordering and advance modes deliberately prevent. */
-        const assertStage2Hops =
-            !args.mediaBeforeGeneration && !args.generationAdvance;
-        
-        
-        // A LOAD whose callbacks never settle is itself a finding, not a reason
-        // to abort the run: the relay hops below are read from the traces either
-        // way, so a timeout here is reported and the evidence is still collected.
-        let loaded;
-        try {
-            loaded = await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+            /** The Stage 2 hops assume the generation was relayed with the media,
+             *  which the reordering and advance modes deliberately prevent. */
+            const assertStage2Hops =
+                !args.mediaBeforeGeneration && !args.generationAdvance;
+
+            // A LOAD whose callbacks never settle is itself a finding, not a reason
+            // to abort the run: the relay hops below are read from the traces either
+            // way, so a timeout here is reported and the evidence is still collected.
+            let loaded;
+            try {
+                loaded = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  const timer = setTimeout(() => done("timeout: no load callback"), 20000);
                  window.__HARNESS_LOAD__({ harnessMarker: ${JSON.stringify(
-                 args.mediaBeforeGeneration
-                     ? "stage3-media-first"
-                     : args.generationAdvance
-                     ? "stage3-generation-N"
-                     : "stage2"
-             )} }).then(
+                     args.mediaBeforeGeneration
+                         ? "stage3-media-first"
+                         : args.generationAdvance
+                         ? "stage3-generation-N"
+                         : "stage2"
+                 )} }).then(
                     () => { clearTimeout(timer); done(true); },
                     err => { clearTimeout(timer); done(String(err)); }
                  );`
+                );
+            } catch (err) {
+                loaded = `webdriver: ${err.message}`;
+            }
+            // Not an assertion: an HLS DVR LOAD is deferred until the consume signal
+            // or the 60s fallback, so "no callback yet" is the expected state here.
+            // The assertion is the post-publication check below.
+            console.log(
+                "loadMedia before the fallback:",
+                loaded === true ? "settled early (unexpected)" : String(loaded)
             );
-        } catch (err) {
-            loaded = `webdriver: ${err.message}`;
-        }
-        // Not an assertion: an HLS DVR LOAD is deferred until the consume signal
-        // or the 60s fallback, so "no callback yet" is the expected state here.
-        // The assertion is the post-publication check below.
-        console.log(
-            "loadMedia before the fallback:",
-            loaded === true ? "settled early (unexpected)" : String(loaded)
-        );
-        if (loaded !== true) {
-            const pageState = await driver.executeScript(
-                "return window.__HARNESS_RESULT__;"
-            );
-            console.log("load did not settle; page state:", JSON.stringify(pageState));
-        }
-        // HLS DVR LOADs deliberately do not publish session media at launch:
-        // handleLoad() takes the deferred-consume path (deferUntilFreshPlayer)
-        // and registers/publishes only when a consume signal arrives OR the
-        // 60s fallback fires (DEFERRED_CONSUME_FALLBACK_MS). This device is
-        // pinned at IDLE and never requests the relay, so neither of the two
-        // evidence paths can fire - the fallback is what must release it.
-        // The 60s wait only exists because the device is held at IDLE: an HLS DVR
-        // LOAD registers its media only when a consume signal arrives, and a
-        // device that never moves can only be released by
-        // DEFERRED_CONSUME_FALLBACK_MS. For everything except the startup
-        // synthesis itself, the device can simply start - the post-launch ECP
-        // evidence releases the gate within a poll, so a run takes seconds
-        // instead of minutes. `--startup-synthesis` keeps the slow path for the
-        // assertion that genuinely needs the device to stay idle.
-        const readConnPre = pid => ({
-            outbound: readNdjson(path.join(harnessDir, `conn-${pid}-out.ndjson`))
-        });
-        if (!args.startupSynthesis) {
-            await sleep(2500);
-            await post("/state", { playerState: "buffer", position: 1 });
-            console.log("fake roku advanced to buffer to release the consume gate");
-            const mediaDeadline = Date.now() + 25000;
-            let released = false;
-            while (Date.now() < mediaDeadline) {
-                const out = session
-                    ? readNdjson(path.join(harnessDir, `conn-${session.pid}-out.ndjson`))
-                    : [];
-                if (
-                    out.some(
+            if (loaded !== true) {
+                const pageState = await driver.executeScript(
+                    "return window.__HARNESS_RESULT__;"
+                );
+                console.log(
+                    "load did not settle; page state:",
+                    JSON.stringify(pageState)
+                );
+            }
+            // HLS DVR LOADs deliberately do not publish session media at launch:
+            // handleLoad() takes the deferred-consume path (deferUntilFreshPlayer)
+            // and registers/publishes only when a consume signal arrives OR the
+            // 60s fallback fires (DEFERRED_CONSUME_FALLBACK_MS). This device is
+            // pinned at IDLE and never requests the relay, so neither of the two
+            // evidence paths can fire - the fallback is what must release it.
+            // The 60s wait only exists because the device is held at IDLE: an HLS DVR
+            // LOAD registers its media only when a consume signal arrives, and a
+            // device that never moves can only be released by
+            // DEFERRED_CONSUME_FALLBACK_MS. For everything except the startup
+            // synthesis itself, the device can simply start - the post-launch ECP
+            // evidence releases the gate within a poll, so a run takes seconds
+            // instead of minutes. `--startup-synthesis` keeps the slow path for the
+            // assertion that genuinely needs the device to stay idle.
+            const readConnPre = pid => ({
+                outbound: readNdjson(
+                    path.join(harnessDir, `conn-${pid}-out.ndjson`)
+                )
+            });
+            if (!args.startupSynthesis) {
+                await sleep(2500);
+                await post("/state", { playerState: "buffer", position: 1 });
+                console.log(
+                    "fake roku advanced to buffer to release the consume gate"
+                );
+                const mediaDeadline = Date.now() + 25000;
+                let released = false;
+                while (Date.now() < mediaDeadline) {
+                    const out = session
+                        ? readNdjson(
+                              path.join(
+                                  harnessDir,
+                                  `conn-${session.pid}-out.ndjson`
+                              )
+                          )
+                        : [];
+                    if (
+                        out.some(
+                            m =>
+                                m.subject === "main:rokuSessionMedia" &&
+                                markerOf(m.message.data.media) ===
+                                    HARNESS_MARKER
+                        )
+                    ) {
+                        released = true;
+                        break;
+                    }
+                    await sleep(250);
+                }
+                check(
+                    "the consume gate released from ECP evidence (no fallback wait)",
+                    released,
+                    "main:rokuSessionMedia did not appear within 25s of the device starting"
+                );
+                console.log(
+                    "session media released after",
+                    ((Date.now() - loadStartedAt) / 1000).toFixed(1) + "s"
+                );
+                await sleep(1500);
+            }
+            await sleep(args.startupSynthesis ? 25000 : 0);
+            const midSession = session
+                ? readConnPre(session.pid)
+                : { outbound: [] };
+            if (args.startupSynthesis) {
+                check(
+                    "before the fallback: no session media was published",
+                    !midSession.outbound.some(
                         m =>
                             m.subject === "main:rokuSessionMedia" &&
+                            afterLoad(m) &&
                             markerOf(m.message.data.media) === HARNESS_MARKER
+                    ),
+                    JSON.stringify(
+                        midSession.outbound.map(m => m.subject).slice(0, 8)
                     )
-                ) {
-                    released = true;
-                    break;
-                }
-                await sleep(250);
+                );
             }
-            check(
-                "the consume gate released from ECP evidence (no fallback wait)",
-                released,
-                "main:rokuSessionMedia did not appear within 25s of the device starting"
+            if (args.startupSynthesis) {
+                console.log(
+                    "waiting out the 60s deferred-consume fallback (device pinned at IDLE)"
+                );
+            }
+            await sleep(args.startupSynthesis ? 60000 : 0);
+
+            const readConn = pid => ({
+                inbound: readNdjson(
+                    path.join(harnessDir, `conn-${pid}-in.ndjson`)
+                ),
+                outbound: readNdjson(
+                    path.join(harnessDir, `conn-${pid}-out.ndjson`)
+                )
+            });
+            // RE-READ everything here. The connection data used by the checks above
+            // was snapshotted before the LOAD, and the media this section is about
+            // arrives ~60s later - so searching those stale arrays could never find
+            // it. (Same class of mistake as the stale whitelist and the stale
+            // bundle: reading a snapshot instead of the current state.)
+            const connectionsNow = readNdjson(
+                path.join(harnessDir, "spawns.ndjson")
+            )
+                .filter(entry => entry.event === undefined)
+                .map(entry => ({
+                    pid: entry.pid,
+                    inbound: readNdjson(
+                        path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
+                    ),
+                    outbound: readNdjson(
+                        path.join(harnessDir, `conn-${entry.pid}-out.ndjson`)
+                    )
+                }));
+            const discoveryConnectionsNow = connectionsNow.filter(c =>
+                c.inbound.some(m => m.subject === "bridge:startDiscovery")
             );
-            console.log("session media released after", ((Date.now() - loadStartedAt) / 1000).toFixed(1) + "s");
-            await sleep(1500);
-        }
-        await sleep(args.startupSynthesis ? 25000 : 0);
-        const midSession = session ? readConnPre(session.pid) : { outbound: [] };
-        if (args.startupSynthesis) {
-        check(
-            "before the fallback: no session media was published",
-            !midSession.outbound.some(
+            console.log(
+                "connections at Stage 2 time:",
+                JSON.stringify(
+                    discoveryConnectionsNow.map(c => ({
+                        pid: c.pid,
+                        inbound: [...new Set(c.inbound.map(m => m.subject))]
+                    }))
+                )
+            );
+            const sessionConn = session
+                ? readConn(session.pid)
+                : { inbound: [], outbound: [] };
+            const discoveryConn = discoveryConnectionsNow[0] || {
+                inbound: [],
+                outbound: []
+            };
+
+            if (!assertStage2Hops) {
+                console.log(
+                    "Stage 2 hops and case 1 are not asserted in this mode: " +
+                        "the generation is deliberately held, and they require it to have been relayed " +
+                        "alongside the media"
+                );
+            }
+            // Hop 1: the session host publishes the LOAD's media.
+            const sessionMedia = sessionConn.outbound.find(
                 m =>
                     m.subject === "main:rokuSessionMedia" &&
                     afterLoad(m) &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
                     markerOf(m.message.data.media) === HARNESS_MARKER
-            ),
-            JSON.stringify(midSession.outbound.map(m => m.subject).slice(0, 8))
-        );
-        }
-        if (args.startupSynthesis) {
-            console.log(
-                "waiting out the 60s deferred-consume fallback (device pinned at IDLE)"
             );
-        }
-        await sleep(args.startupSynthesis ? 60000 : 0);
-
-        const readConn = pid => ({
-            inbound: readNdjson(path.join(harnessDir, `conn-${pid}-in.ndjson`)),
-            outbound: readNdjson(path.join(harnessDir, `conn-${pid}-out.ndjson`))
-        });
-        // RE-READ everything here. The connection data used by the checks above
-        // was snapshotted before the LOAD, and the media this section is about
-        // arrives ~60s later - so searching those stale arrays could never find
-        // it. (Same class of mistake as the stale whitelist and the stale
-        // bundle: reading a snapshot instead of the current state.)
-        const connectionsNow = readNdjson(path.join(harnessDir, "spawns.ndjson"))
-            .filter(entry => entry.event === undefined)
-            .map(entry => ({
-                pid: entry.pid,
-                inbound: readNdjson(
-                    path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
-                ),
-                outbound: readNdjson(
-                    path.join(harnessDir, `conn-${entry.pid}-out.ndjson`)
+            const loadFailed = sessionConn.outbound.find(
+                m =>
+                    afterLoad(m) &&
+                    m.subject === "cast:sessionMessageReceived" &&
+                    String(m.message.data.messageData || "").includes(
+                        "LOAD_FAILED"
+                    )
+            );
+            check(
+                "the session did not reject the LOAD (no LOAD_FAILED)",
+                !loadFailed,
+                JSON.stringify(loadFailed && loadFailed.message.data)
+            );
+            check(
+                "hop 1: the session host published main:rokuSessionMedia",
+                Boolean(sessionMedia),
+                JSON.stringify(
+                    sessionConn.outbound.map(m => m.subject).slice(0, 10)
                 )
-            }));
-        const discoveryConnectionsNow = connectionsNow.filter(c =>
-            c.inbound.some(m => m.subject === "bridge:startDiscovery")
-        );
-        console.log(
-            "connections at Stage 2 time:",
-            JSON.stringify(
-                discoveryConnectionsNow.map(c => ({
-                    pid: c.pid,
-                    inbound: [...new Set(c.inbound.map(m => m.subject))]
-                }))
-            )
-        );
-        const sessionConn = session
-            ? readConn(session.pid)
-            : { inbound: [], outbound: [] };
-        const discoveryConn = discoveryConnectionsNow[0] || { inbound: [], outbound: [] };
-
-        if (!assertStage2Hops) {
-            console.log(
-                "Stage 2 hops and case 1 are not asserted in this mode: " +
-                    "the generation is deliberately held, and they require it to have been relayed " +
-                    "alongside the media"
             );
-        }
-        // Hop 1: the session host publishes the LOAD's media.
-        const sessionMedia = sessionConn.outbound.find(
-            m =>
-                m.subject === "main:rokuSessionMedia" &&
-                afterLoad(m) &&
-                m.message.data.deviceId === FAKE_DEVICE_ID &&
-                markerOf(m.message.data.media) === HARNESS_MARKER
-        );
-        const loadFailed = sessionConn.outbound.find(
-            m =>
-                afterLoad(m) &&
-                m.subject === "cast:sessionMessageReceived" &&
-                String(m.message.data.messageData || "").includes("LOAD_FAILED")
-        );
-        check(
-            "the session did not reject the LOAD (no LOAD_FAILED)",
-            !loadFailed,
-            JSON.stringify(loadFailed && loadFailed.message.data)
-        );
-        check(
-            "hop 1: the session host published main:rokuSessionMedia",
-            Boolean(sessionMedia),
-            JSON.stringify(sessionConn.outbound.map(m => m.subject).slice(0, 10))
-        );
-        // Which direction the LOAD died in: if the extension never sent the
-        // session a message, the loss is on the page->extension hop; if it did,
-        // the session received it and did not act.
-        console.log(
-            "session connection subjects:",
-            JSON.stringify({
-                extensionToSession: [
-                    ...new Set(sessionConn.inbound.map(m => m.subject))
-                ].slice(0, 12),
-                sessionToExtension: [
-                    ...new Set(sessionConn.outbound.map(m => m.subject))
-                ].slice(0, 12),
-                // Full payload shape, not just the type: this is what separates
-                // "the message never arrived", "wrong namespace", "the JSON was
-                // not parsed", "the LOAD arrived but lost its media" and "routed
-                // to the wrong session".
-                // Does the ack correspond to the LOAD? A matching messageId
-                // means the native router FOUND the session (an unknown
-                // sessionId returns false without an ack) and handled it. It
-                // still does not mean the async handleLoad() finished.
-                ackPairing: (() => {
-                    const loadMsg = sessionConn.inbound.find(
-                        m =>
-                            afterLoad(m) &&
-                            m.subject === "bridge:sendCastSessionMessage"
-                    );
-                    const ack = sessionConn.outbound.find(
-                        m =>
-                            afterLoad(m) &&
-                            m.subject === "cast:impl_sendMessage" &&
-                            m.message.data.messageId ===
-                                (loadMsg && loadMsg.message.data.messageId)
-                    );
-                    return {
-                        loadMessageId:
-                            loadMsg && loadMsg.message.data.messageId,
-                        acked: Boolean(ack),
-                        ack: ack && ack.message.data
-                    };
-                })(),
-                loadPayloads: sessionConn.inbound
-                    .filter(m => afterLoad(m))
-                    .map(m => {
-                        const data = m.message.data || {};
-                        // The field is `messageData` (a JSON string), not
-                        // `message` - reading the wrong one printed
-                        // rawTypeof:"undefined" and hid the payload entirely.
-                        const raw = data.messageData;
-                        let parsed;
-                        let parseError;
-                        // Mirror production: the host parses only when it is a
-                        // string, and passes an object straight through.
-                        try {
-                            if (typeof raw === "string") parsed = JSON.parse(raw);
-                            else if (raw && typeof raw === "object") parsed = raw;
-                        } catch (err) {
-                            parseError = err.message;
-                        }
+            // Which direction the LOAD died in: if the extension never sent the
+            // session a message, the loss is on the page->extension hop; if it did,
+            // the session received it and did not act.
+            console.log(
+                "session connection subjects:",
+                JSON.stringify({
+                    extensionToSession: [
+                        ...new Set(sessionConn.inbound.map(m => m.subject))
+                    ].slice(0, 12),
+                    sessionToExtension: [
+                        ...new Set(sessionConn.outbound.map(m => m.subject))
+                    ].slice(0, 12),
+                    // Full payload shape, not just the type: this is what separates
+                    // "the message never arrived", "wrong namespace", "the JSON was
+                    // not parsed", "the LOAD arrived but lost its media" and "routed
+                    // to the wrong session".
+                    // Does the ack correspond to the LOAD? A matching messageId
+                    // means the native router FOUND the session (an unknown
+                    // sessionId returns false without an ack) and handled it. It
+                    // still does not mean the async handleLoad() finished.
+                    ackPairing: (() => {
+                        const loadMsg = sessionConn.inbound.find(
+                            m =>
+                                afterLoad(m) &&
+                                m.subject === "bridge:sendCastSessionMessage"
+                        );
+                        const ack = sessionConn.outbound.find(
+                            m =>
+                                afterLoad(m) &&
+                                m.subject === "cast:impl_sendMessage" &&
+                                m.message.data.messageId ===
+                                    (loadMsg && loadMsg.message.data.messageId)
+                        );
                         return {
-                            subject: m.subject,
-                            sessionId: data.sessionId,
-                            namespace: data.namespace,
-                            messageId: data.messageId,
-                            rawTypeof: typeof raw,
-                            parseError,
-                            parsedType: parsed && parsed.type,
-                            requestId: parsed && parsed.requestId,
-                            contentId:
-                                parsed &&
-                                parsed.media &&
-                                parsed.media.contentId,
-                            harnessMarker:
-                                parsed &&
-                                parsed.media &&
-                                parsed.media.customData &&
-                                parsed.media.customData.harnessMarker,
-                                        keys: Object.keys(data).slice(0, 8)
+                            loadMessageId:
+                                loadMsg && loadMsg.message.data.messageId,
+                            acked: Boolean(ack),
+                            ack: ack && ack.message.data
                         };
-                    })
-                    .slice(0, 8)
-            })
-        );
-        const sessionMediaData = (sessionMedia && sessionMedia.message && sessionMedia.message.data) || {};
-        check(
-            "hop 1: it is for the fake device and carries the DVR anchors",
-            sessionMediaData.deviceId === FAKE_DEVICE_ID &&
-                sessionMediaData.media &&
-                sessionMediaData.media.customData &&
-                sessionMediaData.media.customData.hlsDvr === true &&
-                sessionMediaData.media.duration === 7200,
-            JSON.stringify({
-                deviceId: sessionMediaData.deviceId,
-                duration: sessionMediaData.media && sessionMediaData.media.duration,
-                customData: sessionMediaData.media && sessionMediaData.media.customData
-            })
-        );
+                    })(),
+                    loadPayloads: sessionConn.inbound
+                        .filter(m => afterLoad(m))
+                        .map(m => {
+                            const data = m.message.data || {};
+                            // The field is `messageData` (a JSON string), not
+                            // `message` - reading the wrong one printed
+                            // rawTypeof:"undefined" and hid the payload entirely.
+                            const raw = data.messageData;
+                            let parsed;
+                            let parseError;
+                            // Mirror production: the host parses only when it is a
+                            // string, and passes an object straight through.
+                            try {
+                                if (typeof raw === "string")
+                                    parsed = JSON.parse(raw);
+                                else if (raw && typeof raw === "object")
+                                    parsed = raw;
+                            } catch (err) {
+                                parseError = err.message;
+                            }
+                            return {
+                                subject: m.subject,
+                                sessionId: data.sessionId,
+                                namespace: data.namespace,
+                                messageId: data.messageId,
+                                rawTypeof: typeof raw,
+                                parseError,
+                                parsedType: parsed && parsed.type,
+                                requestId: parsed && parsed.requestId,
+                                contentId:
+                                    parsed &&
+                                    parsed.media &&
+                                    parsed.media.contentId,
+                                harnessMarker:
+                                    parsed &&
+                                    parsed.media &&
+                                    parsed.media.customData &&
+                                    parsed.media.customData.harnessMarker,
+                                keys: Object.keys(data).slice(0, 8)
+                            };
+                        })
+                        .slice(0, 8)
+                })
+            );
+            const sessionMediaData =
+                (sessionMedia &&
+                    sessionMedia.message &&
+                    sessionMedia.message.data) ||
+                {};
+            check(
+                "hop 1: it is for the fake device and carries the DVR anchors",
+                sessionMediaData.deviceId === FAKE_DEVICE_ID &&
+                    sessionMediaData.media &&
+                    sessionMediaData.media.customData &&
+                    sessionMediaData.media.customData.hlsDvr === true &&
+                    sessionMediaData.media.duration === 7200,
+                JSON.stringify({
+                    deviceId: sessionMediaData.deviceId,
+                    duration:
+                        sessionMediaData.media &&
+                        sessionMediaData.media.duration,
+                    customData:
+                        sessionMediaData.media &&
+                        sessionMediaData.media.customData
+                })
+            );
 
-        if (session) {
-            const debugEvents = readNdjson(
-                path.join(harnessDir, `conn-${session.pid}-out.ndjson`)
-            )
-                .filter(
-                    m =>
-                        m.subject === "main:rokuSessionMediaDebug" && afterLoad(m)
+            if (session) {
+                const debugEvents = readNdjson(
+                    path.join(harnessDir, `conn-${session.pid}-out.ndjson`)
                 )
-                .map(m => m.message.data);
-            console.log(
-                "session media debug events:",
-                JSON.stringify(debugEvents.slice(-4))
+                    .filter(
+                        m =>
+                            m.subject === "main:rokuSessionMediaDebug" &&
+                            afterLoad(m)
+                    )
+                    .map(m => m.message.data);
+                console.log(
+                    "session media debug events:",
+                    JSON.stringify(debugEvents.slice(-4))
+                );
+                if (args.startupSynthesis) {
+                    check(
+                        "the publication came from the deferred-consume fallback",
+                        debugEvents.some(
+                            event =>
+                                JSON.stringify(event).includes(
+                                    "sessionMediaRegistered"
+                                ) && JSON.stringify(event).includes("true")
+                        ),
+                        JSON.stringify(debugEvents.slice(-4))
+                    );
+                }
+            }
+
+            // Hop 2: the extension relayed the generation and the media to discovery.
+            const discoveryInbound = discoveryConnectionsNow.flatMap(
+                conn => conn.inbound
+            );
+
+            const relayedGeneration = discoveryInbound.find(
+                m =>
+                    m.subject === "bridge:rokuSetLoadGeneration" &&
+                    afterSessionRequest(m) &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID
+            );
+            const relayedMedia = discoveryInbound.find(
+                m =>
+                    m.subject === "bridge:rokuSetSessionMedia" &&
+                    afterLoad(m) &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    markerOf(m.message.data.media) === HARNESS_MARKER
+            );
+
+            // The generation is created when the device is SELECTED, which is
+            // legitimately before the LOAD, so it is filtered against the session
+            // request boundary rather than the LOAD boundary.
+
+            const generationData =
+                (relayedGeneration && relayedGeneration.message.data) || {};
+            const relayedData =
+                (relayedMedia && relayedMedia.message.data) || {};
+            if (assertStage2Hops) {
+                check(
+                    "hop 2: the extension sent generation and session media to discovery",
+                    Boolean(relayedGeneration && relayedMedia),
+                    // Per connection, so a failure cannot be read as "nothing arrived
+                    // anywhere" when in fact the messages went to another process.
+                    JSON.stringify(
+                        discoveryConnectionsNow.map(conn => ({
+                            pid: conn.pid,
+                            subjects: [
+                                ...new Set(conn.inbound.map(m => m.subject))
+                            ].slice(0, 14)
+                        }))
+                    )
+                );
+                check(
+                    "hop 2: both name the fake device and agree on the generation",
+                    generationData.deviceId === FAKE_DEVICE_ID &&
+                        relayedData.deviceId === FAKE_DEVICE_ID &&
+                        generationData.loadGeneration ===
+                            relayedData.loadGeneration,
+                    JSON.stringify({
+                        gen: generationData.loadGeneration,
+                        mediaGen: relayedData.loadGeneration,
+                        device: relayedData.deviceId
+                    })
+                );
+                check(
+                    "hop 2: the relayed media matches what the session published",
+                    relayedData.media &&
+                        relayedData.media.duration === 7200 &&
+                        relayedData.media.customData &&
+                        relayedData.media.customData.hlsDvr === true &&
+                        relayedData.ownerId === sessionMediaData.sessionId,
+                    JSON.stringify({
+                        duration:
+                            relayedData.media && relayedData.media.duration,
+                        ownerId: relayedData.ownerId,
+                        sessionOwner: sessionMediaData.ownerId
+                    })
+                );
+            }
+            // Hop 3: the UI channel synthesises BUFFERING, and says so.
+            const discoveryOutbound = discoveryConnectionsNow.flatMap(
+                conn => conn.outbound
+            );
+            const statusEmission = discoveryOutbound.find(
+                m =>
+                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                    afterLoad(m) &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.provenance &&
+                    m.message.data.provenance.source === "startup-synthetic" &&
+                    markerOf(m.message.data.status.media) === HARNESS_MARKER
             );
             if (args.startupSynthesis) {
-            check(
-                "the publication came from the deferred-consume fallback",
-                debugEvents.some(
-                    event =>
-                        JSON.stringify(event).includes("sessionMediaRegistered") &&
-                        JSON.stringify(event).includes("true")
-                ),
-                JSON.stringify(debugEvents.slice(-4))
-            );
+                check(
+                    "hop 3: the media status is startup-synthetic BUFFERING with the session metadata",
+                    Boolean(
+                        statusEmission &&
+                            statusEmission.message.data.status.playerState ===
+                                "BUFFERING" &&
+                            statusEmission.message.data.status.media &&
+                            statusEmission.message.data.status.media
+                                .duration === 7200 &&
+                            statusEmission.message.data.status.media.customData
+                                .hlsDvr === true
+                    ),
+                    JSON.stringify(
+                        statusEmission && {
+                            state: statusEmission.message.data.status
+                                .playerState,
+                            provenance:
+                                statusEmission.message.data.provenance.source,
+                            media: statusEmission.message.data.status.media
+                        }
+                    )
+                );
+            } else {
+                console.log(
+                    "hop 3 (startup synthesis) skipped in fast mode: the device was advanced out of idle on purpose"
+                );
             }
-        }
 
-        // Hop 2: the extension relayed the generation and the media to discovery.
-        const discoveryInbound = discoveryConnectionsNow.flatMap(conn =>
-            conn.inbound
-        );
-
-        const relayedGeneration = discoveryInbound.find(
-            m =>
-                m.subject === "bridge:rokuSetLoadGeneration" &&
-                afterSessionRequest(m) &&
-                m.message.data.deviceId === FAKE_DEVICE_ID
-        );
-        const relayedMedia = discoveryInbound.find(
-            m =>
-                m.subject === "bridge:rokuSetSessionMedia" &&
-                afterLoad(m) &&
-                m.message.data.deviceId === FAKE_DEVICE_ID &&
-                markerOf(m.message.data.media) === HARNESS_MARKER
-        );
-
-
-        // The generation is created when the device is SELECTED, which is
-        // legitimately before the LOAD, so it is filtered against the session
-        // request boundary rather than the LOAD boundary.
-        
-        const generationData = (relayedGeneration && relayedGeneration.message.data) || {};
-        const relayedData = (relayedMedia && relayedMedia.message.data) || {};
-        if (assertStage2Hops) {
-        check(
-            "hop 2: the extension sent generation and session media to discovery",
-            Boolean(relayedGeneration && relayedMedia),
-            // Per connection, so a failure cannot be read as "nothing arrived
-            // anywhere" when in fact the messages went to another process.
-            JSON.stringify(
-                discoveryConnectionsNow.map(conn => ({
-                    pid: conn.pid,
-                    subjects: [
-                        ...new Set(conn.inbound.map(m => m.subject))
-                    ].slice(0, 14)
-                }))
-            )
-        );
-        check(
-            "hop 2: both name the fake device and agree on the generation",
-            generationData.deviceId === FAKE_DEVICE_ID &&
-                relayedData.deviceId === FAKE_DEVICE_ID &&
-                generationData.loadGeneration === relayedData.loadGeneration,
-            JSON.stringify({
-                gen: generationData.loadGeneration,
-                mediaGen: relayedData.loadGeneration,
-                device: relayedData.deviceId
-            })
-        );
-        check(
-            "hop 2: the relayed media matches what the session published",
-            relayedData.media &&
-                relayedData.media.duration === 7200 &&
-                relayedData.media.customData &&
-                relayedData.media.customData.hlsDvr === true &&
-                relayedData.ownerId === sessionMediaData.sessionId,
-            JSON.stringify({
-                duration: relayedData.media && relayedData.media.duration,
-                ownerId: relayedData.ownerId,
-                sessionOwner: sessionMediaData.ownerId
-            })
-        );
-
-        }
-        // Hop 3: the UI channel synthesises BUFFERING, and says so.
-        const discoveryOutbound = discoveryConnectionsNow.flatMap(
-            conn => conn.outbound
-        );
-        const statusEmission = discoveryOutbound.find(
-            m =>
-                m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                afterLoad(m) &&
-                m.message.data.deviceId === FAKE_DEVICE_ID &&
-                m.message.data.provenance &&
-                m.message.data.provenance.source === "startup-synthetic" &&
-                markerOf(m.message.data.status.media) === HARNESS_MARKER
-        );
-        if (args.startupSynthesis) {
-        check(
-            "hop 3: the media status is startup-synthetic BUFFERING with the session metadata",
-            Boolean(
-                statusEmission &&
-                    statusEmission.message.data.status.playerState === "BUFFERING" &&
-                    statusEmission.message.data.status.media &&
-                    statusEmission.message.data.status.media.duration === 7200 &&
-                    statusEmission.message.data.status.media.customData.hlsDvr === true
-            ),
-            JSON.stringify(
-                statusEmission && {
-                    state: statusEmission.message.data.status.playerState,
-                    provenance: statusEmission.message.data.provenance.source,
-                    media: statusEmission.message.data.status.media
-                }
-            )
-        );
-        } else {
-            console.log(
-                "hop 3 (startup synthesis) skipped in fast mode: the device was advanced out of idle on purpose"
+            // Hop 4: the confirmation channel still sees the real, idle device.
+            const observation = discoveryOutbound.find(
+                m =>
+                    m.subject === "main:rokuPlaybackObservation" &&
+                    m.message.data.deviceId === FAKE_DEVICE_ID &&
+                    m.message.data.provenance &&
+                    m.message.data.provenance.source === "ecp-poll" &&
+                    // only samples that STARTED after this LOAD
+                    m.message.data.provenance.pollStartedAt >= loadStartedAt
             );
-        }
-
-        // Hop 4: the confirmation channel still sees the real, idle device.
-        const observation = discoveryOutbound.find(
-            m =>
-                m.subject === "main:rokuPlaybackObservation" &&
-                m.message.data.deviceId === FAKE_DEVICE_ID &&
-                m.message.data.provenance &&
-                m.message.data.provenance.source === "ecp-poll" &&
-                // only samples that STARTED after this LOAD
-                m.message.data.provenance.pollStartedAt >= loadStartedAt
-        );
-        const observationProvenance =
-            (observation && observation.message.data.provenance) || {};
-        check(
-            "hop 4: a raw observation is still ecp-poll IDLE with poll timestamps",
-            Boolean(
-                observation &&
-                    observation.message.data.status.playerState === "IDLE" &&
-                    Number.isFinite(observationProvenance.pollStartedAt) &&
-                    Number.isFinite(observationProvenance.pollCompletedAt) &&
-                    observationProvenance.pollStartedAt <=
-                        observationProvenance.pollCompletedAt
-            ),
-            JSON.stringify(observation && observation.message.data)
-        );
-        const latePageState = await driver.executeScript(
-            "return window.__HARNESS_RESULT__;"
-        );
-        check(
-            "the page's loadMedia settled once the media was published",
-            Boolean(latePageState && latePageState.loadSucceeded),
-            JSON.stringify({
-                loadCalled: latePageState && latePageState.loadCalled,
-                loadSucceeded: latePageState && latePageState.loadSucceeded,
-                loadError: latePageState && latePageState.loadError
-            })
-        );
-        await driver.switchTo().window(consoleTab);
-        const diagnosticMarkers = await driver.executeAsyncScript(
-            `const done = arguments[arguments.length - 1];
+            const observationProvenance =
+                (observation && observation.message.data.provenance) || {};
+            check(
+                "hop 4: a raw observation is still ecp-poll IDLE with poll timestamps",
+                Boolean(
+                    observation &&
+                        observation.message.data.status.playerState ===
+                            "IDLE" &&
+                        Number.isFinite(observationProvenance.pollStartedAt) &&
+                        Number.isFinite(
+                            observationProvenance.pollCompletedAt
+                        ) &&
+                        observationProvenance.pollStartedAt <=
+                            observationProvenance.pollCompletedAt
+                ),
+                JSON.stringify(observation && observation.message.data)
+            );
+            const latePageState = await driver.executeScript(
+                "return window.__HARNESS_RESULT__;"
+            );
+            check(
+                "the page's loadMedia settled once the media was published",
+                Boolean(latePageState && latePageState.loadSucceeded),
+                JSON.stringify({
+                    loadCalled: latePageState && latePageState.loadCalled,
+                    loadSucceeded: latePageState && latePageState.loadSucceeded,
+                    loadError: latePageState && latePageState.loadError
+                })
+            );
+            await driver.switchTo().window(consoleTab);
+            const diagnosticMarkers = await driver.executeAsyncScript(
+                `const done = arguments[arguments.length - 1];
              browser.storage.local
                 .get(${JSON.stringify([
                     "__fxHarnessDiagnosticRunId",
@@ -5421,65 +5552,67 @@ async function main() {
                 ])})
                 .then(v => done(v), err => done({ error: String(err) }));
              `
-        );
-        console.log(
-            "background diagnostics:",
-            JSON.stringify(diagnosticMarkers)
-        );
-        const markerOk = key =>
-            diagnosticMarkers &&
-            diagnosticMarkers[key] &&
-            diagnosticMarkers[key].runId === diagnosticRunId;
-        check(
-            "the background control marker is alive for this run",
-            Boolean(markerOk("__fxHarnessBgControl")),
-            JSON.stringify(diagnosticMarkers && diagnosticMarkers.__fxHarnessBgControl)
-        );
-        await driver.switchTo().window(senderTab);
-        // ---- Stage 3, case 2: media first, generation later -----------------
-        //
-        // The generation was HELD at the test copy, so the media that arrives
-        // before it must stay pending and invisible; releasing the generation then
-        // applies it. Nothing here is timing-based: the release is triggered by
-        // the harness only after the media is confirmed on the wire.
-        if (args.mediaBeforeGeneration) {
-            const mediaOnWire = discoveryInbound.find(
-                m =>
-                    m.subject === "bridge:rokuSetSessionMedia" &&
-                    afterLoad(m) &&
-                    markerOf(m.message.data.media) === HARNESS_MARKER
             );
-            const generationOnWire = discoveryInbound.find(
-                m =>
-                    m.subject === "bridge:rokuSetLoadGeneration" &&
-                    afterSessionRequest(m) &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID
+            console.log(
+                "background diagnostics:",
+                JSON.stringify(diagnosticMarkers)
             );
+            const markerOk = key =>
+                diagnosticMarkers &&
+                diagnosticMarkers[key] &&
+                diagnosticMarkers[key].runId === diagnosticRunId;
             check(
-                "stage3-2 A: the session media reached discovery first",
-                Boolean(mediaOnWire) && !generationOnWire,
-                JSON.stringify({
-                    media: Boolean(mediaOnWire),
-                    generationAlreadyThere: Boolean(generationOnWire)
-                })
+                "the background control marker is alive for this run",
+                Boolean(markerOk("__fxHarnessBgControl")),
+                JSON.stringify(
+                    diagnosticMarkers && diagnosticMarkers.__fxHarnessBgControl
+                )
             );
-            const synthesizedBeforeGeneration = discoveryOutbound.filter(
-                m =>
-                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    m.message.data.provenance &&
-                    m.message.data.provenance.source === "startup-synthetic"
-            );
-            check(
-                "stage3-2 B: nothing was synthesised while the generation was unknown",
-                synthesizedBeforeGeneration.length === 0,
-                JSON.stringify(synthesizedBeforeGeneration.map(m => m.at))
-            );
+            await driver.switchTo().window(senderTab);
+            // ---- Stage 3, case 2: media first, generation later -----------------
+            //
+            // The generation was HELD at the test copy, so the media that arrives
+            // before it must stay pending and invisible; releasing the generation then
+            // applies it. Nothing here is timing-based: the release is triggered by
+            // the harness only after the media is confirmed on the wire.
+            if (args.mediaBeforeGeneration) {
+                const mediaOnWire = discoveryInbound.find(
+                    m =>
+                        m.subject === "bridge:rokuSetSessionMedia" &&
+                        afterLoad(m) &&
+                        markerOf(m.message.data.media) === HARNESS_MARKER
+                );
+                const generationOnWire = discoveryInbound.find(
+                    m =>
+                        m.subject === "bridge:rokuSetLoadGeneration" &&
+                        afterSessionRequest(m) &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID
+                );
+                check(
+                    "stage3-2 A: the session media reached discovery first",
+                    Boolean(mediaOnWire) && !generationOnWire,
+                    JSON.stringify({
+                        media: Boolean(mediaOnWire),
+                        generationAlreadyThere: Boolean(generationOnWire)
+                    })
+                );
+                const synthesizedBeforeGeneration = discoveryOutbound.filter(
+                    m =>
+                        m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        m.message.data.provenance &&
+                        m.message.data.provenance.source === "startup-synthetic"
+                );
+                check(
+                    "stage3-2 B: nothing was synthesised while the generation was unknown",
+                    synthesizedBeforeGeneration.length === 0,
+                    JSON.stringify(synthesizedBeforeGeneration.map(m => m.at))
+                );
 
-            // explicit release: the harness says when, the background posts then
-            await driver.switchTo().window(consoleTab);
-            await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+                // explicit release: the harness says when, the background posts then
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  browser.storage.local
                     .set({
                         __fxHarnessReleaseHeldGeneration: {
@@ -5489,185 +5622,200 @@ async function main() {
                         }
                     })
                     .then(() => done(true), err => done(String(err)));`
-            );
-            await sleep(1500);
-            const released = await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+                );
+                await sleep(1500);
+                const released = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  browser.storage.local
                     .get(["__fxHarnessHeldGeneration", "__fxHarnessGenerationReleased", "__fxHarnessReleaseFailed"])
                     .then(v => done(v), err => done({ error: String(err) }));`
-            );
-            console.log("held/released generation:", JSON.stringify(released));
-            await driver.switchTo().window(senderTab);
+                );
+                console.log(
+                    "held/released generation:",
+                    JSON.stringify(released)
+                );
+                await driver.switchTo().window(senderTab);
 
-            const afterRelease = discoveryConnectionsNow.flatMap(conn =>
-                readNdjson(path.join(harnessDir, `conn-${conn.pid}-in.ndjson`))
-            );
-            const generationAfterRelease = afterRelease.find(
-                m =>
-                    m.subject === "bridge:rokuSetLoadGeneration" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    (!mediaOnWire ||
-                        m.message.data.loadGeneration ===
-                            mediaOnWire.message.data.loadGeneration)
-            );
-            // C: the point of the hold. Without this, an implementation that
-            // receives the generation and still never applies the pending media
-            // would satisfy every other case-2 assertion.
-            await sleep(2500);
-            const afterReleaseOut = discoveryConnectionsNow.flatMap(conn =>
-                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
-            );
-            const applied = afterReleaseOut.find(
-                m =>
-                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    m.message.data.status &&
-                    m.message.data.status.media &&
-                    markerOf(m.message.data.status.media) === HARNESS_MARKER &&
-                    (!generationAfterRelease ||
-                        m.at >= generationAfterRelease.at)
-            );
-            check(
-                "stage3-2 C: the pending media became visible only after its generation arrived",
-                Boolean(applied),
-                JSON.stringify({
-                    mediaStatusesAfterRelease: afterReleaseOut
-                        .filter(
-                            m =>
-                                m.subject ===
-                                "main:receiverDeviceMediaStatusUpdated"
-                        )
-                        .map(m => ({
-                            at: m.at,
-                            marker: markerOf(m.message.data.status.media),
-                            state: m.message.data.status.playerState,
-                            provenance: m.message.data.provenance.source
-                        }))
-                        .slice(-4),
-                    generationAt: generationAfterRelease && generationAfterRelease.at
-                })
-            );
-            check(
-                "stage3-2 D: the released generation arrived, after the media",
-                Boolean(
-                    generationAfterRelease &&
-                        mediaOnWire &&
-                        generationAfterRelease.at >= mediaOnWire.at
-                ),
-                JSON.stringify({
-                    generationAt: generationAfterRelease && generationAfterRelease.at,
-                    mediaAt: mediaOnWire && mediaOnWire.at,
-                    generation:
-                        generationAfterRelease &&
-                        generationAfterRelease.message.data.loadGeneration
-                })
-            );
-        }
-
-        // ---- Stage 3, case 1: generation first, media later ----------------
-        //
-        // This ordering happens naturally (the generation is pushed when the
-        // device is selected; the media arrives after the consume gate), so the
-        // case is about asserting the consequences rather than injecting a
-        // reordering: nothing may be synthesised for a generation whose media has
-        // not arrived, and the media that does arrive must bind to that same
-        // generation.
-        // Always emit this, so a missing relay shows up as the Stage 3 case
-        // failing rather than as three checks that quietly never ran (Hop 2
-        // would fail too, but a reader should not need to know that to read
-        // this case's result).
-        if (assertStage2Hops) {
-        check(
-            "stage3-1: the generation and the media were both relayed",
-            Boolean(relayedGeneration && relayedMedia),
-            JSON.stringify({
-                generation: Boolean(relayedGeneration),
-                media: Boolean(relayedMedia)
-            })
-        );
-        if (relayedGeneration && relayedMedia) {
-            check(
-                "stage3-1: the generation arrived before the media",
-                relayedGeneration.at <= relayedMedia.at,
-                JSON.stringify({
-                    generationAt: relayedGeneration.at,
-                    mediaAt: relayedMedia.at
-                })
-            );
-            const synthesizedBeforeMedia = discoveryOutbound.filter(
-                m =>
-                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    m.message.data.provenance &&
-                    m.message.data.provenance.source === "startup-synthetic" &&
-                    m.at < relayedMedia.at
-            );
-            check(
-                "stage3-1: nothing was synthesised before the media arrived",
-                synthesizedBeforeMedia.length === 0,
-                JSON.stringify(
-                    synthesizedBeforeMedia.map(m => m.at)
-                )
-            );
-            check(
-                "stage3-1: the media bound to the earlier generation",
-                relayedMedia.message.data.loadGeneration ===
-                    relayedGeneration.message.data.loadGeneration,
-                JSON.stringify({
-                    generation: relayedGeneration.message.data.loadGeneration,
-                    mediaGeneration: relayedMedia.message.data.loadGeneration
-                })
-            );
-            if (gapMode) {
-                // The queued session's own media has to carry the generation
-                // the session start established - not merely *a* generation.
+                const afterRelease = discoveryConnectionsNow.flatMap(conn =>
+                    readNdjson(
+                        path.join(harnessDir, `conn-${conn.pid}-in.ndjson`)
+                    )
+                );
+                const generationAfterRelease = afterRelease.find(
+                    m =>
+                        m.subject === "bridge:rokuSetLoadGeneration" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        (!mediaOnWire ||
+                            m.message.data.loadGeneration ===
+                                mediaOnWire.message.data.loadGeneration)
+                );
+                // C: the point of the hold. Without this, an implementation that
+                // receives the generation and still never applies the pending media
+                // would satisfy every other case-2 assertion.
+                await sleep(2500);
+                const afterReleaseOut = discoveryConnectionsNow.flatMap(conn =>
+                    readNdjson(
+                        path.join(harnessDir, `conn-${conn.pid}-out.ndjson`)
+                    )
+                );
+                const applied = afterReleaseOut.find(
+                    m =>
+                        m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        m.message.data.status &&
+                        m.message.data.status.media &&
+                        markerOf(m.message.data.status.media) ===
+                            HARNESS_MARKER &&
+                        (!generationAfterRelease ||
+                            m.at >= generationAfterRelease.at)
+                );
                 check(
-                    "fixed mode: the session media carries the generation this session start established",
-                    Boolean(gapGenerationMarker) &&
-                        Number.isFinite(gapGenerationMarker.loadGeneration) &&
-                        relayedMedia.message.data.loadGeneration ===
-                            gapGenerationMarker.loadGeneration,
+                    "stage3-2 C: the pending media became visible only after its generation arrived",
+                    Boolean(applied),
                     JSON.stringify({
-                        sessionStartGeneration:
-                            gapGenerationMarker &&
-                            gapGenerationMarker.loadGeneration,
-                        mediaGeneration:
-                            relayedMedia.message.data.loadGeneration,
-                        generationOnDiscovery:
-                            relayedGeneration.message.data.loadGeneration
+                        mediaStatusesAfterRelease: afterReleaseOut
+                            .filter(
+                                m =>
+                                    m.subject ===
+                                    "main:receiverDeviceMediaStatusUpdated"
+                            )
+                            .map(m => ({
+                                at: m.at,
+                                marker: markerOf(m.message.data.status.media),
+                                state: m.message.data.status.playerState,
+                                provenance: m.message.data.provenance.source
+                            }))
+                            .slice(-4),
+                        generationAt:
+                            generationAfterRelease && generationAfterRelease.at
+                    })
+                );
+                check(
+                    "stage3-2 D: the released generation arrived, after the media",
+                    Boolean(
+                        generationAfterRelease &&
+                            mediaOnWire &&
+                            generationAfterRelease.at >= mediaOnWire.at
+                    ),
+                    JSON.stringify({
+                        generationAt:
+                            generationAfterRelease && generationAfterRelease.at,
+                        mediaAt: mediaOnWire && mediaOnWire.at,
+                        generation:
+                            generationAfterRelease &&
+                            generationAfterRelease.message.data.loadGeneration
                     })
                 );
             }
-        }
-        }
-        // ---- Stage 3, case 3: generation advance retires the old load --------
-        if (args.generationAdvance) {
-            const generationN = relayedMedia
-                ? relayedMedia.message.data.loadGeneration
-                : undefined;
-            const statusN = discoveryOutbound.find(
-                m =>
-                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    m.message.data.status &&
-                    markerOf(m.message.data.status.media) === HARNESS_MARKER
-            );
-            check(
-                "stage3-3 A: generation N and its media are current",
-                Boolean(relayedGeneration && relayedMedia && statusN),
-                JSON.stringify({
-                    generation: generationN,
-                    media: Boolean(relayedMedia),
-                    statusVisible: Boolean(statusN)
-                })
-            );
-            const visibleAt = statusN ? statusN.at : undefined;
 
-            // B: advance through the real producer, and do NOT publish N+1 media
-            await driver.switchTo().window(consoleTab);
-            await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+            // ---- Stage 3, case 1: generation first, media later ----------------
+            //
+            // This ordering happens naturally (the generation is pushed when the
+            // device is selected; the media arrives after the consume gate), so the
+            // case is about asserting the consequences rather than injecting a
+            // reordering: nothing may be synthesised for a generation whose media has
+            // not arrived, and the media that does arrive must bind to that same
+            // generation.
+            // Always emit this, so a missing relay shows up as the Stage 3 case
+            // failing rather than as three checks that quietly never ran (Hop 2
+            // would fail too, but a reader should not need to know that to read
+            // this case's result).
+            if (assertStage2Hops) {
+                check(
+                    "stage3-1: the generation and the media were both relayed",
+                    Boolean(relayedGeneration && relayedMedia),
+                    JSON.stringify({
+                        generation: Boolean(relayedGeneration),
+                        media: Boolean(relayedMedia)
+                    })
+                );
+                if (relayedGeneration && relayedMedia) {
+                    check(
+                        "stage3-1: the generation arrived before the media",
+                        relayedGeneration.at <= relayedMedia.at,
+                        JSON.stringify({
+                            generationAt: relayedGeneration.at,
+                            mediaAt: relayedMedia.at
+                        })
+                    );
+                    const synthesizedBeforeMedia = discoveryOutbound.filter(
+                        m =>
+                            m.subject ===
+                                "main:receiverDeviceMediaStatusUpdated" &&
+                            m.message.data.deviceId === FAKE_DEVICE_ID &&
+                            m.message.data.provenance &&
+                            m.message.data.provenance.source ===
+                                "startup-synthetic" &&
+                            m.at < relayedMedia.at
+                    );
+                    check(
+                        "stage3-1: nothing was synthesised before the media arrived",
+                        synthesizedBeforeMedia.length === 0,
+                        JSON.stringify(synthesizedBeforeMedia.map(m => m.at))
+                    );
+                    check(
+                        "stage3-1: the media bound to the earlier generation",
+                        relayedMedia.message.data.loadGeneration ===
+                            relayedGeneration.message.data.loadGeneration,
+                        JSON.stringify({
+                            generation:
+                                relayedGeneration.message.data.loadGeneration,
+                            mediaGeneration:
+                                relayedMedia.message.data.loadGeneration
+                        })
+                    );
+                    if (gapMode) {
+                        // The queued session's own media has to carry the generation
+                        // the session start established - not merely *a* generation.
+                        check(
+                            "fixed mode: the session media carries the generation this session start established",
+                            Boolean(gapGenerationMarker) &&
+                                Number.isFinite(
+                                    gapGenerationMarker.loadGeneration
+                                ) &&
+                                relayedMedia.message.data.loadGeneration ===
+                                    gapGenerationMarker.loadGeneration,
+                            JSON.stringify({
+                                sessionStartGeneration:
+                                    gapGenerationMarker &&
+                                    gapGenerationMarker.loadGeneration,
+                                mediaGeneration:
+                                    relayedMedia.message.data.loadGeneration,
+                                generationOnDiscovery:
+                                    relayedGeneration.message.data
+                                        .loadGeneration
+                            })
+                        );
+                    }
+                }
+            }
+            // ---- Stage 3, case 3: generation advance retires the old load --------
+            if (args.generationAdvance) {
+                const generationN = relayedMedia
+                    ? relayedMedia.message.data.loadGeneration
+                    : undefined;
+                const statusN = discoveryOutbound.find(
+                    m =>
+                        m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        m.message.data.status &&
+                        markerOf(m.message.data.status.media) === HARNESS_MARKER
+                );
+                check(
+                    "stage3-3 A: generation N and its media are current",
+                    Boolean(relayedGeneration && relayedMedia && statusN),
+                    JSON.stringify({
+                        generation: generationN,
+                        media: Boolean(relayedMedia),
+                        statusVisible: Boolean(statusN)
+                    })
+                );
+                const visibleAt = statusN ? statusN.at : undefined;
+
+                // B: advance through the real producer, and do NOT publish N+1 media
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  browser.storage.local.set({
                     __fxHarnessAdvanceGenerationRequest: {
                         runId: ${JSON.stringify(diagnosticRunId)},
@@ -5676,95 +5824,102 @@ async function main() {
                         expectedCurrentGeneration: ${Number(generationN)}
                     }
                  }).then(() => done(true), err => done(String(err)));`
-            );
-            let advanced;
-            const advanceDeadline = Date.now() + 25000;
-            while (Date.now() < advanceDeadline) {
-                advanced = await driver.executeAsyncScript(
-                    `const done = arguments[arguments.length - 1];
+                );
+                let advanced;
+                const advanceDeadline = Date.now() + 25000;
+                while (Date.now() < advanceDeadline) {
+                    advanced = await driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
                      browser.storage.local
                         .get("__fxHarnessGenerationAdvanced")
                         .then(v => done(v.__fxHarnessGenerationAdvanced || null), err => done(null));`
+                    );
+                    if (advanced && advanced.runId === diagnosticRunId) break;
+                    await sleep(500);
+                }
+                console.log("generation advanced:", JSON.stringify(advanced));
+                await driver.switchTo().window(senderTab);
+                await sleep(2000);
+
+                const afterAdvanceIn = discoveryConnectionsNow.flatMap(conn =>
+                    readNdjson(
+                        path.join(harnessDir, `conn-${conn.pid}-in.ndjson`)
+                    )
                 );
-                if (advanced && advanced.runId === diagnosticRunId) break;
-                await sleep(500);
-            }
-            console.log("generation advanced:", JSON.stringify(advanced));
-            await driver.switchTo().window(senderTab);
-            await sleep(2000);
+                // The generation that was actually observed after the advance - never
+                // N+1 computed by the harness: if a legal extra advance happened, the
+                // assertions and the media that follows must use what is real.
+                const actualNextGeneration =
+                    advanced && Number.isFinite(advanced.newGeneration)
+                        ? advanced.newGeneration
+                        : Number(generationN) + 1;
+                const generationNPlus1 = afterAdvanceIn.find(
+                    m =>
+                        m.subject === "bridge:rokuSetLoadGeneration" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        Number(m.message.data.loadGeneration) ===
+                            Number(actualNextGeneration) &&
+                        (!advanced || m.at >= advanced.at)
+                );
+                check(
+                    "stage3-3 C1: the new generation reached discovery",
+                    Boolean(generationNPlus1),
+                    JSON.stringify({
+                        advanced,
+                        generations: afterAdvanceIn
+                            .filter(
+                                m =>
+                                    m.subject === "bridge:rokuSetLoadGeneration"
+                            )
+                            .map(m => ({
+                                at: m.at,
+                                generation: m.message.data.loadGeneration
+                            }))
+                    })
+                );
+                const mediaNPlus1Yet = afterAdvanceIn.find(
+                    m =>
+                        m.subject === "bridge:rokuSetSessionMedia" &&
+                        Number(m.message.data.loadGeneration) ===
+                            Number(actualNextGeneration)
+                );
+                check(
+                    "stage3-3 C2: no N+1 media has arrived yet (retirement is not a swap)",
+                    !mediaNPlus1Yet,
+                    JSON.stringify(mediaNPlus1Yet && mediaNPlus1Yet.at)
+                );
+                const afterAdvanceOut = discoveryConnectionsNow.flatMap(conn =>
+                    readNdjson(
+                        path.join(harnessDir, `conn-${conn.pid}-out.ndjson`)
+                    )
+                );
+                const staleAfterAdvance = afterAdvanceOut.find(
+                    m =>
+                        m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        m.message.data.status &&
+                        markerOf(m.message.data.status.media) ===
+                            HARNESS_MARKER &&
+                        generationNPlus1 &&
+                        m.at > generationNPlus1.at
+                );
+                check(
+                    "stage3-3 C3: the retired load is no longer reported",
+                    !staleAfterAdvance,
+                    JSON.stringify({
+                        visibleAt,
+                        advanceAt: generationNPlus1 && generationNPlus1.at,
+                        staleAt: staleAfterAdvance && staleAfterAdvance.at
+                    })
+                );
 
-            const afterAdvanceIn = discoveryConnectionsNow.flatMap(conn =>
-                readNdjson(path.join(harnessDir, `conn-${conn.pid}-in.ndjson`))
-            );
-            // The generation that was actually observed after the advance - never
-            // N+1 computed by the harness: if a legal extra advance happened, the
-            // assertions and the media that follows must use what is real.
-            const actualNextGeneration =
-                advanced && Number.isFinite(advanced.newGeneration)
-                    ? advanced.newGeneration
-                    : Number(generationN) + 1;
-            const generationNPlus1 = afterAdvanceIn.find(
-                m =>
-                    m.subject === "bridge:rokuSetLoadGeneration" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    Number(m.message.data.loadGeneration) ===
-                        Number(actualNextGeneration) &&
-                    (!advanced || m.at >= advanced.at)
-            );
-            check(
-                "stage3-3 C1: the new generation reached discovery",
-                Boolean(generationNPlus1),
-                JSON.stringify({
-                    advanced,
-                    generations: afterAdvanceIn
-                        .filter(
-                            m => m.subject === "bridge:rokuSetLoadGeneration"
-                        )
-                        .map(m => ({
-                            at: m.at,
-                            generation: m.message.data.loadGeneration
-                        }))
-                })
-            );
-            const mediaNPlus1Yet = afterAdvanceIn.find(
-                m =>
-                    m.subject === "bridge:rokuSetSessionMedia" &&
-                    Number(m.message.data.loadGeneration) ===
-                        Number(actualNextGeneration)
-            );
-            check(
-                "stage3-3 C2: no N+1 media has arrived yet (retirement is not a swap)",
-                !mediaNPlus1Yet,
-                JSON.stringify(mediaNPlus1Yet && mediaNPlus1Yet.at)
-            );
-            const afterAdvanceOut = discoveryConnectionsNow.flatMap(conn =>
-                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
-            );
-            const staleAfterAdvance = afterAdvanceOut.find(
-                m =>
-                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    m.message.data.status &&
-                    markerOf(m.message.data.status.media) === HARNESS_MARKER &&
-                    generationNPlus1 &&
-                    m.at > generationNPlus1.at
-            );
-            check(
-                "stage3-3 C3: the retired load is no longer reported",
-                !staleAfterAdvance,
-                JSON.stringify({
-                    visibleAt,
-                    advanceAt: generationNPlus1 && generationNPlus1.at,
-                    staleAt: staleAfterAdvance && staleAfterAdvance.at
-                })
-            );
-
-            // D: a late copy of N's media must not revive it
-            const mediaN = relayedMedia && relayedMedia.message.data.media;
-            const ownerN = relayedMedia && relayedMedia.message.data.ownerId;
-            await driver.switchTo().window(consoleTab);
-            await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+                // D: a late copy of N's media must not revive it
+                const mediaN = relayedMedia && relayedMedia.message.data.media;
+                const ownerN =
+                    relayedMedia && relayedMedia.message.data.ownerId;
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  browser.storage.local.set({
                     __fxHarnessReplayMediaRequest: {
                         runId: ${JSON.stringify(diagnosticRunId)},
@@ -5775,58 +5930,61 @@ async function main() {
                         media: ${JSON.stringify(mediaN || null)}
                     }
                  }).then(() => done(true), err => done(String(err)));`
-            );
-            let posted;
-            const postDeadline = Date.now() + 25000;
-            while (Date.now() < postDeadline) {
-                posted = await driver.executeAsyncScript(
-                    `const done = arguments[arguments.length - 1];
+                );
+                let posted;
+                const postDeadline = Date.now() + 25000;
+                while (Date.now() < postDeadline) {
+                    posted = await driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
                      browser.storage.local
                         .get(["__fxHarnessMediaPosted", "__fxHarnessMediaPostFailed"])
                         .then(v => done(v), err => done({ error: String(err) }));`
+                    );
+                    if (
+                        (posted && posted.__fxHarnessMediaPosted) ||
+                        (posted && posted.__fxHarnessMediaPostFailed)
+                    )
+                        break;
+                    await sleep(500);
+                }
+                console.log("old media replayed:", JSON.stringify(posted));
+                await driver.switchTo().window(senderTab);
+                await sleep(2500);
+                const afterReplayOut = discoveryConnectionsNow.flatMap(conn =>
+                    readNdjson(
+                        path.join(harnessDir, `conn-${conn.pid}-out.ndjson`)
+                    )
                 );
-                if (
-                    (posted && posted.__fxHarnessMediaPosted) ||
-                    (posted && posted.__fxHarnessMediaPostFailed)
-                )
-                    break;
-                await sleep(500);
-            }
-            console.log("old media replayed:", JSON.stringify(posted));
-            await driver.switchTo().window(senderTab);
-            await sleep(2500);
-            const afterReplayOut = discoveryConnectionsNow.flatMap(conn =>
-                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
-            );
-            const revived = afterReplayOut.find(
-                m =>
-                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    m.message.data.status &&
-                    markerOf(m.message.data.status.media) === HARNESS_MARKER &&
-                    posted &&
-                    posted.__fxHarnessMediaPosted &&
-                    m.at >= posted.__fxHarnessMediaPosted.at
-            );
-            check(
-                "stage3-3 D: a late copy of the retired media does not revive it",
-                !revived,
-                JSON.stringify(revived && revived.at)
-            );
+                const revived = afterReplayOut.find(
+                    m =>
+                        m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        m.message.data.status &&
+                        markerOf(m.message.data.status.media) ===
+                            HARNESS_MARKER &&
+                        posted &&
+                        posted.__fxHarnessMediaPosted &&
+                        m.at >= posted.__fxHarnessMediaPosted.at
+                );
+                check(
+                    "stage3-3 D: a late copy of the retired media does not revive it",
+                    !revived,
+                    JSON.stringify(revived && revived.at)
+                );
 
-            // E: only N+1's media may establish the new state
-            const mediaNPlus1 = mediaN
-                ? {
-                      ...mediaN,
-                      customData: {
-                          ...(mediaN.customData || {}),
-                          harnessMarker: NEXT_MARKER
+                // E: only N+1's media may establish the new state
+                const mediaNPlus1 = mediaN
+                    ? {
+                          ...mediaN,
+                          customData: {
+                              ...(mediaN.customData || {}),
+                              harnessMarker: NEXT_MARKER
+                          }
                       }
-                  }
-                : undefined;
-            await driver.switchTo().window(consoleTab);
-            await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+                    : undefined;
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  browser.storage.local.set({
                     __fxHarnessReplayMediaRequest: {
                         runId: ${JSON.stringify(diagnosticRunId)},
@@ -5837,62 +5995,64 @@ async function main() {
                         media: ${JSON.stringify(mediaNPlus1 || null)}
                     }
                  }).then(() => done(true), err => done(String(err)));`
-            );
-            await sleep(4000);
-            await driver.switchTo().window(senderTab);
-            const afterNewOut = discoveryConnectionsNow.flatMap(conn =>
-                readNdjson(path.join(harnessDir, `conn-${conn.pid}-out.ndjson`))
-            );
-            const newVisible = afterNewOut.find(
-                m =>
-                    m.subject === "main:receiverDeviceMediaStatusUpdated" &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID &&
-                    m.message.data.status &&
-                    markerOf(m.message.data.status.media) === NEXT_MARKER
-            );
-            check(
-                "stage3-3 E: the new generation's media establishes the new state",
-                Boolean(newVisible),
-                JSON.stringify(
-                    afterNewOut
-                        .filter(
-                            m =>
-                                m.subject ===
-                                "main:receiverDeviceMediaStatusUpdated"
-                        )
-                        .map(m => ({
-                            at: m.at,
-                            marker: markerOf(m.message.data.status.media)
-                        }))
-                        .slice(-4)
-                )
-            );
-        }
+                );
+                await sleep(4000);
+                await driver.switchTo().window(senderTab);
+                const afterNewOut = discoveryConnectionsNow.flatMap(conn =>
+                    readNdjson(
+                        path.join(harnessDir, `conn-${conn.pid}-out.ndjson`)
+                    )
+                );
+                const newVisible = afterNewOut.find(
+                    m =>
+                        m.subject === "main:receiverDeviceMediaStatusUpdated" &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID &&
+                        m.message.data.status &&
+                        markerOf(m.message.data.status.media) === NEXT_MARKER
+                );
+                check(
+                    "stage3-3 E: the new generation's media establishes the new state",
+                    Boolean(newVisible),
+                    JSON.stringify(
+                        afterNewOut
+                            .filter(
+                                m =>
+                                    m.subject ===
+                                    "main:receiverDeviceMediaStatusUpdated"
+                            )
+                            .map(m => ({
+                                at: m.at,
+                                marker: markerOf(m.message.data.status.media)
+                            }))
+                            .slice(-4)
+                    )
+                );
+            }
 
-        // ---- discovery reconnect: the new process must be replayed to -------
-        //
-        // The discovery host owns the polling loop and caches what the extension
-        // told it (load generations and session media). Killing it therefore
-        // proves the REPLAY path rather than the cache: a NEW pid must receive
-        // the current generation and the current session media, and neither may
-        // drift. Independent case: no owner change, no generation advance, no
-        // startup deadline.
-        if (discoveryReconnectMode) {
-            const OWNER_R = "session:harness-replay";
-            const MARKER_R = "reconnect-replay";
-            /**
-             * The current state is ESTABLISHED by this case, not inferred from an
-             * earlier wire message: `relayedMedia` is an event from the LOAD, and
-             * by the time this phase runs the session may already have cleared
-             * its media - reading that event as "what is current now" is the
-             * snapshot-as-current-state mistake this harness keeps punishing
-             * (measured: the first version of this case asserted a media replay
-             * for a registry that was already empty).
-             */
-            const readReplayMarkers = async () => {
-                await driver.switchTo().window(consoleTab);
-                return driver.executeAsyncScript(
-                    `const done = arguments[arguments.length - 1];
+            // ---- discovery reconnect: the new process must be replayed to -------
+            //
+            // The discovery host owns the polling loop and caches what the extension
+            // told it (load generations and session media). Killing it therefore
+            // proves the REPLAY path rather than the cache: a NEW pid must receive
+            // the current generation and the current session media, and neither may
+            // drift. Independent case: no owner change, no generation advance, no
+            // startup deadline.
+            if (discoveryReconnectMode) {
+                const OWNER_R = "session:harness-replay";
+                const MARKER_R = "reconnect-replay";
+                /**
+                 * The current state is ESTABLISHED by this case, not inferred from an
+                 * earlier wire message: `relayedMedia` is an event from the LOAD, and
+                 * by the time this phase runs the session may already have cleared
+                 * its media - reading that event as "what is current now" is the
+                 * snapshot-as-current-state mistake this harness keeps punishing
+                 * (measured: the first version of this case asserted a media replay
+                 * for a registry that was already empty).
+                 */
+                const readReplayMarkers = async () => {
+                    await driver.switchTo().window(consoleTab);
+                    return driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
                      browser.storage.local.get(null).then(all => {
                         const runId = all && all.__fxHarnessDiagnosticRunId;
                         const prefix = (p) =>
@@ -5912,54 +6072,54 @@ async function main() {
                             generations: prefix("__fxHarnessLoadGenerationBegan")
                         });
                      }, err => done({ error: String(err) }));`
+                    );
+                };
+                let markers = await readReplayMarkers();
+                const hookDeadline = Date.now() + 20000;
+                while (
+                    (!markers.installed ||
+                        markers.installed.runId !== diagnosticRunId) &&
+                    Date.now() < hookDeadline
+                ) {
+                    await sleep(300);
+                    markers = await readReplayMarkers();
+                }
+                const generationN = markers.inputs.length
+                    ? markers.inputs[markers.inputs.length - 1].loadGeneration
+                    : undefined;
+                const mediaTemplate =
+                    (relayedMedia && relayedMedia.message.data.media) || null;
+                check(
+                    "discovery reconnect: the injection hook is installed and the current generation is known",
+                    Boolean(
+                        markers.installed &&
+                            markers.installed.runId === diagnosticRunId
+                    ) && Number.isFinite(generationN),
+                    JSON.stringify({
+                        installed: markers.installed || null,
+                        generationN,
+                        inputs: markers.inputs.length
+                    })
                 );
-            };
-            let markers = await readReplayMarkers();
-            const hookDeadline = Date.now() + 20000;
-            while (
-                (!markers.installed ||
-                    markers.installed.runId !== diagnosticRunId) &&
-                Date.now() < hookDeadline
-            ) {
-                await sleep(300);
-                markers = await readReplayMarkers();
-            }
-            const generationN = markers.inputs.length
-                ? markers.inputs[markers.inputs.length - 1].loadGeneration
-                : undefined;
-            const mediaTemplate =
-                (relayedMedia && relayedMedia.message.data.media) || null;
-            check(
-                "discovery reconnect: the injection hook is installed and the current generation is known",
-                Boolean(
-                    markers.installed &&
-                        markers.installed.runId === diagnosticRunId
-                ) && Number.isFinite(generationN),
-                JSON.stringify({
-                    installed: markers.installed || null,
-                    generationN,
-                    inputs: markers.inputs.length
-                })
-            );
 
-            // Establish the current session media for the CURRENT generation.
-            const mediaR = mediaTemplate
-                ? {
-                      ...mediaTemplate,
-                      customData: {
-                          ...(mediaTemplate.customData || {}),
-                          harnessMarker: MARKER_R
-                      },
-                      metadata: {
-                          ...(mediaTemplate.metadata || {}),
-                          title: "reconnect replay media"
+                // Establish the current session media for the CURRENT generation.
+                const mediaR = mediaTemplate
+                    ? {
+                          ...mediaTemplate,
+                          customData: {
+                              ...(mediaTemplate.customData || {}),
+                              harnessMarker: MARKER_R
+                          },
+                          metadata: {
+                              ...(mediaTemplate.metadata || {}),
+                              title: "reconnect replay media"
+                          }
                       }
-                  }
-                : null;
-            const establishAt = Date.now();
-            await driver.switchTo().window(consoleTab);
-            await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+                    : null;
+                const establishAt = Date.now();
+                await driver.switchTo().window(consoleTab);
+                await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  browser.storage.local.set({
                     __fxHarnessOwnerClearRequest: {
                         runId: ${JSON.stringify(diagnosticRunId)},
@@ -5969,213 +6129,227 @@ async function main() {
                         media: ${JSON.stringify(mediaR)}
                     }
                  }).then(() => done(true), err => done(String(err)));`
-            );
-            let established;
-            const establishDeadline = Date.now() + 20000;
-            for (;;) {
-                const m = await readReplayMarkers();
-                established = m.inputs.find(
-                    i => i.ownerId === OWNER_R && i.at >= establishAt
                 );
-                if (established || Date.now() > establishDeadline) break;
-                await sleep(300);
-            }
-            check(
-                "discovery reconnect: the current session media was established for generation N (owner and marker known by construction)",
-                Boolean(established) &&
-                    established.marker === MARKER_R &&
-                    established.loadGeneration === generationN,
-                JSON.stringify(established || null)
-            );
-            // Let the (pre-kill) discovery host receive it, so the KILLED process
-            // is the one that held it - otherwise the replay could be satisfied
-            // by the process that never had it.
-            await sleep(2500);
-            const readReplayConnections = () =>
-                readNdjson(path.join(harnessDir, "spawns.ndjson"))
-                    .filter(entry => entry.event === undefined)
-                    .map(entry => ({
-                        pid: entry.pid,
-                        inbound: readNdjson(
-                            path.join(harnessDir, `conn-${entry.pid}-in.ndjson`)
-                        )
-                    }))
-                    .filter(c =>
-                        c.inbound.some(m => m.subject === "bridge:startDiscovery")
+                let established;
+                const establishDeadline = Date.now() + 20000;
+                for (;;) {
+                    const m = await readReplayMarkers();
+                    established = m.inputs.find(
+                        i => i.ownerId === OWNER_R && i.at >= establishAt
                     );
-            const holder = readReplayConnections().find(c =>
-                c.inbound.some(
-                    m =>
-                        m.subject === "bridge:rokuSetSessionMedia" &&
-                        m.message.data.ownerId === OWNER_R
-                )
-            );
-            const beforeKillConnections = readReplayConnections().map(c => ({
-                pid: c.pid,
-                subjects: [...new Set(c.inbound.map(m => m.subject))]
-            }));
-            console.log(
-                "discovery reconnect: current state before the kill:",
-                JSON.stringify({
-                    generation: generationN,
-                    owner: OWNER_R,
-                    marker: MARKER_R,
-                    holderPid: holder && holder.pid,
-                    connections: beforeKillConnections
-                })
-            );
-            check(
-                "discovery reconnect: the discovery host that HOLDS the current session media is identified before the kill",
-                Boolean(holder) &&
-                    holder.inbound.some(
+                    if (established || Date.now() > establishDeadline) break;
+                    await sleep(300);
+                }
+                check(
+                    "discovery reconnect: the current session media was established for generation N (owner and marker known by construction)",
+                    Boolean(established) &&
+                        established.marker === MARKER_R &&
+                        established.loadGeneration === generationN,
+                    JSON.stringify(established || null)
+                );
+                // Let the (pre-kill) discovery host receive it, so the KILLED process
+                // is the one that held it - otherwise the replay could be satisfied
+                // by the process that never had it.
+                await sleep(2500);
+                const readReplayConnections = () =>
+                    readNdjson(path.join(harnessDir, "spawns.ndjson"))
+                        .filter(entry => entry.event === undefined)
+                        .map(entry => ({
+                            pid: entry.pid,
+                            inbound: readNdjson(
+                                path.join(
+                                    harnessDir,
+                                    `conn-${entry.pid}-in.ndjson`
+                                )
+                            )
+                        }))
+                        .filter(c =>
+                            c.inbound.some(
+                                m => m.subject === "bridge:startDiscovery"
+                            )
+                        );
+                const holder = readReplayConnections().find(c =>
+                    c.inbound.some(
                         m =>
                             m.subject === "bridge:rokuSetSessionMedia" &&
-                            m.message.data.ownerId === OWNER_R &&
-                            m.message.data.loadGeneration === generationN
-                    ),
-                JSON.stringify(beforeKillConnections)
-            );
-            const victim = holder;
-            const killAt = Date.now();
-            let killed = false;
-            try {
-                if (victim) process.kill(victim.pid, "SIGKILL");
-                killed = Boolean(victim);
-            } catch (err) {
-                killed = false;
-            }
-            check(
-                "discovery reconnect: the current discovery host was killed (its caches die with it)",
-                killed,
-                JSON.stringify({
-                    pid: victim && victim.pid,
-                    beforeKillConnections
-                })
-            );
-
-            let revived;
-            const reviveDeadline = Date.now() + 60000;
-            for (;;) {
-                revived = readReplayConnections().find(
-                    c =>
-                        c.pid !== (victim && victim.pid) &&
-                        c.inbound.some(
-                            m =>
-                                m.subject === "bridge:startDiscovery" &&
-                                m.at >= killAt
-                        )
+                            m.message.data.ownerId === OWNER_R
+                    )
                 );
-                if (revived || Date.now() > reviveDeadline) break;
-                await sleep(1000);
-            }
-            const revivedIn = revived ? revived.inbound : [];
-            const replayedGeneration = revivedIn.find(
-                m =>
-                    m.subject === "bridge:rokuSetLoadGeneration" &&
-                    m.at >= killAt &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID
-            );
-            const replayedMedia = revivedIn.find(
-                m =>
-                    m.subject === "bridge:rokuSetSessionMedia" &&
-                    m.at >= killAt &&
-                    m.message.data.deviceId === FAKE_DEVICE_ID
-            );
-            const reconnectFacts = {
-                victim: victim && victim.pid,
-                revivedPid: revived && revived.pid,
-                revivedSubjects: [...new Set(revivedIn.map(m => m.subject))],
-                replayedGeneration: replayedGeneration
-                    ? {
-                          generation: replayedGeneration.message.data.loadGeneration,
-                          at: replayedGeneration.at
-                      }
-                    : null,
-                replayedMedia: replayedMedia
-                    ? {
-                          ownerId: replayedMedia.message.data.ownerId,
-                          generation:
-                              replayedMedia.message.data.loadGeneration,
-                          marker: markerOf(replayedMedia.message.data.media),
-                          at: replayedMedia.at
-                      }
-                    : null
-            };
-            console.log(
-                "discovery reconnect: what the NEW process was told:",
-                JSON.stringify(reconnectFacts)
-            );
-            check(
-                "discovery reconnect: a NEW discovery host pid connected AND ran startDiscovery after the kill",
-                Boolean(revived) &&
-                    revived.pid !== (victim && victim.pid),
-                JSON.stringify(reconnectFacts)
-            );
-            check(
-                "discovery reconnect: the new process was replayed the CURRENT load generation",
-                Boolean(replayedGeneration) &&
-                    replayedGeneration.message.data.loadGeneration ===
-                        generationN,
-                JSON.stringify(reconnectFacts)
-            );
-            const replayMarkers = (await readReplayMarkers()).replays.filter(
-                r => r.at >= killAt
-            );
-            console.log(
-                "discovery reconnect: what the replay loop itself saw:",
-                JSON.stringify(replayMarkers)
-            );
-            const replayLoop = replayMarkers[replayMarkers.length - 1];
-            check(
-                "discovery reconnect: the replay loop ran for the replacement process and still knew this device's load identity",
-                Boolean(replayLoop) &&
-                    replayLoop.hasBridgePort === true &&
-                    (replayLoop.identities || []).some(
-                        i =>
-                            i.deviceId === FAKE_DEVICE_ID &&
-                            i.loadGeneration === generationN
-                    ),
-                JSON.stringify(replayMarkers.slice(-2))
-            );
-            if (expectDiscoveryReplayRecovered) {
+                const beforeKillConnections = readReplayConnections().map(
+                    c => ({
+                        pid: c.pid,
+                        subjects: [...new Set(c.inbound.map(m => m.subject))]
+                    })
+                );
+                console.log(
+                    "discovery reconnect: current state before the kill:",
+                    JSON.stringify({
+                        generation: generationN,
+                        owner: OWNER_R,
+                        marker: MARKER_R,
+                        holderPid: holder && holder.pid,
+                        connections: beforeKillConnections
+                    })
+                );
                 check(
-                    "discovery-reconnect-fixed: the replay loop still HELD the current session-media mirror (so there was something to replay)",
+                    "discovery reconnect: the discovery host that HOLDS the current session media is identified before the kill",
+                    Boolean(holder) &&
+                        holder.inbound.some(
+                            m =>
+                                m.subject === "bridge:rokuSetSessionMedia" &&
+                                m.message.data.ownerId === OWNER_R &&
+                                m.message.data.loadGeneration === generationN
+                        ),
+                    JSON.stringify(beforeKillConnections)
+                );
+                const victim = holder;
+                const killAt = Date.now();
+                let killed = false;
+                try {
+                    if (victim) process.kill(victim.pid, "SIGKILL");
+                    killed = Boolean(victim);
+                } catch (err) {
+                    killed = false;
+                }
+                check(
+                    "discovery reconnect: the current discovery host was killed (its caches die with it)",
+                    killed,
+                    JSON.stringify({
+                        pid: victim && victim.pid,
+                        beforeKillConnections
+                    })
+                );
+
+                let revived;
+                const reviveDeadline = Date.now() + 60000;
+                for (;;) {
+                    revived = readReplayConnections().find(
+                        c =>
+                            c.pid !== (victim && victim.pid) &&
+                            c.inbound.some(
+                                m =>
+                                    m.subject === "bridge:startDiscovery" &&
+                                    m.at >= killAt
+                            )
+                    );
+                    if (revived || Date.now() > reviveDeadline) break;
+                    await sleep(1000);
+                }
+                const revivedIn = revived ? revived.inbound : [];
+                const replayedGeneration = revivedIn.find(
+                    m =>
+                        m.subject === "bridge:rokuSetLoadGeneration" &&
+                        m.at >= killAt &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID
+                );
+                const replayedMedia = revivedIn.find(
+                    m =>
+                        m.subject === "bridge:rokuSetSessionMedia" &&
+                        m.at >= killAt &&
+                        m.message.data.deviceId === FAKE_DEVICE_ID
+                );
+                const reconnectFacts = {
+                    victim: victim && victim.pid,
+                    revivedPid: revived && revived.pid,
+                    revivedSubjects: [
+                        ...new Set(revivedIn.map(m => m.subject))
+                    ],
+                    replayedGeneration: replayedGeneration
+                        ? {
+                              generation:
+                                  replayedGeneration.message.data
+                                      .loadGeneration,
+                              at: replayedGeneration.at
+                          }
+                        : null,
+                    replayedMedia: replayedMedia
+                        ? {
+                              ownerId: replayedMedia.message.data.ownerId,
+                              generation:
+                                  replayedMedia.message.data.loadGeneration,
+                              marker: markerOf(
+                                  replayedMedia.message.data.media
+                              ),
+                              at: replayedMedia.at
+                          }
+                        : null
+                };
+                console.log(
+                    "discovery reconnect: what the NEW process was told:",
+                    JSON.stringify(reconnectFacts)
+                );
+                check(
+                    "discovery reconnect: a NEW discovery host pid connected AND ran startDiscovery after the kill",
+                    Boolean(revived) && revived.pid !== (victim && victim.pid),
+                    JSON.stringify(reconnectFacts)
+                );
+                check(
+                    "discovery reconnect: the new process was replayed the CURRENT load generation",
+                    Boolean(replayedGeneration) &&
+                        replayedGeneration.message.data.loadGeneration ===
+                            generationN,
+                    JSON.stringify(reconnectFacts)
+                );
+                const replayMarkers = (
+                    await readReplayMarkers()
+                ).replays.filter(r => r.at >= killAt);
+                console.log(
+                    "discovery reconnect: what the replay loop itself saw:",
+                    JSON.stringify(replayMarkers)
+                );
+                const replayLoop = replayMarkers[replayMarkers.length - 1];
+                check(
+                    "discovery reconnect: the replay loop ran for the replacement process and still knew this device's load identity",
                     Boolean(replayLoop) &&
-                        replayLoop.mediaEntryCount === 1 &&
-                        (replayLoop.mediaEntries || []).some(
-                            e =>
-                                e.ownerId === OWNER_R && e.marker === MARKER_R
+                        replayLoop.hasBridgePort === true &&
+                        (replayLoop.identities || []).some(
+                            i =>
+                                i.deviceId === FAKE_DEVICE_ID &&
+                                i.loadGeneration === generationN
                         ),
                     JSON.stringify(replayMarkers.slice(-2))
                 );
-                check(
-                    "discovery-reconnect-fixed: the new process was replayed the CURRENT session media, with no owner, generation or marker drift",
-                    Boolean(replayedMedia) &&
-                        replayedMedia.message.data.ownerId === OWNER_R &&
-                        replayedMedia.message.data.loadGeneration ===
-                            generationN &&
-                        markerOf(replayedMedia.message.data.media) === MARKER_R,
-                    JSON.stringify(reconnectFacts)
-                );
-            } else {
-                check(
-                    "discovery-reconnect-gap: the discovery replacement recovered the load generation but lost the current session-media mirror",
-                    Boolean(replayedGeneration) &&
-                        replayedGeneration.message.data.loadGeneration ===
-                            generationN &&
-                        !replayedMedia &&
+                if (expectDiscoveryReplayRecovered) {
+                    check(
+                        "discovery-reconnect-fixed: the replay loop still HELD the current session-media mirror (so there was something to replay)",
                         Boolean(replayLoop) &&
-                        replayLoop.mediaEntryCount === 0,
-                    JSON.stringify({
-                        reconnectFacts,
-                        replayMarkers: replayMarkers.slice(-2)
-                    })
-                );
-            }
-            // Drift check on the extension's OWN state: the replay must be a copy
-            // of the current identity, not a new one.
-            const identityAfter = await driver.executeAsyncScript(
-                `const done = arguments[arguments.length - 1];
+                            replayLoop.mediaEntryCount === 1 &&
+                            (replayLoop.mediaEntries || []).some(
+                                e =>
+                                    e.ownerId === OWNER_R &&
+                                    e.marker === MARKER_R
+                            ),
+                        JSON.stringify(replayMarkers.slice(-2))
+                    );
+                    check(
+                        "discovery-reconnect-fixed: the new process was replayed the CURRENT session media, with no owner, generation or marker drift",
+                        Boolean(replayedMedia) &&
+                            replayedMedia.message.data.ownerId === OWNER_R &&
+                            replayedMedia.message.data.loadGeneration ===
+                                generationN &&
+                            markerOf(replayedMedia.message.data.media) ===
+                                MARKER_R,
+                        JSON.stringify(reconnectFacts)
+                    );
+                } else {
+                    check(
+                        "discovery-reconnect-gap: the discovery replacement recovered the load generation but lost the current session-media mirror",
+                        Boolean(replayedGeneration) &&
+                            replayedGeneration.message.data.loadGeneration ===
+                                generationN &&
+                            !replayedMedia &&
+                            Boolean(replayLoop) &&
+                            replayLoop.mediaEntryCount === 0,
+                        JSON.stringify({
+                            reconnectFacts,
+                            replayMarkers: replayMarkers.slice(-2)
+                        })
+                    );
+                }
+                // Drift check on the extension's OWN state: the replay must be a copy
+                // of the current identity, not a new one.
+                const identityAfter = await driver.executeAsyncScript(
+                    `const done = arguments[arguments.length - 1];
                  browser.storage.local.get(null).then(all => {
                     const runId = all && all.__fxHarnessDiagnosticRunId;
                     const inputs = Object.keys(all || {})
@@ -6192,55 +6366,56 @@ async function main() {
                         ).length
                     });
                  }, err => done({ error: String(err) }));`
-            );
-            const lastInput = identityAfter && identityAfter.last;
-            // The replay must be a COPY of the retained mirror: if a producer (or
-            // the harness) had re-published media through the real setter, the
-            // wire evidence would look identical while the mechanism would not be
-            // the one under test.
-            const inputsAfterKill = identityAfter
-                ? identityAfter.inputsAfterKill
-                : undefined;
-            check(
-                "discovery reconnect: the replay did NOT re-enter setRokuSessionMedia (no producer re-published the media)",
-                Number.isFinite(inputsAfterKill) && inputsAfterKill === 0,
-                JSON.stringify({
-                    inputsAfterKill,
-                    lastInput: lastInput || null
-                })
-            );
-            check(
-                "discovery reconnect: the extension-side identity is unchanged by the replay (same owner, marker and generation)",
-                Boolean(lastInput) &&
-                    lastInput.ownerId === OWNER_R &&
-                    lastInput.marker === MARKER_R &&
-                    lastInput.loadGeneration === generationN,
-                JSON.stringify({ lastInput: lastInput || null })
-            );
-        }
+                );
+                const lastInput = identityAfter && identityAfter.last;
+                // The replay must be a COPY of the retained mirror: if a producer (or
+                // the harness) had re-published media through the real setter, the
+                // wire evidence would look identical while the mechanism would not be
+                // the one under test.
+                const inputsAfterKill = identityAfter
+                    ? identityAfter.inputsAfterKill
+                    : undefined;
+                check(
+                    "discovery reconnect: the replay did NOT re-enter setRokuSessionMedia (no producer re-published the media)",
+                    Number.isFinite(inputsAfterKill) && inputsAfterKill === 0,
+                    JSON.stringify({
+                        inputsAfterKill,
+                        lastInput: lastInput || null
+                    })
+                );
+                check(
+                    "discovery reconnect: the extension-side identity is unchanged by the replay (same owner, marker and generation)",
+                    Boolean(lastInput) &&
+                        lastInput.ownerId === OWNER_R &&
+                        lastInput.marker === MARKER_R &&
+                        lastInput.loadGeneration === generationN,
+                    JSON.stringify({ lastInput: lastInput || null })
+                );
+            }
 
-        // ---- owner-aware clear: who may remove the current session media ----
-        //
-        // Injected at `deviceManager.setRokuSessionMedia()`, which is where the
-        // whole owner-aware decision lives: the `main:rokuSessionMedia` handler
-        // only forwards deviceId/sessionId/media. Downstream is REAL -
-        // `syncRokuSessionMediaToBridge` -> discovery host -> RokuSessionMediaSync
-        // -> `main:receiverDeviceMediaStatusUpdated`. What this case does NOT
-        // cover is that handler's field forwarding, and it deliberately does not
-        // advance the generation, reconnect, or touch any startup deadline.
-        if (args.ownerAwareClear) {
-            const OWNER_A = "session:harness-A";
-            const OWNER_B = "session:harness-B";
-            const MARKER_A = "owner-clear-A";
-            const MARKER_B = "owner-clear-B";
-            const generationN =
-                relayedMedia && relayedMedia.message.data.loadGeneration;
-            const mediaTemplate = relayedMedia && relayedMedia.message.data.media;
+            // ---- owner-aware clear: who may remove the current session media ----
+            //
+            // Injected at `deviceManager.setRokuSessionMedia()`, which is where the
+            // whole owner-aware decision lives: the `main:rokuSessionMedia` handler
+            // only forwards deviceId/sessionId/media. Downstream is REAL -
+            // `syncRokuSessionMediaToBridge` -> discovery host -> RokuSessionMediaSync
+            // -> `main:receiverDeviceMediaStatusUpdated`. What this case does NOT
+            // cover is that handler's field forwarding, and it deliberately does not
+            // advance the generation, reconnect, or touch any startup deadline.
+            if (args.ownerAwareClear) {
+                const OWNER_A = "session:harness-A";
+                const OWNER_B = "session:harness-B";
+                const MARKER_A = "owner-clear-A";
+                const MARKER_B = "owner-clear-B";
+                const generationN =
+                    relayedMedia && relayedMedia.message.data.loadGeneration;
+                const mediaTemplate =
+                    relayedMedia && relayedMedia.message.data.media;
 
-            const readOwnerMarkers = async () => {
-                await driver.switchTo().window(consoleTab);
-                return driver.executeAsyncScript(
-                    `const done = arguments[arguments.length - 1];
+                const readOwnerMarkers = async () => {
+                    await driver.switchTo().window(consoleTab);
+                    return driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
                      browser.storage.local.get(null).then(all => {
                         const runId = all && all.__fxHarnessDiagnosticRunId;
                         const prefix = (p) =>
@@ -6259,61 +6434,70 @@ async function main() {
                             generationSet: prefix("__fxHarnessLoadGenerationBegan")
                         });
                      }, err => done({ error: String(err) }));`
-                );
-            };
-            const statusSamplesSince = at =>
-                discoveryConnectionsNow
-                    .flatMap(conn =>
-                        readNdjson(
-                            path.join(harnessDir, `conn-${conn.pid}-out.ndjson`)
+                    );
+                };
+                const statusSamplesSince = at =>
+                    discoveryConnectionsNow
+                        .flatMap(conn =>
+                            readNdjson(
+                                path.join(
+                                    harnessDir,
+                                    `conn-${conn.pid}-out.ndjson`
+                                )
+                            )
                         )
-                    )
-                    .filter(
-                        m =>
-                            m.subject ===
-                                "main:receiverDeviceMediaStatusUpdated" &&
-                            m.message.data.deviceId === FAKE_DEVICE_ID &&
-                            m.at >= at
-                    )
-                    .map(m => ({
-                        at: m.at,
-                        marker: markerOf(m.message.data.status.media),
-                        owner: m.message.data.status.media
-                            ? m.message.data.status.media.sessionId || null
-                            : null
-                    }));
-            const refreshDevice = async label => {
-                // A real refresh that cannot change the session-media OWNER: the
-                // device is re-driven over ECP, which makes the discovery host
-                // re-poll and publish a fresh status. Using only a pre-clear DOM
-                // read would let "nothing happened" look like "B is still here".
-                await post("/state", {
-                    playerState: "play",
-                    position: 35,
-                    duration: 600,
-                    title: `harness-owner-clear-${label}`
-                });
-                await sleep(3000);
-            };
-            const requestOwnerWrite = async (requestId, ownerId, marker) => {
-                const media = marker
-                    ? {
-                          ...(mediaTemplate || {}),
-                          customData: {
-                              ...((mediaTemplate && mediaTemplate.customData) ||
-                                  {}),
-                              harnessMarker: marker
-                          },
-                          metadata: {
-                              ...((mediaTemplate && mediaTemplate.metadata) ||
-                                  {}),
-                              title: `session media ${marker}`
+                        .filter(
+                            m =>
+                                m.subject ===
+                                    "main:receiverDeviceMediaStatusUpdated" &&
+                                m.message.data.deviceId === FAKE_DEVICE_ID &&
+                                m.at >= at
+                        )
+                        .map(m => ({
+                            at: m.at,
+                            marker: markerOf(m.message.data.status.media),
+                            owner: m.message.data.status.media
+                                ? m.message.data.status.media.sessionId || null
+                                : null
+                        }));
+                const refreshDevice = async label => {
+                    // A real refresh that cannot change the session-media OWNER: the
+                    // device is re-driven over ECP, which makes the discovery host
+                    // re-poll and publish a fresh status. Using only a pre-clear DOM
+                    // read would let "nothing happened" look like "B is still here".
+                    await post("/state", {
+                        playerState: "play",
+                        position: 35,
+                        duration: 600,
+                        title: `harness-owner-clear-${label}`
+                    });
+                    await sleep(3000);
+                };
+                const requestOwnerWrite = async (
+                    requestId,
+                    ownerId,
+                    marker
+                ) => {
+                    const media = marker
+                        ? {
+                              ...(mediaTemplate || {}),
+                              customData: {
+                                  ...((mediaTemplate &&
+                                      mediaTemplate.customData) ||
+                                      {}),
+                                  harnessMarker: marker
+                              },
+                              metadata: {
+                                  ...((mediaTemplate &&
+                                      mediaTemplate.metadata) ||
+                                      {}),
+                                  title: `session media ${marker}`
+                              }
                           }
-                      }
-                    : null;
-                await driver.switchTo().window(consoleTab);
-                await driver.executeAsyncScript(
-                    `const done = arguments[arguments.length - 1];
+                        : null;
+                    await driver.switchTo().window(consoleTab);
+                    await driver.executeAsyncScript(
+                        `const done = arguments[arguments.length - 1];
                      browser.storage.local.set({
                         __fxHarnessOwnerClearRequest: {
                             runId: ${JSON.stringify(diagnosticRunId)},
@@ -6323,269 +6507,287 @@ async function main() {
                             media: ${JSON.stringify(media)}
                         }
                      }).then(() => done(true), err => done(String(err)));`
-                );
-                return Date.now();
-            };
-            const waitForConsumed = async requestId => {
-                const deadline = Date.now() + 20000;
-                for (;;) {
-                    const markers = await readOwnerMarkers();
-                    const done = markers.consumed.find(
-                        c => c.requestId === requestId
                     );
-                    if (done || Date.now() > deadline) return markers;
-                    await sleep(300);
-                }
-            };
-            const countOutcomes = (markers, outcome, at) =>
-                markers.outcomes.filter(
-                    o => o.outcome === outcome && (!at || o.at >= at)
-                );
-            const countMirrors = (markers, isClear, at) =>
-                markers.mirrors.filter(
-                    m => m.isClear === isClear && (!at || m.at >= at)
-                );
-            const wireClearsSince = at =>
-                discoveryConnectionsNow
-                    .flatMap(conn =>
-                        readNdjson(
-                            path.join(harnessDir, `conn-${conn.pid}-in.ndjson`)
+                    return Date.now();
+                };
+                const waitForConsumed = async requestId => {
+                    const deadline = Date.now() + 20000;
+                    for (;;) {
+                        const markers = await readOwnerMarkers();
+                        const done = markers.consumed.find(
+                            c => c.requestId === requestId
+                        );
+                        if (done || Date.now() > deadline) return markers;
+                        await sleep(300);
+                    }
+                };
+                const countOutcomes = (markers, outcome, at) =>
+                    markers.outcomes.filter(
+                        o => o.outcome === outcome && (!at || o.at >= at)
+                    );
+                const countMirrors = (markers, isClear, at) =>
+                    markers.mirrors.filter(
+                        m => m.isClear === isClear && (!at || m.at >= at)
+                    );
+                const wireClearsSince = at =>
+                    discoveryConnectionsNow
+                        .flatMap(conn =>
+                            readNdjson(
+                                path.join(
+                                    harnessDir,
+                                    `conn-${conn.pid}-in.ndjson`
+                                )
+                            )
                         )
-                    )
-                    .filter(
-                        m =>
-                            m.subject === "bridge:rokuSetSessionMedia" &&
-                            m.at >= at &&
-                            m.message &&
-                            m.message.data &&
-                            m.message.data.media === null &&
-                            m.message.data.deviceId === FAKE_DEVICE_ID
-                    );
+                        .filter(
+                            m =>
+                                m.subject === "bridge:rokuSetSessionMedia" &&
+                                m.at >= at &&
+                                m.message &&
+                                m.message.data &&
+                                m.message.data.media === null &&
+                                m.message.data.deviceId === FAKE_DEVICE_ID
+                        );
 
-            let markers = await readOwnerMarkers();
-            const hookDeadline = Date.now() + 20000;
-            while (
-                (!markers.installed || markers.installed.runId !== diagnosticRunId) &&
-                Date.now() < hookDeadline
-            ) {
-                await sleep(300);
-                markers = await readOwnerMarkers();
-            }
-            check(
-                "owner-aware clear: the injection hook is installed (a load ran, so setRokuSessionMedia was reached)",
-                Boolean(
-                    markers.installed && markers.installed.runId === diagnosticRunId
-                ),
-                JSON.stringify(markers.installed || null)
-            );
-            check(
-                "owner-aware clear: the case runs inside ONE load generation (the media template and its generation exist)",
-                Boolean(mediaTemplate) && Number.isFinite(generationN),
-                JSON.stringify({
-                    hasMedia: Boolean(mediaTemplate),
-                    generation: generationN
-                })
-            );
+                let markers = await readOwnerMarkers();
+                const hookDeadline = Date.now() + 20000;
+                while (
+                    (!markers.installed ||
+                        markers.installed.runId !== diagnosticRunId) &&
+                    Date.now() < hookDeadline
+                ) {
+                    await sleep(300);
+                    markers = await readOwnerMarkers();
+                }
+                check(
+                    "owner-aware clear: the injection hook is installed (a load ran, so setRokuSessionMedia was reached)",
+                    Boolean(
+                        markers.installed &&
+                            markers.installed.runId === diagnosticRunId
+                    ),
+                    JSON.stringify(markers.installed || null)
+                );
+                check(
+                    "owner-aware clear: the case runs inside ONE load generation (the media template and its generation exist)",
+                    Boolean(mediaTemplate) && Number.isFinite(generationN),
+                    JSON.stringify({
+                        hasMedia: Boolean(mediaTemplate),
+                        generation: generationN
+                    })
+                );
 
-            // --- A: owner A writes ------------------------------------------
-            const setAAt = await requestOwnerWrite("oc-set-A", OWNER_A, MARKER_A);
-            markers = await waitForConsumed("oc-set-A");
-            await refreshDevice("A");
-            const samplesA = statusSamplesSince(setAAt);
-            const inputA = markers.inputs.filter(
-                i => i.ownerId === OWNER_A && i.at >= setAAt
-            );
-            const mirrorA = countMirrors(markers, false, setAAt);
-            console.log(
-                "owner-aware clear A:",
-                JSON.stringify({
-                    inputs: inputA.map(i => ({
+                // --- A: owner A writes ------------------------------------------
+                const setAAt = await requestOwnerWrite(
+                    "oc-set-A",
+                    OWNER_A,
+                    MARKER_A
+                );
+                markers = await waitForConsumed("oc-set-A");
+                await refreshDevice("A");
+                const samplesA = statusSamplesSince(setAAt);
+                const inputA = markers.inputs.filter(
+                    i => i.ownerId === OWNER_A && i.at >= setAAt
+                );
+                const mirrorA = countMirrors(markers, false, setAAt);
+                console.log(
+                    "owner-aware clear A:",
+                    JSON.stringify({
+                        inputs: inputA.map(i => ({
+                            ownerId: i.ownerId,
+                            marker: i.marker,
+                            generation: i.loadGeneration
+                        })),
+                        mirrorSets: mirrorA.length,
+                        statusMarkers: samplesA.map(s => s.marker)
+                    })
+                );
+                check(
+                    "owner-aware clear A: owner A's write was adopted locally and mirrored to discovery once, under generation N",
+                    inputA.length === 1 &&
+                        inputA[0].marker === MARKER_A &&
+                        inputA[0].loadGeneration === generationN &&
+                        mirrorA.length === 1 &&
+                        mirrorA[0].ownerId === OWNER_A &&
+                        mirrorA[0].marker === MARKER_A,
+                    JSON.stringify({ inputA, mirrorA })
+                );
+                check(
+                    "owner-aware clear A: A's media is visible downstream (a fresh discovery status carries it)",
+                    samplesA.some(s => s.marker === MARKER_A),
+                    JSON.stringify(samplesA.slice(-4))
+                );
+
+                // --- B: owner B replaces A --------------------------------------
+                const setBAt = await requestOwnerWrite(
+                    "oc-set-B",
+                    OWNER_B,
+                    MARKER_B
+                );
+                markers = await waitForConsumed("oc-set-B");
+                await refreshDevice("B");
+                const samplesB = statusSamplesSince(setBAt);
+                const mirrorB = countMirrors(markers, false, setBAt);
+                const bVisibleAt =
+                    (samplesB.find(s => s.marker === MARKER_B) || {}).at ||
+                    setBAt;
+                console.log(
+                    "owner-aware clear B:",
+                    JSON.stringify({
+                        mirrorSets: mirrorB.length,
+                        statusMarkers: samplesB.map(s => s.marker),
+                        bVisibleAt
+                    })
+                );
+                check(
+                    "owner-aware clear B: owner B's write replaced A and was mirrored once",
+                    mirrorB.length === 1 &&
+                        mirrorB[0].ownerId === OWNER_B &&
+                        mirrorB[0].marker === MARKER_B,
+                    JSON.stringify(mirrorB)
+                );
+                check(
+                    "owner-aware clear B: B's media is visible downstream (the new baseline for the stale clear)",
+                    samplesB.some(s => s.marker === MARKER_B),
+                    JSON.stringify(samplesB.slice(-4))
+                );
+
+                // --- C: owner A's LATE clear ------------------------------------
+                const staleClearAt = await requestOwnerWrite(
+                    "oc-clear-A",
+                    OWNER_A,
+                    null
+                );
+                markers = await waitForConsumed("oc-clear-A");
+                await refreshDevice("stale");
+                const ignored = countOutcomes(markers, "ignored", staleClearAt);
+                const appliedAfterStale = countOutcomes(
+                    markers,
+                    "applied",
+                    staleClearAt
+                );
+                const mirrorClearsAfterStale = countMirrors(
+                    markers,
+                    true,
+                    staleClearAt
+                );
+                const wireClearsAfterStale = wireClearsSince(staleClearAt);
+                const samplesStale = statusSamplesSince(staleClearAt);
+                const staleFacts = {
+                    ignored: ignored.map(i => ({
                         ownerId: i.ownerId,
-                        marker: i.marker,
+                        currentOwnerId: i.currentOwnerId,
                         generation: i.loadGeneration
                     })),
-                    mirrorSets: mirrorA.length,
-                    statusMarkers: samplesA.map(s => s.marker)
-                })
-            );
-            check(
-                "owner-aware clear A: owner A's write was adopted locally and mirrored to discovery once, under generation N",
-                inputA.length === 1 &&
-                    inputA[0].marker === MARKER_A &&
-                    inputA[0].loadGeneration === generationN &&
-                    mirrorA.length === 1 &&
-                    mirrorA[0].ownerId === OWNER_A &&
-                    mirrorA[0].marker === MARKER_A,
-                JSON.stringify({ inputA, mirrorA })
-            );
-            check(
-                "owner-aware clear A: A's media is visible downstream (a fresh discovery status carries it)",
-                samplesA.some(s => s.marker === MARKER_A),
-                JSON.stringify(samplesA.slice(-4))
-            );
+                    applied: appliedAfterStale.length,
+                    mirrorClears: mirrorClearsAfterStale.length,
+                    wireClears: wireClearsAfterStale.length,
+                    statusMarkers: samplesStale.map(s => s.marker)
+                };
+                console.log(
+                    "owner-aware clear C (stale):",
+                    JSON.stringify(staleFacts)
+                );
+                check(
+                    "the retired owner's late clear did not cross the local or wire boundary",
+                    ignored.length === 1 &&
+                        ignored[0].ownerId === OWNER_A &&
+                        ignored[0].currentOwnerId === OWNER_B &&
+                        ignored[0].loadGeneration === generationN &&
+                        appliedAfterStale.length === 0 &&
+                        mirrorClearsAfterStale.length === 0 &&
+                        wireClearsAfterStale.length === 0,
+                    JSON.stringify(staleFacts)
+                );
+                check(
+                    "owner-aware clear C: B's media is STILL visible in a status published AFTER the stale clear",
+                    samplesStale.some(s => s.marker === MARKER_B),
+                    JSON.stringify(staleFacts.statusMarkers)
+                );
 
-            // --- B: owner B replaces A --------------------------------------
-            const setBAt = await requestOwnerWrite("oc-set-B", OWNER_B, MARKER_B);
-            markers = await waitForConsumed("oc-set-B");
-            await refreshDevice("B");
-            const samplesB = statusSamplesSince(setBAt);
-            const mirrorB = countMirrors(markers, false, setBAt);
-            const bVisibleAt =
-                (samplesB.find(s => s.marker === MARKER_B) || {}).at ||
-                setBAt;
+                // --- D: the current owner clears --------------------------------
+                const appliedClearAt = await requestOwnerWrite(
+                    "oc-clear-B",
+                    OWNER_B,
+                    null
+                );
+                markers = await waitForConsumed("oc-clear-B");
+                await refreshDevice("applied");
+                const applied = countOutcomes(
+                    markers,
+                    "applied",
+                    appliedClearAt
+                );
+                const mirrorClearsApplied = countMirrors(
+                    markers,
+                    true,
+                    appliedClearAt
+                );
+                const wireClearsApplied = wireClearsSince(appliedClearAt);
+                const samplesApplied = statusSamplesSince(appliedClearAt);
+                const appliedFacts = {
+                    applied: applied.map(a => ({
+                        ownerId: a.ownerId,
+                        currentOwnerId: a.currentOwnerId,
+                        generation: a.loadGeneration
+                    })),
+                    mirrorClears: mirrorClearsApplied.map(m => ({
+                        ownerId: m.ownerId,
+                        generation: m.loadGeneration
+                    })),
+                    wireClears: wireClearsApplied.map(m => ({
+                        ownerId: m.message.data.ownerId,
+                        generation: m.message.data.loadGeneration,
+                        deviceId: m.message.data.deviceId
+                    })),
+                    statusMarkers: samplesApplied.map(s => s.marker)
+                };
+                console.log(
+                    "owner-aware clear D (applied):",
+                    JSON.stringify(appliedFacts)
+                );
+                check(
+                    "owner-aware clear D: the CURRENT owner's clear was applied, mirrored once and crossed the wire under generation N",
+                    applied.length === 1 &&
+                        applied[0].ownerId === OWNER_B &&
+                        applied[0].currentOwnerId === OWNER_B &&
+                        applied[0].loadGeneration === generationN &&
+                        mirrorClearsApplied.length === 1 &&
+                        mirrorClearsApplied[0].ownerId === OWNER_B &&
+                        mirrorClearsApplied[0].loadGeneration === generationN &&
+                        wireClearsApplied.length === 1 &&
+                        wireClearsApplied[0].message.data.ownerId === OWNER_B &&
+                        wireClearsApplied[0].message.data.loadGeneration ===
+                            generationN &&
+                        wireClearsApplied[0].message.data.deviceId ===
+                            FAKE_DEVICE_ID,
+                    JSON.stringify(appliedFacts)
+                );
+                check(
+                    "owner-aware clear D: after the applied clear, no status sample still carries B's media",
+                    !samplesApplied.some(s => s.marker === MARKER_B) &&
+                        samplesApplied.length >= 1,
+                    JSON.stringify(appliedFacts.statusMarkers)
+                );
+                const generationSetAfter = (
+                    await readOwnerMarkers()
+                ).generationSet.filter(g => g.at >= setAAt);
+                check(
+                    "owner-aware clear sequence did not advance the LOAD generation",
+                    generationSetAfter.length === 0,
+                    JSON.stringify(generationSetAfter)
+                );
+            }
+
             console.log(
-                "owner-aware clear B:",
+                "stage 2 round 1 observed:",
                 JSON.stringify({
-                    mirrorSets: mirrorB.length,
-                    statusMarkers: samplesB.map(s => s.marker),
-                    bVisibleAt
+                    sessionMedia: Boolean(sessionMedia),
+                    relayedGeneration: Boolean(relayedGeneration),
+                    relayedMedia: Boolean(relayedMedia),
+                    syntheticBuffering: Boolean(statusEmission),
+                    rawIdleObservation: Boolean(observation)
                 })
             );
-            check(
-                "owner-aware clear B: owner B's write replaced A and was mirrored once",
-                mirrorB.length === 1 &&
-                    mirrorB[0].ownerId === OWNER_B &&
-                    mirrorB[0].marker === MARKER_B,
-                JSON.stringify(mirrorB)
-            );
-            check(
-                "owner-aware clear B: B's media is visible downstream (the new baseline for the stale clear)",
-                samplesB.some(s => s.marker === MARKER_B),
-                JSON.stringify(samplesB.slice(-4))
-            );
-
-            // --- C: owner A's LATE clear ------------------------------------
-            const staleClearAt = await requestOwnerWrite(
-                "oc-clear-A",
-                OWNER_A,
-                null
-            );
-            markers = await waitForConsumed("oc-clear-A");
-            await refreshDevice("stale");
-            const ignored = countOutcomes(markers, "ignored", staleClearAt);
-            const appliedAfterStale = countOutcomes(
-                markers,
-                "applied",
-                staleClearAt
-            );
-            const mirrorClearsAfterStale = countMirrors(
-                markers,
-                true,
-                staleClearAt
-            );
-            const wireClearsAfterStale = wireClearsSince(staleClearAt);
-            const samplesStale = statusSamplesSince(staleClearAt);
-            const staleFacts = {
-                ignored: ignored.map(i => ({
-                    ownerId: i.ownerId,
-                    currentOwnerId: i.currentOwnerId,
-                    generation: i.loadGeneration
-                })),
-                applied: appliedAfterStale.length,
-                mirrorClears: mirrorClearsAfterStale.length,
-                wireClears: wireClearsAfterStale.length,
-                statusMarkers: samplesStale.map(s => s.marker)
-            };
-            console.log(
-                "owner-aware clear C (stale):",
-                JSON.stringify(staleFacts)
-            );
-            check(
-                "the retired owner's late clear did not cross the local or wire boundary",
-                ignored.length === 1 &&
-                    ignored[0].ownerId === OWNER_A &&
-                    ignored[0].currentOwnerId === OWNER_B &&
-                    ignored[0].loadGeneration === generationN &&
-                    appliedAfterStale.length === 0 &&
-                    mirrorClearsAfterStale.length === 0 &&
-                    wireClearsAfterStale.length === 0,
-                JSON.stringify(staleFacts)
-            );
-            check(
-                "owner-aware clear C: B's media is STILL visible in a status published AFTER the stale clear",
-                samplesStale.some(s => s.marker === MARKER_B),
-                JSON.stringify(staleFacts.statusMarkers)
-            );
-
-            // --- D: the current owner clears --------------------------------
-            const appliedClearAt = await requestOwnerWrite(
-                "oc-clear-B",
-                OWNER_B,
-                null
-            );
-            markers = await waitForConsumed("oc-clear-B");
-            await refreshDevice("applied");
-            const applied = countOutcomes(markers, "applied", appliedClearAt);
-            const mirrorClearsApplied = countMirrors(
-                markers,
-                true,
-                appliedClearAt
-            );
-            const wireClearsApplied = wireClearsSince(appliedClearAt);
-            const samplesApplied = statusSamplesSince(appliedClearAt);
-            const appliedFacts = {
-                applied: applied.map(a => ({
-                    ownerId: a.ownerId,
-                    currentOwnerId: a.currentOwnerId,
-                    generation: a.loadGeneration
-                })),
-                mirrorClears: mirrorClearsApplied.map(m => ({
-                    ownerId: m.ownerId,
-                    generation: m.loadGeneration
-                })),
-                wireClears: wireClearsApplied.map(m => ({
-                    ownerId: m.message.data.ownerId,
-                    generation: m.message.data.loadGeneration,
-                    deviceId: m.message.data.deviceId
-                })),
-                statusMarkers: samplesApplied.map(s => s.marker)
-            };
-            console.log(
-                "owner-aware clear D (applied):",
-                JSON.stringify(appliedFacts)
-            );
-            check(
-                "owner-aware clear D: the CURRENT owner's clear was applied, mirrored once and crossed the wire under generation N",
-                applied.length === 1 &&
-                    applied[0].ownerId === OWNER_B &&
-                    applied[0].currentOwnerId === OWNER_B &&
-                    applied[0].loadGeneration === generationN &&
-                    mirrorClearsApplied.length === 1 &&
-                    mirrorClearsApplied[0].ownerId === OWNER_B &&
-                    mirrorClearsApplied[0].loadGeneration === generationN &&
-                    wireClearsApplied.length === 1 &&
-                    wireClearsApplied[0].message.data.ownerId === OWNER_B &&
-                    wireClearsApplied[0].message.data.loadGeneration ===
-                        generationN &&
-                    wireClearsApplied[0].message.data.deviceId === FAKE_DEVICE_ID,
-                JSON.stringify(appliedFacts)
-            );
-            check(
-                "owner-aware clear D: after the applied clear, no status sample still carries B's media",
-                !samplesApplied.some(s => s.marker === MARKER_B) &&
-                    samplesApplied.length >= 1,
-                JSON.stringify(appliedFacts.statusMarkers)
-            );
-            const generationSetAfter = (
-                await readOwnerMarkers()
-            ).generationSet.filter(g => g.at >= setAAt);
-            check(
-                "owner-aware clear sequence did not advance the LOAD generation",
-                generationSetAfter.length === 0,
-                JSON.stringify(generationSetAfter)
-            );
-        }
-
-        console.log(
-            "stage 2 round 1 observed:",
-            JSON.stringify({
-                sessionMedia: Boolean(sessionMedia),
-                relayedGeneration: Boolean(relayedGeneration),
-                relayedMedia: Boolean(relayedMedia),
-                syntheticBuffering: Boolean(statusEmission),
-                rawIdleObservation: Boolean(observation)
-            })
-        );
         }
     } catch (err) {
         if (!(err && err.phaseAOnly)) throw err;

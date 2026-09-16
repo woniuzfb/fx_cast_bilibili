@@ -17,7 +17,10 @@ import { PlayerState, RepeatMode } from "../cast/sdk/media/enums";
 
 import type { RokuMediaStatusProvenance } from "../../../shared/rokuMediaStatusProvenance";
 import type { PlaybackCommandProgress } from "../../../shared/playbackCommand";
-import { declaredPresentationOffset, normalizeContentId } from "../cast/dashPresentation";
+import {
+    declaredPresentationOffset,
+    normalizeContentId
+} from "../cast/dashPresentation";
 
 /**
  * Marks a status object as already converted to page time, and reports whether
@@ -168,7 +171,7 @@ export default new (class extends TypedEventTarget<EventMap> {
         { ownerId: string; media: MediaInfo }
     >();
     /** Last authoritative extension-side media snapshot logged per device. */
-    private lastRokuMergedMediaDebug = new Map<string, string>();
+    private lastMergedMediaDebug = new Map<string, string>();
     /**
      * The presentation shift of the DASH remux generation each device currently
      * reports on, keyed by that MEDIA's identities (see dashSessionKey /
@@ -182,6 +185,13 @@ export default new (class extends TypedEventTarget<EventMap> {
      * tracks one generation per device instead of growing.
      */
     private dashPresentationByMedia = new Map<string, number>();
+    /**
+     * Signature of the last remote ECP media sample traced per device. The
+     * bridge publishes EVERY completed poll - command confirmation needs
+     * fresh samples even when they repeat the cached state - so an unchanged
+     * sample must not re-enter the trace log every 3s.
+     */
+    private lastRemoteStatusTrace = new Map<string, string>();
     /** Monotonic sequence for the per-device media traces (any device type). */
     private mediaTraceSequence = 0;
     /** New Roku LOAD generation. Old ECP status is blocked until the real LOAD
@@ -314,13 +324,16 @@ export default new (class extends TypedEventTarget<EventMap> {
         const presentationOffset =
             declaredOffset ?? this.recallDashPresentation(identity);
         if (presentationOffset === undefined) {
-            void logMediaDebug("DASH current time NOT mapped (unknown identity)", {
-                deviceId: device.id,
-                deviceLabel: deviceDebugLabel(device),
-                rawStatusCurrentTime: Number(receiverTime ?? 0),
-                mediaSessionId: identity.mediaSessionId,
-                mediaContentId: identity.contentId
-            });
+            void logMediaDebug(
+                "DASH current time NOT mapped (unknown identity)",
+                {
+                    deviceId: device.id,
+                    deviceLabel: deviceDebugLabel(device),
+                    rawStatusCurrentTime: Number(receiverTime ?? 0),
+                    mediaSessionId: identity.mediaSessionId,
+                    mediaContentId: identity.contentId
+                }
+            );
             return undefined;
         }
 
@@ -367,7 +380,10 @@ export default new (class extends TypedEventTarget<EventMap> {
                 ? undefined
                 : dashSessionKey(identity.deviceId, identity.mediaSessionId);
         if (sessionKey) records.push([sessionKey, normalized]);
-        const contentKey = dashContentKey(identity.deviceId, identity.contentId);
+        const contentKey = dashContentKey(
+            identity.deviceId,
+            identity.contentId
+        );
         if (contentKey) records.push([contentKey, normalized]);
         // Only KEEP one adapter identity per device and per generation: the maps
         // are bounded by clearing this device's entries first, so a long
@@ -395,7 +411,10 @@ export default new (class extends TypedEventTarget<EventMap> {
             const found = this.dashPresentationByMedia.get(sessionKey);
             if (found !== undefined) return found;
         }
-        const contentKey = dashContentKey(identity.deviceId, identity.contentId);
+        const contentKey = dashContentKey(
+            identity.deviceId,
+            identity.contentId
+        );
         if (contentKey !== undefined) {
             return this.dashPresentationByMedia.get(contentKey);
         }
@@ -404,34 +423,40 @@ export default new (class extends TypedEventTarget<EventMap> {
 
     /** Log only the final media state consumed by the popup, after session/relay
      * metadata has been merged into the device status. */
-    private logRokuMergedMedia(
+    private logMergedMedia(
         deviceId: string,
         status: MediaStatus,
         source: "session-publish" | "device-status"
     ) {
+        const device = this.receiverDevices.get(deviceId);
         const media = status.media;
         const customData =
             media?.customData && typeof media.customData === "object"
                 ? (media.customData as Record<string, unknown>)
                 : undefined;
-        const snapshot = {
+        // hlsDvr / rokuLiveElapsed / optimisticRelayMedia / ownerId come from
+        // the emulated Roku session and the CCTV Roku relay; on any other
+        // device they are constant false/undefined noise, so they are logged
+        // only for a Roku.
+        const snapshot: Record<string, unknown> = {
             source,
             playerState: status.playerState,
             currentTime: status.currentTime,
             duration: media?.duration,
-            hlsDvr: customData?.hlsDvr === true,
-            pageDuration: customData?.pageDuration,
-            rokuLiveElapsed: customData?.rokuLiveElapsed === true,
-            optimisticRelayMedia: customData?.optimisticRelayMedia === true,
-            ownerId: this.rokuSessionMedia.get(deviceId)?.ownerId
+            pageDuration: customData?.pageDuration
         };
+        if (device?.deviceType === "roku") {
+            snapshot.hlsDvr = customData?.hlsDvr === true;
+            snapshot.rokuLiveElapsed = customData?.rokuLiveElapsed === true;
+            snapshot.optimisticRelayMedia =
+                customData?.optimisticRelayMedia === true;
+            snapshot.ownerId = this.rokuSessionMedia.get(deviceId)?.ownerId;
+        }
         const key = JSON.stringify(snapshot);
-        if (this.lastRokuMergedMediaDebug.get(deviceId) === key) return;
-        this.lastRokuMergedMediaDebug.set(deviceId, key);
+        if (this.lastMergedMediaDebug.get(deviceId) === key) return;
+        this.lastMergedMediaDebug.set(deviceId, key);
         void logMediaDebug(
-            `${deviceDebugLabel(
-                this.receiverDevices.get(deviceId)
-            )} merged media [${deviceId}]`,
+            `${deviceDebugLabel(device)} merged media [${deviceId}]`,
             snapshot
         );
     }
@@ -583,7 +608,7 @@ export default new (class extends TypedEventTarget<EventMap> {
                     } | null
                 )?.optimisticRelayMedia === true
         });
-        this.logRokuMergedMedia(deviceId, status, "session-publish");
+        this.logMergedMedia(deviceId, status, "session-publish");
         this.dispatchEvent(
             new CustomEvent("deviceMediaUpdated", {
                 detail: { deviceId, status }
@@ -997,7 +1022,8 @@ export default new (class extends TypedEventTarget<EventMap> {
                 if (this.receiverDevices.has(deviceId)) {
                     this.receiverDevices.delete(deviceId);
                 }
-                this.lastRokuMergedMediaDebug.delete(deviceId);
+                this.lastMergedMediaDebug.delete(deviceId);
+                this.lastRemoteStatusTrace.delete(deviceId);
                 this.pendingRokuMediaLoads.delete(deviceId);
                 this.rokuRealMediaReady.delete(deviceId);
                 this.dispatchEvent(
@@ -1084,16 +1110,37 @@ export default new (class extends TypedEventTarget<EventMap> {
                 const { deviceId, status, provenance } = message.data;
                 const device = this.receiverDevices.get(deviceId);
                 if (!device) break;
+                // The bridge publishes every completed poll, not only
+                // changes (RokuRemote.pollSample: command confirmation needs
+                // fresh samples even when they repeat the cached state), so
+                // the traces below only fire when this sample actually
+                // differs from the last one traced for this device.
+                const sampleSignature = JSON.stringify([
+                    status.playerState,
+                    status.currentTime,
+                    status.mediaSessionId,
+                    status.media?.contentId,
+                    status.media?.duration,
+                    status.media?.customData
+                ]);
+                const sampleChanged =
+                    this.lastRemoteStatusTrace.get(deviceId) !==
+                    sampleSignature;
+                if (sampleChanged) {
+                    this.lastRemoteStatusTrace.set(deviceId, sampleSignature);
+                }
                 if (this.pendingRokuMediaLoads.has(deviceId)) {
                     if (!this.rokuRealMediaReady.has(deviceId)) {
-                        this.traceDeviceMedia(
-                            deviceId,
-                            "remote-status-blocked",
-                            {
-                                inputPlayerState: status.playerState,
-                                inputCurrentTime: status.currentTime
-                            }
-                        );
+                        if (sampleChanged) {
+                            this.traceDeviceMedia(
+                                deviceId,
+                                "remote-status-blocked",
+                                {
+                                    inputPlayerState: status.playerState,
+                                    inputCurrentTime: status.currentTime
+                                }
+                            );
+                        }
                         break;
                     }
                     this.pendingRokuMediaLoads.delete(deviceId);
@@ -1107,14 +1154,16 @@ export default new (class extends TypedEventTarget<EventMap> {
                         }
                     );
                 }
-                this.traceDeviceMedia(deviceId, "remote-status-input", {
-                    inputPlayerState: status.playerState,
-                    inputCurrentTime: status.currentTime,
-                    inputMediaSessionId: status.mediaSessionId,
-                    inputContentId: status.media?.contentId,
-                    inputDuration: status.media?.duration,
-                    inputCustomData: status.media?.customData
-                });
+                if (sampleChanged) {
+                    this.traceDeviceMedia(deviceId, "remote-status-input", {
+                        inputPlayerState: status.playerState,
+                        inputCurrentTime: status.currentTime,
+                        inputMediaSessionId: status.mediaSessionId,
+                        inputContentId: status.media?.contentId,
+                        inputDuration: status.media?.duration,
+                        inputCustomData: status.media?.customData
+                    });
+                }
 
                 // Emulated Roku sessions live in a separate bridge process,
                 // so RokuRemote's buildStatusMedia can never see the LOAD
@@ -1206,8 +1255,10 @@ export default new (class extends TypedEventTarget<EventMap> {
                     }
                 }
 
-                this.traceDeviceMedia(deviceId, "remote-status-published");
-                this.logRokuMergedMedia(
+                if (sampleChanged) {
+                    this.traceDeviceMedia(deviceId, "remote-status-published");
+                }
+                this.logMergedMedia(
                     deviceId,
                     device.mediaStatus,
                     "device-status"
@@ -1248,7 +1299,7 @@ export default new (class extends TypedEventTarget<EventMap> {
         // session-media publish or a new LOAD. A new LOAD, the current owner's
         // clear, a legitimate new owner's set or the optimistic-relay cleanup
         // retire it, exactly as before.
-        this.lastRokuMergedMediaDebug.clear();
+        this.lastMergedMediaDebug.clear();
         this.pendingRokuMediaLoads.clear();
         this.rokuRealMediaReady.clear();
 

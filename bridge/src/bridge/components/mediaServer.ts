@@ -2188,10 +2188,7 @@ async function startDashRemuxServer(
         // ffmpeg playlist so Roku sees a new live asset after each seek.
         if (filename.endsWith(".m3u8")) {
             try {
-                const raw = await fs.promises.readFile(
-                    playlistPath,
-                    "utf8"
-                );
+                const raw = await fs.promises.readFile(playlistPath, "utf8");
                 const omitPadding =
                     new URL(requestUrl, "http://localhost").searchParams.get(
                         "fxcastNoPad"
@@ -2237,10 +2234,19 @@ async function startDashRemuxServer(
                             firstSegment: segmentNames[0],
                             lastSegment: segmentNames.at(-1),
                             endList: body.includes("#EXT-X-ENDLIST"),
-                            rokuWindowed,
-                            rokuVisibleThrough: rokuVisible,
-                            rokuCompleteHighest,
-                            rokuCacheEntries: rokuDashSegmentCache.size
+                            // The windowing and prebuffer-cache fields are
+                            // Roku-path concepts; on the Chromecast path they
+                            // are constants, so they only appear for a Roku
+                            // remux.
+                            ...(rokuDashPrebuffer
+                                ? {
+                                      rokuWindowed,
+                                      rokuVisibleThrough: rokuVisible,
+                                      rokuCompleteHighest,
+                                      rokuCacheEntries:
+                                          rokuDashSegmentCache.size
+                                  }
+                                : {})
                         })
                     }
                 });
@@ -2314,9 +2320,16 @@ async function startDashRemuxServer(
                             bytes: stat.size,
                             modifiedAtMs: stat.mtimeMs,
                             ageMs: Date.now() - stat.mtimeMs,
-                            rokuBuffered: bufferedBody !== undefined,
-                            rokuCacheHit,
-                            rokuCacheEntries: rokuDashSegmentCache.size
+                            // Roku-path concepts only (see the playlist debug
+                            // above): constant false/0 on the Chromecast path.
+                            ...(rokuDashPrebuffer
+                                ? {
+                                      rokuBuffered: bufferedBody !== undefined,
+                                      rokuCacheHit,
+                                      rokuCacheEntries:
+                                          rokuDashSegmentCache.size
+                                  }
+                                : {})
                         })
                     }
                 });
