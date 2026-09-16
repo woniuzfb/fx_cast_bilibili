@@ -145,9 +145,7 @@
     }
     $: hasDuration = timeline.duration > 0;
     $: isRokuLiveElapsed = Boolean(dashRemuxData.rokuLiveElapsed);
-    $: isOptimisticRelayMedia = Boolean(
-        dashRemuxData.optimisticRelayMedia
-    );
+    $: isOptimisticRelayMedia = Boolean(dashRemuxData.optimisticRelayMedia);
     $: isSeekable =
         !isRokuLiveElapsed &&
         ((status.supportedMediaCommands & _MediaCommand.SEEK) !== 0 ||
@@ -282,7 +280,17 @@
         }
     }
 
-    $: if (debugEnabled && (isRokuLiveElapsed || isOptimisticRelayMedia)) {
+    // Timeline trace for the media kinds with a SYNTHETIC receiver clock (CCTV
+    // live relay, Bilibili DASH remux): those are the ones whose bar depends on
+    // reload holds, seek-confirm windows and estimate seeding, so "the bar did
+    // not move" cannot be diagnosed from the receiver's position alone. Emitted
+    // only on change, so it costs one line per real transition.
+    $: if (
+        debugEnabled &&
+        (isRokuLiveElapsed ||
+            isOptimisticRelayMedia ||
+            Boolean(dashRemuxData.dashRemux))
+    ) {
         const trace = JSON.stringify({
             playerState: status.playerState,
             currentTimeProp: status.currentTime,
@@ -290,9 +298,16 @@
             contentId: status.media?.contentId,
             duration: status.media?.duration,
             optimisticRelayMedia: isOptimisticRelayMedia,
+            dashRemux: Boolean(dashRemuxData.dashRemux),
+            dashStart: dashRemuxData.dashStart,
             timelineMediaId: timeline.mediaId,
             timelineCurrentTime: timeline.currentTime,
             timelineUpdatedAt: timeline.updatedAt,
+            // The two freeze modes, which is what "the bar stopped" usually is.
+            seekTarget: timeline.seekTarget,
+            seekExpiresAt: timeline.seekExpiresAt,
+            reloadHoldTime: timeline.reloadHoldTime,
+            reloadExpiresAt: timeline.reloadExpiresAt,
             estimatedCurrentTime: currentTime,
             seekBarEverReady,
             showSeekBar
@@ -378,8 +393,7 @@
     // interval still smooths progress between receiver status reports.
     $: currentTime = estimatePopupMediaTime(
         timeline,
-        status.playerState === PlayerState.PLAYING &&
-            !isOptimisticRelayMedia,
+        status.playerState === PlayerState.PLAYING && !isOptimisticRelayMedia,
         Date.now()
     );
 
@@ -511,7 +525,13 @@
                                 timeline.duration,
                                 Math.max(0, currentTime)
                             )}
-                            style:--media-progress={`${Math.min(100, Math.max(0, (currentTime / timeline.duration) * 100))}%`}
+                            style:--media-progress={`${Math.min(
+                                100,
+                                Math.max(
+                                    0,
+                                    (currentTime / timeline.duration) * 100
+                                )
+                            )}%`}
                         >
                             <div class="media__seek-bar-fill" />
                         </div>
@@ -681,15 +701,15 @@
                             class="media__relative-volume-button"
                             aria-label={`${_("popupMediaVolume")} -`}
                             title={`${_("popupMediaVolume")} -`}
-                            on:click={() => dispatch("volumeDown")}
-                        >−</button>
+                            on:click={() => dispatch("volumeDown")}>−</button
+                        >
                         <button
                             type="button"
                             class="media__relative-volume-button"
                             aria-label={`${_("popupMediaVolume")} +`}
                             title={`${_("popupMediaVolume")} +`}
-                            on:click={() => dispatch("volumeUp")}
-                        >+</button>
+                            on:click={() => dispatch("volumeUp")}>+</button
+                        >
                     {:else}
                         <input
                             type="range"

@@ -384,14 +384,20 @@ async function main() {
     );
     await flush();
     const chromecastTime = chromecast.mediaStatus?.currentTime;
+    // The receiver reports 36.389605 on ITS clock; that media's content starts at
+    // page 4.001269 behind a 32s runway, so the page position is
+    // 4.001269 + 36.389605 - 32 = 8.390874. (On-device, 2026-09-17: a Roku
+    // reported 8.795 with dashStart 636.2016 and offset 0, i.e. 644.9966 page
+    // time — the receiver's number is REMUX-relative, never page time.)
     check(
-        "Chromecast: the runway is removed from the published position (36.389605 -> 4.389605)",
-        Math.abs(Number(chromecastTime) - 4.389605) < 1e-6,
+        "Chromecast: the runway is removed and the LOAD position restored (36.389605 -> 8.390874)",
+        Math.abs(Number(chromecastTime) - 8.390874) < 1e-6,
         JSON.stringify({ published: chromecastTime })
     );
     check(
         "Chromecast: the position is page time, not the padded clock",
-        Math.abs(Number(chromecastTime) - 36.389605) > 1,
+        Math.abs(Number(chromecastTime) - 36.389605) > 1 &&
+            Math.abs(Number(chromecastTime) - 4.389605) > 1,
         JSON.stringify({ published: chromecastTime })
     );
 
@@ -408,8 +414,9 @@ async function main() {
     );
     await flush();
     check(
-        "Chromecast: a bare-media report is still mapped (68 -> 36)",
-        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 36) < 1e-6,
+        "Chromecast: a bare-media report is still mapped (68 -> 40.001269)",
+        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 40.001269) <
+            1e-6,
         JSON.stringify({ published: chromecast.mediaStatus?.currentTime })
     );
     check(
@@ -432,13 +439,19 @@ async function main() {
         CHROMECAST,
         makeStatus({
             currentTime: 436.014207,
+            contentId:
+                "http://10.0.0.111:9555/s/gen-zero-offset/index.m3u8?v=1",
             customData: dashCustomData(436.014207, 0)
         })
     );
     await flush();
+    // dashStart 436.014207 with offset 0: the receiver's 436.014207 IS the
+    // content-relative position, so page time is twice that. The point of the
+    // check is unchanged — this media's own 0 must win over the earlier
+    // generation's 32 (a device-level slot could not tell them apart).
     check(
         "Chromecast: a media stating offset 0 is NOT remapped by an earlier generation's 32",
-        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 436.014207) <
+        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 872.028414) <
             1e-6,
         JSON.stringify({ published: chromecast.mediaStatus?.currentTime })
     );
@@ -449,13 +462,16 @@ async function main() {
         CHROMECAST,
         makeStatus({
             currentTime: 500.5,
+            contentId:
+                "http://10.0.0.111:9555/s/gen-zero-offset/index.m3u8?v=1",
             customData: dashCustomData(436.014207, 0)
         })
     );
     await flush();
     check(
-        "Chromecast mid-video (offset 0): the position passes through unchanged",
-        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 500.5) < 1e-6,
+        "Chromecast mid-video (offset 0): the page position is dashStart + the receiver's own position",
+        Math.abs(Number(chromecast.mediaStatus?.currentTime) - 936.514207) <
+            1e-6,
         JSON.stringify({ published: chromecast.mediaStatus?.currentTime })
     );
 
@@ -472,18 +488,27 @@ async function main() {
             currentTime: 500,
             bareMedia: true,
             mediaSessionId: 77,
-            contentId: "http://10.0.0.111:9555/s/other/index.m3u8?v=9"
+            contentId: "http://10.0.0.111:9555/s/other-gen/index.m3u8?v=9"
         })
     );
     await flush();
+    console.info(
+        "DEBUG unknown-gen: status=" +
+            JSON.stringify(
+                modules.deviceManager.getDeviceById(chromecast.id)?.mediaStatus
+                    ?.media?.contentId
+            ) +
+            " published=" +
+            modules.deviceManager.getDeviceById(chromecast.id)?.mediaStatus
+                ?.currentTime
+    );
     check(
         "Chromecast: a report from an unknown media generation is NOT converted (no guessed shift)",
         modules.deviceManager.getDeviceById(chromecast.id)?.mediaStatus
             ?.currentTime === 500,
         JSON.stringify({
-            published:
-                modules.deviceManager.getDeviceById(chromecast.id)?.mediaStatus
-                    ?.currentTime
+            published: modules.deviceManager.getDeviceById(chromecast.id)
+                ?.mediaStatus?.currentTime
         })
     );
 
@@ -493,13 +518,19 @@ async function main() {
     sendMediaStatus(
         modules,
         ROKU,
-        makeStatus({ currentTime: 41.5, customData: dashCustomData(40, 0) })
+        makeStatus({
+            currentTime: 41.5,
+            contentId: "http://10.0.0.111:9555/s/roku-gen/index.m3u8?v=1",
+            customData: dashCustomData(40, 0)
+        })
     );
     await flush();
     const rokuTime = Number(roku.mediaStatus?.currentTime);
+    // Roku reports the same way (remux-relative) with offset 0, so page time is
+    // dashStart + raw: 40 + 41.5 = 81.5.
     check(
-        "Roku: the mapping is the identity (its session already publishes page + elapsed)",
-        Math.abs(rokuTime - 41.5) < 1e-6 || Math.abs(rokuTime - 81.5) < 1e-6,
+        "Roku: the page position is dashStart + the reported position (40 + 41.5)",
+        Math.abs(rokuTime - 81.5) < 1e-6,
         JSON.stringify({
             published: rokuTime,
             note: "no Roku session media registered here, so it stays as reported"

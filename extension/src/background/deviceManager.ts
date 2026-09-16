@@ -23,23 +23,19 @@ import {
 } from "../cast/dashPresentation";
 
 /**
- * Marks a status object as already converted to page time, and reports whether
- * it already was.
+ * The last conversion applied for a device: the receiver position that went in
+ * and the page position that came out.
  *
- * The property is non-enumerable so it cannot leak into a serialized status
- * (the popup's samples, log snapshots) or be echoed by anything that copies own
- * keys, while still travelling with the object through the merge.
+ * A flag cannot live on the status (the device-media merge rebuilds that object
+ * on every report), and a WeakMap keyed by the media cannot either (the merge
+ * hands over a fresh media object each time, from the session registry, even
+ * when nothing about it changed). What IS reliable is the pair of values: if the
+ * position currently on the status equals the page position this device was last
+ * given, the value has already been converted and converting it again would add
+ * dashStart a second time. Measured before this: a Roku's 41.5 became 81.5 and
+ * then 121.5 within the two reports of a single poll.
  */
-function markDashTimeConverted(status: object): boolean {
-    const marker = status as { __fxcastPageTime?: true };
-    if (marker.__fxcastPageTime === true) return true;
-    Object.defineProperty(status, "__fxcastPageTime", {
-        value: true,
-        enumerable: false,
-        configurable: true
-    });
-    return false;
-}
+const dashLastConversion = new Map<string, { raw: number; page: number }>();
 
 /**
  * A CCTV live relay never takes the DASH remux timeline path: its customData is
@@ -317,7 +313,6 @@ export default new (class extends TypedEventTarget<EventMap> {
                 : undefined;
         if (customData?.dashRemux !== true) return undefined;
         if (isHlsDvrCustomData(customData)) return undefined;
-
         const identity = {
             deviceId: device.id,
             mediaSessionId:
@@ -1278,7 +1273,19 @@ export default new (class extends TypedEventTarget<EventMap> {
                         ) {
                             newMedia.duration = oldMedia.duration;
                         }
+                        // Metadata only carries over between media about the
+                        // SAME content: a report that names a different
+                        // contentId is a different generation, and inheriting
+                        // the old customData would hand it the old generation's
+                        // dashStart (measured: an unidentified 500 was published
+                        // as 936.014207).
+                        const sameContent =
+                            newMedia.contentId === undefined ||
+                            oldMedia.contentId === undefined ||
+                            normalizeContentId(newMedia.contentId) ===
+                                normalizeContentId(oldMedia.contentId);
                         if (
+                            sameContent &&
                             newMedia.customData == null &&
                             oldMedia.customData != null
                         ) {
@@ -1328,13 +1335,28 @@ export default new (class extends TypedEventTarget<EventMap> {
                 //
                 // Idempotent by marker: the conversion mutates the status it is
                 // given, and a status can pass through here more than once.
-                if (!markDashTimeConverted(device.mediaStatus)) {
+                const statusRawTime = Number(device.mediaStatus.currentTime);
+                const lastConversion = dashLastConversion.get(device.id);
+                const alreadyConverted =
+                    lastConversion !== undefined &&
+                    Number.isFinite(statusRawTime) &&
+                    Math.abs(lastConversion.page - statusRawTime) < 1e-6;
+                if (!alreadyConverted) {
                     const adjusted = this.adjustDashCurrentTime(
                         device,
                         device.mediaStatus.media,
                         device.mediaStatus.currentTime,
                         device.mediaStatus.mediaSessionId
                     );
+                    if (
+                        adjusted !== undefined &&
+                        Number.isFinite(statusRawTime)
+                    ) {
+                        dashLastConversion.set(device.id, {
+                            raw: statusRawTime,
+                            page: adjusted
+                        });
+                    }
                     if (adjusted !== undefined) {
                         device.mediaStatus.currentTime = adjusted;
                     }
