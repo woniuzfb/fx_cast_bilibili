@@ -1712,6 +1712,29 @@ async function startDashRemuxServer(
     const useStartupPadding =
         !rokuDashPrebuffer && chromecastDashStartupPadding !== false;
     const CHROMECAST_MIN_PAD_SECONDS = 32;
+
+    /**
+     * How far a Chromecast playlist's pad runway extends for a given content base.
+     *
+     * NAMED, and separate from the block that uses it, because it IS the policy: both
+     * the Chromecast and (with the option off) the Roku-independent paths ask this
+     * question, and the model-based test harness reads the expression from THIS
+     * function rather than restating it (`test/playbackModel/plan.js`). A restated
+     * copy in a test keeps passing after this changes, which is exactly what the
+     * harness must not do.
+     *
+     * `startupPadding` on: at least the minimum runway, a start at exactly 0 included,
+     * so whether the page reports 0 or 0.2s cannot decide between two playlist shapes.
+     * Off: the content base itself, i.e. the pre-compatibility timeline.
+     */
+    function dashPadBaseSeconds(
+        contentBaseSeconds: number,
+        startupPadding: boolean
+    ): number {
+        return startupPadding
+            ? Math.max(contentBaseSeconds, CHROMECAST_MIN_PAD_SECONDS)
+            : contentBaseSeconds;
+    }
     let padBaseSeconds = normalizedStartTime;
     // Real content starts at the probed keyframe. padBaseSeconds is how far the
     // playlist's pad runway extends, and the two differ only in the opening
@@ -2296,9 +2319,10 @@ async function startDashRemuxServer(
                 // different playlist shapes. Without it (option off, or Roku's
                 // independent prebuffer path) the base is the keyframe — the
                 // pre-compatibility timeline.
-                padBaseSeconds = useStartupPadding
-                    ? Math.max(keyframe, CHROMECAST_MIN_PAD_SECONDS)
-                    : keyframe;
+                padBaseSeconds = dashPadBaseSeconds(
+                    keyframe,
+                    useStartupPadding
+                );
             }
             keyframeResolved = true;
             probeResolve();

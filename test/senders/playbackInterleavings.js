@@ -51,7 +51,11 @@ const {
     randomCases,
     MID_POSITION
 } = require("../playbackModel/cases");
-const { createModel, applyToModel } = require("../playbackModel/model");
+const {
+    createModel,
+    applyToModel,
+    observeWorldAdvance
+} = require("../playbackModel/model");
 const { checkInvariants } = require("../playbackModel/invariants");
 
 const argv = process.argv.slice(2);
@@ -65,6 +69,8 @@ const RANDOM_RUNS = Number(arg("--random", "0"));
 const SEED = Number(arg("--seed", "1"));
 const LENGTH = Number(arg("--length", "6"));
 const VERBOSE = argv.includes("--verbose");
+/** Random sweeps run with the startup-padding option as the product ships it. */
+const PADDING_OFF = argv.includes("--padding-off");
 const PAIRWISE_ONLY = argv.includes("--pairwise-only");
 const PRE_FIX_INDEX = argv.indexOf("--pre-fix");
 const PRE_FIX = PRE_FIX_INDEX >= 0;
@@ -81,9 +87,11 @@ const START_PAGE_TIME = MID_POSITION;
 const SKIP = 30;
 
 /**
- * The operations that own the load lifecycle: their point is a load still in
- * flight (an item/quality change holds it) or one being resolved or refused, so
- * the runner does not drain them before they run.
+ * The operations that own the load lifecycle, for labelling a run's trace.
+ *
+ * NOT a scheduler: nothing about the runner's behaviour depends on this set any
+ * more (an earlier version used it to decide which operations got an implicit
+ * `settle()` first, which is exactly what hid the load-in-flight pairs).
  */
 const LIFECYCLE_OPERATIONS = new Set([
     "ITEM_CHANGE",
@@ -241,6 +249,8 @@ async function runCase(
         startupPadding: startupPaddingEnabled
     });
     await cast.boot();
+    /** Which video the model is on, for the identities its item changes adopt. */
+    let modelIdentityGeneration = 0;
 
     // Primed from the LIVE cast: the initial load has already reported its own
     // state on a session, so the model must know which session that was and that
@@ -255,54 +265,33 @@ async function runCase(
     });
     const trace = [];
     const generationsBeforeRun = snapshotGenerations(cast).length;
-    /** Generations the bridge/receiver have already answered in this run. */
-    let answeredSoFar = generationsBeforeRun;
 
     for (const [index, op] of testCase.ops.entries()) {
-        // Let the world catch up BEFORE this operation is measured.
-        //
-        // The bridge and the receiver keep up with what was ASKED for: a
-        // generation an earlier intent started is answered here, and the receiver
-        // reports where it landed. Doing it after the operation would credit this
-        // operation with a LOAD that an earlier one caused - the first version of
-        // this runner did exactly that, and reported "a popup pause reloaded with
-        // autoplay true" for a load the item change before it had asked for.
-        //
-        // The operations that OWN the load lifecycle are excluded: their whole
-        // point is a load still in flight (an item or quality change holds it), or
-        // one that is being resolved or refused.
-        if (!LIFECYCLE_OPERATIONS.has(op.id)) {
-            const outstanding = cast.h.started.length > answeredSoFar;
-            if (outstanding) {
-                await cast.settle();
-                answeredSoFar = cast.h.started.length;
-                model = applyToModel(model, {
-                    id: "LOAD_RESOLVE",
-                    refused: false
-                }).state;
-                // Answering that load brought the receiver up on a NEW session, and
-                // its state is the one the LOAD asked for. The model has to know,
-                // or the next receiver report would read as "a new session" (the
-                // shape of our own load, which must NOT be adopted as intent)
-                // instead of "the session the user is on".
-                const answeredLoad = cast.generations.at(-1)?.load?.request;
-                model = {
-                    ...model,
-                    lastReceiverSession: cast.receiverSessionId(),
-                    lastReceiverState:
-                        answeredLoad?.autoplay === false ? "PAUSED" : "PLAYING"
-                };
-            }
-        }
-        // Parameters that describe the live cast are read HERE rather than in the
-        // case: a receiver report comes from the session the receiver is on, and an
-        // item change is "a video that is not this one".
+        // Parameters that describe the LIVE cast are read here, not in the case
+        // data: a receiver report comes from the session the receiver is on, and
+        // an item change is "a video this one is not".
         if (op.id === "RECEIVER_PLAYING" || op.id === "RECEIVER_PAUSED") {
             op.mediaSessionId = cast.receiverSessionId();
         }
         if (op.id === "ITEM_CHANGE") {
-            op.mediaIdentity = "video-next";
+            // A UNIQUE identity per item change: reusing one placeholder made the
+            // model see the second change as "the same video" while the fixture
+            // adopted a different page key, so the two disagreed about which video
+            // an intent belonged to.
+            op.mediaIdentity = `video-${++modelIdentityGeneration}`;
         }
+        // NO implicit world advancement.
+        //
+        // The bridge and the receiver do not answer by themselves: an operation runs
+        // in exactly the state the previous one left. The first version of this
+        // runner settled any outstanding load before every non-lifecycle operation,
+        // which turned "a BLE pause while an item change's load is in flight" into
+        // "a BLE pause on a settled cast" - the very interleavings this stage exists
+        // for were scheduled away, and the pairwise suite went green without ever
+        // being inside the window.
+        //
+        // A case that wants a settled starting point says so explicitly (`SETTLE`,
+        // `LOAD_RESOLVE`); a case that wants the race leaves the load in flight.
         const generationsBefore = snapshotGenerations(cast);
         const loadsBefore = cast.h.loadRequests.length;
         const commandsBefore = cast.h.receiverCommandTotals();
@@ -357,6 +346,10 @@ async function runCase(
             modelBefore,
             modelAfter: model,
             newGenerations: generationsAfter.slice(generationsBefore.length),
+            // The page key in force during this operation: a generation belongs to
+            // the video that was current when it started, which is the only identity
+            // observable the harness has (the bridge request itself carries none).
+            mediaIdentity: cast.h.mediaIdentity(),
             newLoads,
             commandsBefore,
             commandsAfter,
@@ -368,7 +361,25 @@ async function runCase(
             thrown
         };
         trace.push(step);
+        // The world may have moved during this operation (a load of ours was
+        // answered, a session came up). The model is told what the receiver is
+        // reporting so its "session we are watching" stays current - a memory, not
+        // a decision: adopting a state still needs an explicit report on that
+        // session, exactly as the implementation requires.
+        model = observeWorldAdvance(model, {
+            mediaSessionId: cast.receiverSessionId(),
+            playerState: cast.h.sender.session?.media?.at(-1)?.playerState
+        });
         if (VERBOSE) {
+            log(
+                `         model: rule=${expect.rule} session=${
+                    op.mediaSessionId ?? "-"
+                } seen=${model.lastReceiverSession ?? "-"}/${
+                    model.lastReceiverState ?? "-"
+                } load=${model.activeLoad ? "in-flight" : "none"} attached=${
+                    model.pageControlsAttached
+                }`
+            );
             log(
                 `      ${step.index}. ${op.id}${
                     op.target !== undefined ? `(${op.target})` : ""
@@ -415,10 +426,36 @@ async function main() {
         );
     }
 
-    const cases = pairwiseCases();
+    // The hand-written pairs run under BOTH startup-padding policies: the option
+    // changes what the bridge puts in a playlist (and therefore every LOAD
+    // position the flow computes), and a contract that only holds with padding on
+    // would be a contract about one configuration. The random sweeps stay on the
+    // shipped default so the exploration budget is not spent twice.
+    const cases = [];
+    {
+        const pairs = pairwiseCases();
+        for (const startupPaddingEnabled of [true, false]) {
+            for (const testCase of pairs) {
+                cases.push({
+                    ...testCase,
+                    startupPaddingEnabled,
+                    name: `${testCase.name}${
+                        startupPaddingEnabled ? "" : " [padding OFF]"
+                    }`
+                });
+            }
+        }
+    }
     if (!PAIRWISE_ONLY && RANDOM_RUNS > 0) {
         cases.push(
-            ...randomCases({ seed: SEED, runs: RANDOM_RUNS, length: LENGTH })
+            ...randomCases({
+                seed: SEED,
+                runs: RANDOM_RUNS,
+                length: LENGTH
+            }).map(testCase => ({
+                ...testCase,
+                startupPaddingEnabled: !PADDING_OFF
+            }))
         );
     }
     log(
@@ -431,7 +468,13 @@ async function main() {
 
     for (const testCase of cases) {
         log(`\n  -- ${testCase.name} --`);
-        const { failures: caseFailures } = await runCase(MediaSender, testCase);
+        const { failures: caseFailures } = await runCase(
+            MediaSender,
+            testCase,
+            {
+                startupPaddingEnabled: testCase.startupPaddingEnabled !== false
+            }
+        );
         if (!caseFailures.length) {
             pass++;
             continue;

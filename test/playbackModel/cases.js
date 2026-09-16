@@ -72,26 +72,76 @@ const ALPHABET = [
  * so the list is only about WHICH interleavings are worth running, not about what
  * should happen - that lives in model.js and invariants.js.
  */
+/**
+ * The ordered sequences from the review that must hold, by hand.
+ *
+ * Each is written as the sequence it means, INCLUDING the world advancement it
+ * needs: `SETTLE` / `LOAD_RESOLVE` are operations a case states on purpose, never
+ * something the runner does behind its back. That split is the point of the list:
+ *
+ *   - a SETTLED pair (`ITEM_CHANGE → SETTLE → BLE_PAUSE`) proves the ordinary
+ *     behaviour of a command after the world has caught up;
+ *   - an IN-FLIGHT triple (`ITEM_CHANGE → BLE_PAUSE → LOAD_RESOLVE`) proves the
+ *     same command while the load is still in flight and the page's controls are
+ *     detached - the window where the real defects have lived, and the one an
+ *     implicitly-settling runner can never reach.
+ *
+ * The model carries the expectation for both (`activeLoad`), so a case does not
+ * say what should happen - only which interleaving to run.
+ */
 const PAIRWISE = [
-    ["ITEM_CHANGE", "BLE_PAUSE"],
-    ["BLE_PAUSE", "ITEM_CHANGE"],
-    ["ITEM_CHANGE", "BLE_SEEK_BACKWARD"],
-    ["POPUP_PAUSE", "PAGE_SEEK"],
-    ["PAGE_SEEK", "POPUP_PAUSE"],
-    ["LOAD_RESOLVE", "ITEM_CHANGE"],
-    ["SETTLE", "ITEM_CHANGE"],
-    ["STOP", "LOAD_RESOLVE"],
-    ["LOAD_RESOLVE", "STOP"],
-    // Boundaries: the page is already at the edge a skip would move it past, and
-    // the popup asks for the position the page is already at.
-    ["BLE_SEEK_BACKWARD", "PAGE_PAUSE"],
-    ["BLE_SEEK_FORWARD", "PAGE_PLAY"],
-    ["RECEIVER_PAUSED", "PAGE_SEEK"],
-    ["PAGE_SEEK", "RECEIVER_PAUSED"],
-    ["POPUP_SEEK", "POPUP_SEEK"],
-    ["PAGE_SEEK", "ITEM_CHANGE"],
-    ["QUALITY_CHANGE", "BLE_PAUSE"],
-    ["BLE_PLAY", "BLE_PAUSE"]
+    // ---- in-flight: the command arrives while our own load is unresolved -------
+    {
+        name: "ITEM_CHANGE → BLE_PAUSE (load in flight)",
+        ids: ["ITEM_CHANGE", "BLE_PAUSE", "LOAD_RESOLVE"]
+    },
+    {
+        name: "ITEM_CHANGE → BLE_PLAY (load in flight)",
+        ids: ["ITEM_CHANGE", "BLE_PLAY", "LOAD_RESOLVE"]
+    },
+    {
+        name: "ITEM_CHANGE → BLE_SEEK (load in flight)",
+        ids: ["ITEM_CHANGE", "BLE_SEEK_BACKWARD", "LOAD_RESOLVE"]
+    },
+    // The one that proves the production fix: mirroring may be suppressed, the
+    // user's intent may not - and the reload after it inherits that intent.
+    {
+        name: "ITEM_CHANGE → RECEIVER_PAUSED → LOAD_RESOLVE → PAGE_SEEK",
+        ids: ["ITEM_CHANGE", "RECEIVER_PAUSED", "LOAD_RESOLVE", "PAGE_SEEK"]
+    },
+    {
+        name: "ITEM_CHANGE → PAGE_SEEK (detached page) → LOAD_RESOLVE",
+        ids: ["ITEM_CHANGE", "PAGE_SEEK", "LOAD_RESOLVE"]
+    },
+    {
+        name: "QUALITY_CHANGE → BLE_PAUSE (load in flight)",
+        ids: ["QUALITY_CHANGE", "BLE_PAUSE", "LOAD_RESOLVE"]
+    },
+    {
+        name: "ITEM_CHANGE → RECEIVER_PLAYING → LOAD_RESOLVE → PAGE_SEEK",
+        ids: ["ITEM_CHANGE", "RECEIVER_PLAYING", "LOAD_RESOLVE", "PAGE_SEEK"]
+    },
+    // ---- settled: the same commands once the world has caught up ---------------
+    {
+        name: "ITEM_CHANGE → SETTLE → BLE_PAUSE",
+        ids: ["ITEM_CHANGE", "SETTLE", "BLE_PAUSE"]
+    },
+    { name: "BLE_PAUSE → ITEM_CHANGE", ids: ["BLE_PAUSE", "ITEM_CHANGE"] },
+    { name: "POPUP_PAUSE → PAGE_SEEK", ids: ["POPUP_PAUSE", "PAGE_SEEK"] },
+    { name: "PAGE_SEEK → POPUP_PAUSE", ids: ["PAGE_SEEK", "POPUP_PAUSE"] },
+    { name: "LOAD_REJECT → ITEM_CHANGE", ids: ["LOAD_RESOLVE", "ITEM_CHANGE"] },
+    { name: "STOP → LOAD_RESOLVE", ids: ["STOP", "LOAD_RESOLVE"] },
+    { name: "LOAD_RESOLVE → STOP", ids: ["LOAD_RESOLVE", "STOP"] },
+    {
+        name: "POPUP_SEEK → POPUP_SEEK (coalescing)",
+        ids: ["POPUP_SEEK", "POPUP_SEEK", "SETTLE"]
+    },
+    { name: "PAGE_SEEK → ITEM_CHANGE", ids: ["PAGE_SEEK", "ITEM_CHANGE"] },
+    { name: "BLE_PLAY → BLE_PAUSE", ids: ["BLE_PLAY", "BLE_PAUSE"] },
+    {
+        name: "RECEIVER_PAUSED → PAGE_SEEK",
+        ids: ["RECEIVER_PAUSED", "PAGE_SEEK"]
+    }
 ];
 
 /** A deterministic PRNG (mulberry32), so a seed reproduces a failure exactly. */
@@ -128,10 +178,12 @@ function caseOf(name, ops) {
  * created.
  */
 function pairwiseCases() {
-    return PAIRWISE.map(([first, second], index) => {
+    return PAIRWISE.map((entry, index) => {
         const random = makeRandom(0x9e37 + index);
-        const ops = [materialize(first, random), materialize(second, random)];
-        return caseOf(`${first} → ${second}`, ops);
+        return caseOf(
+            entry.name,
+            entry.ids.map(id => materialize(id, random))
+        );
     });
 }
 
@@ -150,6 +202,13 @@ function randomCases({ seed = 1, runs = 12, length = 6 } = {}) {
         for (let i = 0; i < length; i++) {
             const entry = ALPHABET[Math.floor(random() * ALPHABET.length)];
             ops.push(materialize(entry.id, random));
+            // Whether the world catches up between two operations is part of the
+            // SEQUENCE, not of the runner: half the runs advance it explicitly (a
+            // load resolves, the page's controls come back) and half leave it in
+            // flight, so both worlds are explored without either being assumed.
+            if (random() < 0.5) {
+                ops.push(materialize("SETTLE", random));
+            }
         }
         cases.push(
             caseOf(

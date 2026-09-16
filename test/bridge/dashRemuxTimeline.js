@@ -812,8 +812,14 @@ async function caseStartupPaddingOff(bridge) {
     const source = fs.readFileSync(resolved.mediaServerSource, "utf8");
     check(
         "option (Roku): the pad base never consults the option flag on the Roku path",
-        /padBaseSeconds = useStartupPadding\b/.test(source) &&
+        // The policy moved into a named helper (dashPadBaseSeconds), so what this
+        // asserts is that the ONLY flag reaching it is the gateway one - and that
+        // the helper itself knows nothing about Roku.
+        /padBaseSeconds = dashPadBaseSeconds\(/.test(source) &&
             /!rokuDashPrebuffer && chromecastDashStartupPadding !== false/.test(
+                source
+            ) &&
+            !/dashPadBaseSeconds\(contentBaseSeconds, startupPadding\)[\s\S]{0,600}?rokuDashPrebuffer/.test(
                 source
             ),
         "the Roku path's pad base no longer ignores the option"

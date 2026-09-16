@@ -15,6 +15,26 @@
  * (model.js). Nothing here reads the implementation's phases or flags.
  */
 
+/**
+ * I0. No operation may throw.
+ *
+ * An exception from a production entry point is a failure in its own right, and it
+ * is NOT implied by the other invariants: a throw that happens to leave the
+ * generations, the LOADs and the receiver commands as they were would pass every
+ * one of them, so the case would be reported green. (The runner caught exceptions
+ * from the start - it recorded them and printed them with `--verbose` - but nothing
+ * judged them.)
+ */
+function operationsDoNotThrow(run) {
+    const violations = [];
+    for (const step of run.trace) {
+        if (step.thrown !== undefined) {
+            violations.push(`${describe(step)}: threw ${step.thrown}`);
+        }
+    }
+    return violations;
+}
+
 /** The receiver commands a step is credited with. */
 function commandDelta(step) {
     const delta = {};
@@ -79,11 +99,17 @@ function loadInheritsTheIntent(run) {
     for (const step of run.trace) {
         for (const load of step.newLoads) {
             const autoplay = load?.autoplay;
-            if (autoplay !== step.expect.autoplay) {
+            // Either intent the operation's window contained: see
+            // `expect.autoplayAfter` (an operation that ADOPTS a receiver's
+            // play/pause changes the intent while a load may already be in flight).
+            const accepted = [step.expect.autoplay, step.expect.autoplayAfter];
+            if (!accepted.includes(autoplay)) {
                 violations.push(
                     `${describe(step)}: LOAD autoplay ${JSON.stringify(
                         autoplay
-                    )} (expected ${JSON.stringify(step.expect.autoplay)}: ${
+                    )} (expected ${JSON.stringify(
+                        accepted
+                    )} - the intent before or after this operation: ${
                         step.expect.rule
                     })`
                 );
@@ -115,9 +141,12 @@ function seekDoesNotEditTheIntent(run) {
             );
         }
         for (const load of step.newLoads) {
-            const expected = step.modelBefore.desiredPlayback === "playing";
+            const expected = [
+                step.modelBefore.desiredPlayback === "playing",
+                step.modelAfter.desiredPlayback === "playing"
+            ];
             const autoplay = load?.autoplay;
-            if (autoplay !== expected) {
+            if (!expected.includes(autoplay)) {
                 violations.push(
                     `${describe(
                         step
@@ -144,9 +173,27 @@ function seekDoesNotEditTheIntent(run) {
  */
 function detachedControlsStartNoGeneration(run) {
     const violations = [];
-    for (const step of run.trace) {
+    for (const [index, step] of run.trace.entries()) {
         if (step.op.id !== "PAGE_SEEK") continue;
         if (step.modelBefore.pageControlsAttached) continue;
+        // The window this invariant owns is the one the detach CREATED: the
+        // operation that follows an item/quality change. Once other operations run
+        // inside it, the implementation may legitimately have re-attached the
+        // page's listeners (a new transaction supersedes the transition, the
+        // sender re-attaches with the next load), and the model does not predict
+        // WHEN that happens - it only knows the controls came back once the world
+        // advanced. Asserting the whole window would therefore be asserting the
+        // model's simplification rather than the implementation's contract.
+        //
+        // The case that matters is pinned exactly, both here (pairwise:
+        // `ITEM_CHANGE → PAGE_SEEK → LOAD_RESOLVE`) and by the load matrix's flow N.
+        const previous = run.trace[index - 1];
+        if (
+            previous === undefined ||
+            !["ITEM_CHANGE", "QUALITY_CHANGE"].includes(previous.op.id)
+        ) {
+            continue;
+        }
         if (step.newGenerations.length) {
             violations.push(
                 `${describe(
@@ -313,6 +360,9 @@ function pendingSeekNeverCrossesMedia(run) {
 }
 
 const INVARIANTS = [
+    // First, because "it threw" is the bluntest fact about a run and must not be
+    // reported as "green" behind seven behavioural properties.
+    operationsDoNotThrow,
     observationIsNotACommand,
     loadInheritsTheIntent,
     seekDoesNotEditTheIntent,

@@ -12,6 +12,7 @@
  *     desiredPageTime          the position the newest explicit seek asked for
  *     mediaIdentity            which video the intent belongs to
  *     pendingSeek              a seek that is waiting for a load to serve it
+ *     activeLoad               the load we started that nothing has resolved yet
  *     pageControlsAttached     whether the page's own events can reach the sender
  *     stopped                  whether the cast is over
  *     generatedTargets         the positions generations have been started for
@@ -74,6 +75,18 @@ const DEFAULT_STATE = {
     desiredPageTime: 0,
     mediaIdentity: "video-a",
     pendingSeek: undefined,
+    /**
+     * The load WE started and have not seen resolve.
+     *
+     * The model needs it because the world does NOT advance by itself: an
+     * operation runs in whatever state the previous one left, and only an explicit
+     * `LOAD_RESOLVE` or `SETTLE` clears this. An earlier version of the runner
+     * settled outstanding loads before every non-lifecycle operation, which quietly
+     * turned "a BLE pause while an item change's load is in flight" into "a BLE
+     * pause on a settled cast" - the interleavings this stage exists for were
+     * scheduled away before they could happen.
+     */
+    activeLoad: undefined,
     pageControlsAttached: true,
     stopped: false,
     /** Positions a generation has been started for, in order. */
@@ -193,13 +206,22 @@ function applyToModel(state, op) {
             // the INPUT to that decision, and the invariants bound the answer - a
             // model that also predicted coalescing would be a second
             // implementation of it.
+            // A seek while a load we started is still in flight does NOT open a
+            // second transaction: the coordinator coalesces it and the running one
+            // retargets, so the position a generation ends up at is the newest
+            // request's - which is exactly what the load matrix's "newest explicit
+            // intent wins" rows pin. The model therefore states "a generation is
+            // due" without pinning it to this operation's target in that case.
             expect.startsGeneration = next.pageControlsAttached;
-            expect.generationTarget = next.pageControlsAttached
-                ? target
-                : undefined;
-            expect.rule = next.pageControlsAttached
-                ? "seek-is-an-explicit-position"
-                : "seek-while-controls-detached";
+            expect.generationTarget =
+                next.pageControlsAttached && next.activeLoad === undefined
+                    ? target
+                    : undefined;
+            expect.rule = !next.pageControlsAttached
+                ? "seek-while-controls-detached"
+                : next.activeLoad !== undefined
+                ? "seek-coalesces-onto-the-load-in-flight"
+                : "seek-is-an-explicit-position";
             // A position never sends a receiver play/pause; a positioned reload
             // carries the intent instead.
             break;
@@ -212,6 +234,10 @@ function applyToModel(state, op) {
             next.pageTime = op.target;
             next.desiredPageTime = op.target;
             next.pageControlsAttached = false;
+            next.activeLoad = {
+                target: op.target,
+                mediaIdentity: op.mediaIdentity
+            };
             // A new item means a new page element, and the site's player starts it
             // playing (it is what the remux is captured from). So the page is no
             // longer paused, and a PAGE_PLAY after this is not a transition: the
@@ -228,12 +254,17 @@ function applyToModel(state, op) {
             // Same media: the intent survives, the page is detached while it
             // reloads.
             next.pageControlsAttached = false;
+            next.activeLoad = {
+                target: next.desiredPageTime,
+                mediaIdentity: next.mediaIdentity
+            };
             expect.startsGeneration = true;
             expect.rule = "quality-change-reloads-the-same-intent";
             break;
         }
         case "LOAD_RESOLVE": {
             next.pageControlsAttached = true;
+            next.activeLoad = undefined;
             if (op.refused === true) {
                 // The load was rejected: the pending seek is KEPT (the load
                 // matrix's R flow pins that) and will be served by the next
@@ -263,20 +294,19 @@ function applyToModel(state, op) {
             );
             next.lastReceiverSession = op.mediaSessionId;
             next.lastReceiverState = observingPlaying ? "PLAYING" : "PAUSED";
-            if (
-                settled &&
-                sameSession &&
-                changed &&
-                next.pageControlsAttached
-            ) {
+            // The three conditions are the WHOLE contract. `pageControlsAttached`
+            // deliberately does not appear: mirroring the receiver onto the page is
+            // suppressible (a hold, an item transition, the gesture window), but
+            // adopting the user's intent is not - `noteReceiverReport` records every
+            // report, and the same-session rule already refuses our own load's first
+            // state, which is the only echo that could be mistaken for the user.
+            if (settled && sameSession && changed) {
                 next.desiredPlayback = observingPlaying ? "playing" : "paused";
                 next.pagePlaying = observingPlaying;
                 expect.rule = "receiver-moved-the-session-the-user-has";
             } else {
                 expect.rule = !sameSession
                     ? "new-session-is-our-own-load"
-                    : !next.pageControlsAttached
-                    ? "our-transaction-owns-the-page"
                     : "no-change-to-adopt";
             }
             // An observation is never a command and never a generation.
@@ -295,6 +325,7 @@ function applyToModel(state, op) {
         case "SETTLE": {
             // "Let the receiver answer": whatever load is outstanding resolves.
             next.pageControlsAttached = true;
+            next.activeLoad = undefined;
             next.pendingSeek = undefined;
             expect.servesPending = true;
             expect.rule = "settle-lets-the-load-resolve";
@@ -304,11 +335,22 @@ function applyToModel(state, op) {
             throw new Error(`model: unknown operation ${op.id}`);
     }
 
+    // The intent the operation LEFT in force. A LOAD issued during the operation
+    // may legitimately carry either this or the one it started with: an operation
+    // that adopts a receiver's play/pause changes the intent WHILE a load of ours
+    // may be in flight, and the step boundary cannot say which side of that change
+    // a given LOAD fell on. Both are intents the user really expressed, so both are
+    // accepted; an intent from an earlier operation still fails.
+    expect.autoplayAfter = next.desiredPlayback === "playing";
+
     // A load that is now allowed to start is a generation for the position in
     // force; recording it makes "the position a generation was started for" a
     // property of the sequence, not of one observation.
     if (expect.startsGeneration) {
         const target = expect.generationTarget ?? next.desiredPageTime;
+        // Starting a generation means asking the bridge for a remux, so a load is
+        // in flight from that moment until something resolves it.
+        next.activeLoad = { target, mediaIdentity: next.mediaIdentity };
         next.generatedTargets = [...next.generatedTargets, target];
         next.generationIdentities = [
             ...next.generationIdentities,
@@ -318,4 +360,43 @@ function applyToModel(state, op) {
     return { state: next, expect };
 }
 
-module.exports = { createModel, applyToModel, SETTLED, DEFAULT_STATE };
+/**
+ * Tell the model what the receiver is doing now, WITHOUT treating it as a user
+ * action.
+ *
+ * The world advances when a load of ours is answered: the receiver comes up on a
+ * new session and reports the state that LOAD asked for. That is the model's
+ * equivalent of the implementation's `noteReceiverReport` - a memory, not a
+ * decision - and without it the model's "the session we have been watching" goes
+ * stale, so an explicit receiver report on the CURRENT session looks like a new
+ * session to the model while the implementation (which does record every tick)
+ * adopts it. The two then disagree about which play/pause intent the next LOAD
+ * should inherit.
+ *
+ * The caller supplies what the receiver reported (the harness knows: it is the
+ * media the sender is bound to), never a decision.
+ */
+function observeWorldAdvance(model, { mediaSessionId, playerState }) {
+    if (mediaSessionId === undefined || typeof playerState !== "string") {
+        return model;
+    }
+    if (
+        model.lastReceiverSession === mediaSessionId &&
+        model.lastReceiverState === playerState
+    ) {
+        return model;
+    }
+    return {
+        ...model,
+        lastReceiverSession: mediaSessionId,
+        lastReceiverState: playerState
+    };
+}
+
+module.exports = {
+    createModel,
+    applyToModel,
+    observeWorldAdvance,
+    SETTLED,
+    DEFAULT_STATE
+};

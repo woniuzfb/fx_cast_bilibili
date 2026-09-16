@@ -40,6 +40,43 @@ would say nothing about the real one.
 things, with four different owners, and the defects live at the boundaries between
 them. One `PLAY` operation could not tell them apart. See `cases.js`.
 
+## The world does not advance by itself
+
+An operation runs in exactly the state the previous one left. The bridge and the
+receiver answer only when a case says so:
+
+```text
+ITEM_CHANGE / QUALITY_CHANGE   start a load; it stays in flight (page controls detached)
+LOAD_RESOLVE                   resolve or refuse that load
+SETTLE                         let everything outstanding run to completion
+```
+
+The model tracks that as `activeLoad`, and every case states its own world
+advancement - which is the whole difference between the two kinds of pair:
+
+```text
+ITEM_CHANGE → SETTLE → BLE_PAUSE        the command on a settled cast
+ITEM_CHANGE → BLE_PAUSE → LOAD_RESOLVE  the command INSIDE the window
+```
+
+An earlier version of the runner settled outstanding loads before every
+non-lifecycle operation. That turned the second kind into the first, so the
+pairwise suite went green without ever being inside the window - the interleavings
+this stage exists for were scheduled away. The pairwise list now covers
+load-in-flight triples explicitly, and half of every generated sequence leaves the
+world in flight while the other half advances it.
+
+Two model simplifications are named rather than hidden:
+
+-   `pageControlsAttached` says the page's controls were detached by an item/quality
+    change and came back when the world advanced. It does NOT predict the moment the
+    implementation re-attaches them mid-window (a superseding transaction does that),
+    which is why I4 is asserted for the operation that follows the change - the case
+    the load matrix's flow N pins - and not for the whole window.
+-   Whether a seek opens a new transaction or coalesces onto the load in flight is
+    the coordinator's decision. The model states the input (`activeLoad`) and lets the
+    invariants bound the answer, instead of predicting it.
+
 ## The invariants (`invariants.js`)
 
 |     | property                                                                                                                     |
@@ -52,6 +89,26 @@ them. One `PLAY` operation could not tell them apart. See `cases.js`.
 | I6  | nothing happens after a stop                                                                                                 |
 | I7  | every generation carries the pad policy in force (bridge arithmetic)                                                         |
 | I8  | a pending seek never crosses into another video                                                                              |
+
+### Found again when the scheduler stopped settling
+
+Removing the implicit settle (above) put the pairwise suite inside the windows it
+claimed to test, and three more things surfaced:
+
+4. An item change's identity was a fixed placeholder, so the model saw the second
+   change as "the same video" while the fixture adopted a new page key. Every item
+   change now gets a unique identity, and each step records the page key a
+   generation was started under.
+5. I2/I3 compared a LOAD against the intent from _before_ the operation. An
+   operation that ADOPTS a receiver's play/pause changes the intent while a load
+   may already be in flight, so a LOAD may legitimately carry either; the invariant
+   now accepts the intent on either side of the operation and still fails a stale
+   one.
+6. The model's "session we are watching" went stale: the world advancing (a load
+   answered, a new session up) is a MEMORY, not a user action, and the model now
+   receives it through `observeWorldAdvance` - without it, an explicit receiver
+   report on the current session looked like a new session to the model while the
+   implementation adopted it.
 
 ## Usage
 

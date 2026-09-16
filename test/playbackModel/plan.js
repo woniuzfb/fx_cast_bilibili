@@ -102,15 +102,29 @@ function loadBridgePlan() {
         "contentBaseSeconds",
         `return ${presentationSource};`
     );
-    // The arm the source uses for the Chromecast path: `useStartupPadding` is
-    // true for every non-Roku cast while the option is on (its default), which
-    // is the configuration every receiver row below runs in.
+    // The pad POLICY, read out of its own named function in the bridge
+    // (`dashPadBaseSeconds`). It used to be restated here, which made I7 check
+    // this file's copy of the formula rather than the bridge's: a change to the
+    // policy would have kept the harness green.
+    const padPolicyMatch = new RegExp(
+        `function dashPadBaseSeconds\\([\\s\\S]*?\\)\\s*:\\s*number\\s*\\{\\s*return ([\\s\\S]*?);\\s*\\}`
+    ).exec(source);
+    if (!padPolicyMatch) {
+        throw new Error(
+            "plan: the bridge's pad policy (dashPadBaseSeconds) was not found in mediaServer.ts"
+        );
+    }
+    // The body's own names, bound to this fixture's values: `contentBaseSeconds`
+    // is the probe's keyframe and `startupPadding` the option.
     // eslint-disable-next-line no-new-func
     const padBaseExpression = new Function(
         "keyframe",
         "minPadSeconds",
         "startupPadding",
-        `return startupPadding ? Math.max(keyframe, minPadSeconds) : keyframe;`
+        `const CHROMECAST_MIN_PAD_SECONDS = minPadSeconds;
+         const contentBaseSeconds = keyframe;
+         const startupPaddingEnabled = startupPadding;
+         return ${padPolicyMatch[1].trim()};`
     );
 
     return {
