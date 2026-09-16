@@ -213,6 +213,67 @@ function main(modules) {
         JSON.stringify(ticked)
     );
 
+    // ---- the receiver's position is REMUX-relative, not page time ---------
+    //
+    // Measured on a Roku cast (console export 2026-09-17 01:50): the session
+    // reported 8.795 while its media stated dashStart 636.2016 and offset 0, and
+    // the popup published 8.795 — so the bar started at 0:00 and counted up from
+    // there. The conversion is dashStart + raw - offset, and it is ONE place.
+    const deviceManagerSourceForMapping = fs.readFileSync(
+        path.join(extensionSrc, "background/deviceManager.ts"),
+        "utf8"
+    );
+    check(
+        "mapping: the receiver position is converted with dashStart + raw - offset",
+        /Math\.max\(0, dashStart \+ raw - presentationOffset\)/.test(
+            deviceManagerSourceForMapping
+        ),
+        "the mapping still drops dashStart (the popup then starts each cast at 0:00)"
+    );
+    check(
+        "mapping: a media that states no dashStart is refused instead of anchored at 0",
+        /DASH current time NOT mapped \(no dashStart\)/.test(
+            deviceManagerSourceForMapping
+        ),
+        "a missing dashStart would be treated as page 0"
+    );
+    check(
+        "mapping: the identity map carries dashStart alongside the offset (periodic reports drop customData)",
+        /dashPresentationByMedia = new Map</.test(
+            deviceManagerSourceForMapping
+        ) &&
+            /\{ offsetSeconds: number; dashStart: number \}/.test(
+                deviceManagerSourceForMapping
+            ),
+        "the recalled shift has no dashStart to convert with"
+    );
+    // The numbers from that cast, as the popup would receive them.
+    const rokuSample = {
+        mediaId: "roku-media",
+        // deviceManager's output for raw 8.795 with dashStart 636.2016, offset 0.
+        currentTime: 636.2015791209959 + 8.795,
+        duration: 6022,
+        now: 2_000_000,
+        contentId: "http://10.0.0.111:9555/s/gen/index.m3u8?v=1",
+        playerSettled: true,
+        isPlaying: true,
+        dashRemux: true,
+        dashStart: 636.2015791209959
+    };
+    const rokuTimeline = updatePopupMediaTimeline(
+        { mediaId: "", currentTime: 0, updatedAt: 0, duration: 0 },
+        rokuSample
+    );
+    check(
+        "popup timeline (Roku): a cast 636s in shows 636s, not 0:00",
+        Math.abs(rokuTimeline.currentTime - 644.9965791209959) < 1e-6,
+        JSON.stringify({
+            stored: rokuTimeline.currentTime,
+            dashStart: rokuSample.dashStart,
+            raw: 8.795
+        })
+    );
+
     // ---- the popup must not own a conversion at all ----------------------
     const popupSource = fs.readFileSync(
         path.join(extensionSrc, "ui/popup/ReceiverMedia.svelte"),

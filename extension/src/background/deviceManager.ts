@@ -184,7 +184,10 @@ export default new (class extends TypedEventTarget<EventMap> {
      * replaced whenever that device's media states a new generation, so the table
      * tracks one generation per device instead of growing.
      */
-    private dashPresentationByMedia = new Map<string, number>();
+    private dashPresentationByMedia = new Map<
+        string,
+        { offsetSeconds: number; dashStart: number }
+    >();
     /**
      * Signature of the last remote ECP media sample traced per device. The
      * bridge publishes EVERY completed poll - command confirmation needs
@@ -267,17 +270,23 @@ export default new (class extends TypedEventTarget<EventMap> {
     /**
      * Receiver position -> page position for a Bilibili DASH remux.
      *
-     * Both device families report an ABSOLUTE position, but on different clocks,
-     * and the difference is exactly the pad runway the bridge inserted:
+     * The receiver reports its position RELATIVE TO THE MEDIA IT WAS GIVEN, and
+     * that media is a playlist the bridge generated from the page's seek target:
      *
-     *   Chromecast  the player's own clock over the generated playlist, which is
-     *               `page + presentationOffset` (it was loaded there).
-     *   Roku        the emulated session composes page time already, with an
-     *               offset of 0 by construction (its pad base IS its keyframe).
+     *     receiverTime = (pageTime - dashStart) + presentationOffset
      *
-     * So the mapping is one subtraction either way, and the media's own stated
-     * offset is the only input. `dashStart` must NOT be added: it is already
-     * inside both numbers.
+     * `dashStart` is where that playlist's real content sits in page time (the
+     * seek target), and `presentationOffset` is the synthetic pad runway in
+     * front of it. Both receivers behave this way — measured on-device:
+     * Chromecast walked a 32s runway and reported `page + 32`; the Roku session
+     * reported 10.066s five seconds after a load at `dashStart` 1086.65 (its
+     * `?fxcastNoPad=1` playlist means its offset is 0, not that its position is
+     * page time).
+     *
+     * So the mapping is `dashStart + receiverTime - presentationOffset`, and
+     * dropping `dashStart` is what made the popup start every Roku cast at 0:00
+     * and count up from there (measured: raw 8.795 with dashStart 636.2 was
+     * published as 8.795 instead of 644.995).
      *
      * The offset comes from the media THIS report is about, through the media's
      * own identity — never from a device-level value that a later media could
@@ -318,12 +327,19 @@ export default new (class extends TypedEventTarget<EventMap> {
         // The media's own statement wins and refreshes the identity map, so a
         // later report that dropped customData still resolves to the same shift.
         const declaredOffset = declaredPresentationOffset(customData);
-        if (declaredOffset !== undefined) {
-            this.rememberDashPresentation(identity, declaredOffset);
+        const declaredStart = Number(customData?.dashStart);
+        if (declaredOffset !== undefined && Number.isFinite(declaredStart)) {
+            this.rememberDashPresentation(
+                identity,
+                declaredOffset,
+                declaredStart
+            );
         }
-        const presentationOffset =
-            declaredOffset ?? this.recallDashPresentation(identity);
-        if (presentationOffset === undefined) {
+        // `declaredOffset` may legitimately be undefined while `dashStart` is
+        // stated: a media with no runway declares no offset. The pair is
+        // resolved below from whichever source has it.
+        const recalled = this.recallDashPresentation(identity);
+        if (declaredOffset === undefined && recalled === undefined) {
             void logMediaDebug(
                 "DASH current time NOT mapped (unknown identity)",
                 {
@@ -339,12 +355,31 @@ export default new (class extends TypedEventTarget<EventMap> {
 
         const raw = Number(receiverTime ?? 0);
         if (!Number.isFinite(raw)) return undefined;
-        const pageTime = Math.max(0, raw - presentationOffset);
+        // Where this media's content starts in page time. A media that never
+        // stated one cannot be converted: without it the receiver's position is
+        // anchored nowhere, and 0 is a position (the start of the video), not a
+        // safe default.
+        const dashStart =
+            declaredOffset !== undefined && Number.isFinite(declaredStart)
+                ? declaredStart
+                : recalled?.dashStart;
+        const presentationOffset = declaredOffset ?? recalled?.offsetSeconds;
+        if (presentationOffset === undefined || dashStart === undefined) {
+            void logMediaDebug("DASH current time NOT mapped (no dashStart)", {
+                deviceId: device.id,
+                deviceLabel: deviceDebugLabel(device),
+                rawStatusCurrentTime: raw,
+                mediaSessionId: identity.mediaSessionId,
+                mediaContentId: identity.contentId
+            });
+            return undefined;
+        }
+        const pageTime = Math.max(0, dashStart + raw - presentationOffset);
         void logMediaDebug("DASH current time mapped", {
             deviceId: device.id,
             deviceLabel: deviceDebugLabel(device),
             rawStatusCurrentTime: raw,
-            mediaDashStart: Number(customData?.dashStart),
+            mediaDashStart: dashStart,
             declaredOffset,
             mediaSessionId: identity.mediaSessionId,
             chosenOffset: presentationOffset,
@@ -368,23 +403,30 @@ export default new (class extends TypedEventTarget<EventMap> {
             mediaSessionId?: number;
             contentId?: string;
         },
-        offsetSeconds: number
+        offsetSeconds: number,
+        dashStart: number
     ) {
         const normalized =
             Number.isFinite(offsetSeconds) && offsetSeconds > 0
                 ? offsetSeconds
                 : 0;
-        const records: Array<[string, number]> = [];
+        const record = {
+            offsetSeconds: normalized,
+            dashStart: Number.isFinite(dashStart) ? dashStart : 0
+        };
+        const records: Array<
+            [string, { offsetSeconds: number; dashStart: number }]
+        > = [];
         const sessionKey =
             identity.mediaSessionId === undefined
                 ? undefined
                 : dashSessionKey(identity.deviceId, identity.mediaSessionId);
-        if (sessionKey) records.push([sessionKey, normalized]);
+        if (sessionKey) records.push([sessionKey, record]);
         const contentKey = dashContentKey(
             identity.deviceId,
             identity.contentId
         );
-        if (contentKey) records.push([contentKey, normalized]);
+        if (contentKey) records.push([contentKey, record]);
         // Only KEEP one adapter identity per device and per generation: the maps
         // are bounded by clearing this device's entries first, so a long
         // multi-item session cannot accumulate a table of dead media.
@@ -402,7 +444,7 @@ export default new (class extends TypedEventTarget<EventMap> {
         deviceId: string;
         mediaSessionId?: number;
         contentId?: string;
-    }): number | undefined {
+    }): { offsetSeconds: number; dashStart: number } | undefined {
         const sessionKey =
             identity.mediaSessionId === undefined
                 ? undefined
@@ -780,13 +822,19 @@ export default new (class extends TypedEventTarget<EventMap> {
         if (!device) return;
         const status = device.mediaStatus;
         if (!status?.media) return;
+        const mediaCustomData =
+            status.media.customData &&
+            typeof status.media.customData === "object"
+                ? (status.media.customData as { dashStart?: unknown })
+                : undefined;
         this.rememberDashPresentation(
             {
                 deviceId,
                 mediaSessionId: status.mediaSessionId,
                 contentId: status.media.contentId
             },
-            Number(seconds)
+            Number(seconds),
+            Number(mediaCustomData?.dashStart)
         );
     }
 
