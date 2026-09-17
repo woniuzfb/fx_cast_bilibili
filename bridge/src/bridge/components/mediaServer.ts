@@ -596,10 +596,25 @@ async function startDashRemuxServer(
         audio: 0
     };
     /** Clear the kind's missing-wait state (owner-guarded when given) and
-     *  zero its activity counter, so no stale value can ever be read later. */
+     *  zero its activity counter, so no stale value can ever be read later.
+     *
+     *  A cleared wait that lasted longer than a segment is reported: it is the
+     *  only evidence that the remux was parked waiting for the page, and the
+     *  per-chunk events around it are deliberately suppressed. Without it a
+     *  relay that starves (the receiver drains its prebuffer and sits in
+     *  BUFFERING) leaves NOTHING in an always-on log to say where it stopped. */
     const clearMissingWait = (kind: CaptureKind, owner?: symbol) => {
         if (owner !== undefined && missingSegmentWait[kind]?.owner !== owner) {
             return;
+        }
+        const waited = missingSegmentWait[kind];
+        if (waited && Date.now() - waited.since >= 1000) {
+            captureDebug("captured-fragment-arrived", {
+                kind,
+                sourceStart: waited.start,
+                sourceEnd: waited.end,
+                waitedMs: Date.now() - waited.since
+            });
         }
         delete missingSegmentWait[kind];
         uniqueBeyondGap[kind] = 0;
@@ -1321,9 +1336,28 @@ async function startDashRemuxServer(
                 let selectedSegmentIndex = -1;
                 let selectedStart: number | undefined;
                 let selectedTime = normalizedStartTime;
+                // Bounded to one report per GET coroutine: this loop re-checks
+                // on EVERY ingest, and a per-chunk log would bury the signal it
+                // exists to provide.
+                let initWaitReported = false;
                 while (!segments.length) {
                     init = input.ranges.find(range => range.start === 0);
                     if (!init) {
+                        if (!initWaitReported) {
+                            initWaitReported = true;
+                            // Parked with no response head sent yet: the page
+                            // never captured this kind's Range-0 (its init), and
+                            // there is no fragment table to select from either.
+                            // The remux fails with "Error opening input file
+                            // …/<kind>" and nothing else — this line is what says
+                            // which kind and how much of it did arrive.
+                            captureDebug("waiting-for-captured-init", {
+                                kind,
+                                capturedRanges: input.ranges.length,
+                                firstCapturedStart: input.ranges[0]?.start,
+                                firstCapturedEnd: input.ranges[0]?.end
+                            });
+                        }
                         await waitForInputEvent(input);
                         continue;
                     }
@@ -1489,6 +1523,18 @@ async function startDashRemuxServer(
                                 since: Date.now(),
                                 owner: waitToken
                             };
+                            // Parked BEFORE the input start was chosen: the
+                            // remux never even opens this kind, so the failure
+                            // shows up as "no mediaServerStarted at all" rather
+                            // than as a stall. Same bookmark as the serving
+                            // loop's, with the range nobody captured.
+                            captureDebug("waiting-for-captured-input-start", {
+                                kind,
+                                sourceStart: target.start,
+                                sourceEnd: target.end,
+                                mediaTime: target.time,
+                                requestedTime: normalizedStartTime
+                            });
                         }
                         await waitForInputEvent(input);
                         continue;
@@ -1596,6 +1642,17 @@ async function startDashRemuxServer(
                                 since: Date.now(),
                                 owner: waitToken
                             };
+                            // Always-on: the remux is now parked. This is the
+                            // bookmark for "the receiver is about to drain its
+                            // buffer" — the frame ffmpeg needs is not captured,
+                            // and only the page can supply it.
+                            captureDebug("waiting-for-captured-fragment", {
+                                kind,
+                                sourceStart: segment.start,
+                                sourceEnd: segment.end,
+                                mediaTime: segment.time,
+                                requestedTime: normalizedStartTime
+                            });
                         }
                         await waitForInputEvent(input);
                         continue;

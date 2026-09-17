@@ -557,3 +557,93 @@ dispatch does not change that answer (`receiverPending` is published separately
 and is what the pending indicator renders). The default run asserts the GAP, so
 the file is a control as well: it fails when the fix is absent and passes when it
 is present.
+
+## The Roku item transition: `rokuItemTransition.js`
+
+`node test/senders/rokuItemTransition.js` (also in `npm run test:senders`)
+
+On the device one part switch produced three overlapping relay generations in
+one second (generation 6 -> 8 -> 10, all inside 550ms). Three sources each
+started a reload of their own — the capture's per-kind representation commits,
+the 750ms SPA navigation poll, and the relay verdict that followed each failure —
+and every generation tore the previous one down before it could become ready, so
+none of them ever reached `mediaServerStarted` and the Roku never received a
+LOAD.
+
+The sender now has ONE owner of "the receiver must be reloaded for the page's
+current item", and it starts a relay only while the capture holds a COMPLETE
+pair (one committed video+audio pair, one init each, both from the same item).
+This test drives the real bundled `bilibili.ts` with `MediaSender` stubbed (the
+same scaffolding as `pageTransition.js`) and reports only two things: how many
+`updateMedia` calls a burst of facts produces, and whether the capture's pair was
+complete when the load started.
+
+Contract: a burst (both kinds committing plus the navigation poll) starts exactly
+ONE relay, started with the pair already complete; nothing starts while the
+capture has no pair, and the relay starts as soon as it does; a failed relay is
+NOT retried for the same pair (that is what turned one failure into a chain — the
+750ms poll still retries after a cooldown), while a pair that really changed
+earns exactly one more attempt.
+
+`--pre-fix` (default revision `30a2173`) requires the "one relay per burst" row to
+FAIL there: the same three facts start two relays, and the failure case produces
+four or five. The harness found two real defects in the owner itself while it was
+being written (a transition that returned before releasing ownership, and a
+settle step that read an unset version as "the pair changed" and re-armed itself),
+which is why it asserts counts rather than only that something was called.
+
+## The page capture across an item switch: `test/playback/pageCaptureTransition.js`
+
+`node test/playback/pageCaptureTransition.js` (also in `npm run test:playback`)
+
+This is the harness whose absence let the replacement-handoff line stay green
+through a device failure. The capture had not lost the page's bytes to a
+"generation boundary" — it had DESTROYED them itself: an SPA identity change (the
+URL catching up with the item switch, ~100ms after the new representation
+committed) called `resetMediaGeneration` and wiped the just-validated pair, its
+inits, and the candidate queues holding the new item's already-fetched fragments.
+The page does not re-fetch ranges its MSE already holds, and audio's few ranges
+had all been fetched before the switch — so the successor relay got init for both
+kinds and not one audio fragment. That is why replaying 2.5 MB changed nothing:
+replaying bytes the capture had already dropped is not the same as not dropping
+them.
+
+The harness bundles the real `background/bilibiliPageCapture.ts` and drives it
+through a `webRequest` seam that HONOURS the registered filters (a seam that
+called every listener would fire the main-frame navigation reset on every media
+request and measure the stub). Cases:
+
+-   a committed pair resolves to a VERSIONED snapshot reporting both inits, and
+    reading twice does not move the version;
+-   an item switch whose URL update arrives after the commit: both kinds announce
+    themselves, the new pair still resolves with a new version, and the audio
+    fragments fetched BEFORE the URL update reach the new relay as a COMPLETE
+    contiguous range (the decisive row — "a payload was posted" is not the
+    criterion, which is exactly how the previous round's harness was fooled);
+-   a half-committed switch (video moved, audio not yet) resolves to nothing;
+-   another item's pair is never handed out, while an item-less read still works.
+
+`--pre-fix` (default revision `30a2173`) requires the version, notification,
+resolution and range rows to FAIL there; it reports ten failures, including "the
+audio init does not even reach the new relay".
+
+### `--regress` controls (the second device log, 2026-09-17 22:59)
+
+Both item-transition harnesses now carry a control that rewrites the CURRENT source
+rather than checking out another revision, because the defects being pinned were
+introduced and fixed inside one round:
+
+-   `node test/senders/rokuItemTransition.js --regress` rewrites the settle
+    comparison back to `now !== transition.loadedPairVersion` — treating "the
+    capture cannot answer right now" as "the pair changed" — and requires the
+    "undefined pair" row to FAIL. With the fix, a load that succeeded is not
+    followed by a second relay; without it, the harness reports `total=2`, which is
+    the device's black screen: the second transition waits out the 8s pair timeout,
+    falls back, and tears down the relay that was playing.
+-   `node test/playback/pageCaptureTransition.js --regress` puts the "the newest
+    manifest must declare the committed path" condition back into the pair gate and
+    requires the manifest rows to FAIL. That rule made a whole real session fall
+    back to the playurl pair (`using exact page-captured DASH pair` appeared zero
+    times): every playurl response replaces the manifest map, and the extension's
+    OWN `resolveMedia()` fetch enumerates the renditions bilibili would serve that
+    request, not the one the page's player fetched.

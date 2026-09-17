@@ -157,3 +157,41 @@ instead of inferred:
     position that was sent, and the session ids present at that moment.
 -   `DASH item transition window closed` — the reason: `new-media-position`,
     `load-rejected`, `new-load`, `deadline`, or `stopped`.
+
+## The capture input contract: `pageCaptureRemux.js`
+
+`node test/bridge/pageCaptureRemux.js` (also in `npm run test:bridge`)
+
+The replacement-handoff line (see `.workbuddy/memory/2026-09-16.md`,
+"【推翻】6.32-6.35") was declared fixed on a harness whose success criterion was
+"some bridge port received a payload with the expected marker". On the device
+that criterion held while the remux still failed, because the bridge does not
+need "a payload": per kind it needs a Range-0 init whose sidx declares a
+fragment whose FULL byte range has been captured. Only then does it emit
+`page-response-start-selected`, only that sets `keyframeResolved` /
+`padReadyResult` for video, and only then does the readiness gate clear.
+
+This harness runs that contract for real:
+
+1. `mediaServer.ts` is bundled from source and `startRemoteMediaServer` is called
+   with `rokuDashPrebuffer: true` — the Roku capture path, with its own
+   `/ingest`, `/video` and `/audio` endpoints.
+2. The fixture "page" POSTs synthetic-but-real DASH bytes (one shared layout:
+   `test/fixtures/syntheticDash.js`) in exactly the ranges a page would: a
+   Range-0 init (ftyp+moov+sidx) followed by whole sidx fragments. Synthetic
+   rather than downloaded, because the point is to vary the RANGE SET and see
+   what the bridge does with it.
+3. The fake ffmpeg really opens both `-i` URLs over HTTP and drains them, so the
+   bridge's per-kind input selection is entered the way production enters it; and
+   it produces no output until BOTH inputs have yielded bytes, which is the
+   faithful shape of `-map 0:v:0 -map 1:a:0` and is what makes "an audio input
+   with nothing to read" mean "no playlist, no `mediaServerStarted`".
+
+Cases: both kinds fed (both selected, gate clears, playlist advertises the
+prebuffer and every advertised segment is servable); audio's covering fragment
+missing; audio's Range-0 missing (both: video selects, audio NEVER does, the
+audio input receives not one byte, no stream at all); and audio arriving late
+(audio DOES select — the bridge waits, it does not fail, so a fix belongs
+upstream in the capture). The last two cases are the local reproduction of the
+on-device failure; the "missing" cases double as the negative control for the
+"both kinds fed" rows.

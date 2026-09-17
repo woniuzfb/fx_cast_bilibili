@@ -80,6 +80,14 @@ interface PageState {
      * dead page.
      */
     uploadEpoch: number;
+    /**
+     * Bumped by every representation commit and every media-generation reset.
+     * A pair snapshot is only usable while this is unchanged, and the version
+     * is what the sender re-reads around `input-listening`: it proves the pair
+     * the relay was started for is still the pair the page has committed
+     * (see pairSnapshot).
+     */
+    captureGeneration: number;
 }
 
 interface CaptureRequest {
@@ -133,6 +141,22 @@ function pageIdentity(url?: string): string | undefined {
     } catch {
         return undefined;
     }
+}
+/**
+ * The item a captured representation belongs to. Bilibili addresses every media
+ * object under a per-item folder
+ * (`/upgcxcode/<a>/<b>/<item>/<item>-1-<code>.m4s`), and that folder changes
+ * with the item — observed across a part switch: `…/31065573226/31065573226-1-…`
+ * became `…/31065115218/31065115218-1-…`. A media URL carries no other item
+ * identity, so this is what a pair is matched against.
+ *
+ * Returns undefined when the shape is not recognised, and the pair gate treats
+ * that as "no evidence" rather than as a match: an unknown folder must never
+ * widen the gate (the failure that costs a wrong video on the receiver is much
+ * worse than the one that costs a fallback to the playurl pair).
+ */
+function itemFolderOf(path: string): string | undefined {
+    return /^\/upgcxcode\/[^/]+\/[^/]+\/([^/]+)\//.exec(path)?.[1];
 }
 function mediaResource(url: string): { path: string; kind?: Kind } | undefined {
     try {
@@ -222,9 +246,139 @@ function rememberHandoffPayload(state: PageState, item: Payload) {
     }
 }
 
+/**
+ * The atomic, versioned pair the sender may load, or undefined when there is
+ * not exactly one committed video+audio pair that provably belongs together.
+ *
+ * Every condition is evidence, and each one has a measured failure behind it —
+ * a successor relay built on a pair that failed any of them cannot become
+ * ready, and the Roku then never receives a LOAD at all:
+ *
+ *   1. both kinds have a COMMITTED stream (a candidate is not the page's
+ *      current representation) and a captured init. Without an init the
+ *      bridge does not fail, it PARKS (`Missing <kind> init response` is only
+ *      reached once a fragment table exists), so a pair with one init is a
+ *      silent stall.
+ *   2. both kinds belong to the SAME item (their item folders agree), so a
+ *      half-finished switch — video committed, audio still the previous object
+ *      — is never resolvable as one pair.
+ *   3. when the sender states which item it is about to load, both paths' item
+ *      folder must match it (see itemFolderOf). This is what keeps the PREVIOUS
+ *      item's pair out of a new item's load, and it is the same evidence the
+ *      load itself uses, so this gate and the load can never disagree about
+ *      which item a pair belongs to.
+ *
+ * There used to be a fourth condition — "the page's newest manifest declares
+ * both committed paths" — and a real session showed why it must not exist: that
+ * map is REPLACED wholesale by every playurl response, and the extension's own
+ * `resolveMedia()` fetch (qn=112, AVC-preferred) is one of them. It enumerates
+ * the renditions bilibili would serve THAT request, not the one the page's
+ * player actually fetched (measured: the page played the AV1 1080p
+ * `…-1-100026.m4s` while the extension's response described `…-1-30080.m4s`).
+ * The moment that response landed, the captured pair stopped being authorised —
+ * `using exact page-captured DASH pair` never appeared once in that whole
+ * session and every load fell back to the playurl pair. Item identity belongs to
+ * condition 3, where it is precise; "is it still in the newest rendition list"
+ * is not item identity at all.
+ *
+ * Deleting any of 1/2/3 turns the gate back into "something is captured", which
+ * is the criterion the replacement-handoff line was measured against — and the
+ * device falsified it (2.5 MB replayed, audio still never selected).
+ */
+interface CapturePairSnapshot {
+    captureGeneration: number;
+    itemKey?: string;
+    video: { path: string; url: string; initEndExclusive?: number };
+    audio: { path: string; url: string; initEndExclusive?: number };
+}
+/** Why a pair could not be resolved. Every value names the condition that
+ *  failed, so the next log answers "why is the pair not ready" directly instead
+ *  of leaving a list of committed paths and a manifest count to interpret. */
+type PairRefusal =
+    | "no-committed-video"
+    | "no-committed-audio"
+    | "no-video-init"
+    | "no-audio-init"
+    | "item-mismatch"
+    | "kinds-are-different-items";
+interface PairResolution {
+    snapshot?: CapturePairSnapshot;
+    reason?: PairRefusal;
+    /** The item the committed paths belong to, when derivable: the interesting
+     *  comparison whenever `reason` is `item-mismatch`. */
+    committedItem?: string;
+}
+function pairResolution(
+    state: PageState,
+    expectedItem?: string
+): PairResolution {
+    const entryFor = (kind: Kind) => {
+        let found: { path: string; stream: PathState } | undefined;
+        for (const [path, stream] of state.paths) {
+            if (stream.kind !== kind || stream.replacesPath) continue;
+            found = { path, stream };
+        }
+        if (!found) return undefined;
+        if (!state.initByKind[kind]) return undefined;
+        // 3: the item the caller is about to load. This is the only item
+        // evidence a media URL carries, and the caller states the item from the
+        // same playlist resolution that will feed the load.
+        if (expectedItem && itemFolderOf(found.path) !== expectedItem)
+            return undefined;
+        const init = state.initByKind[kind]!;
+        return {
+            path: found.path,
+            url: found.stream.url,
+            initEndExclusive: init.end + 1
+        };
+    };
+    const video = entryFor("video");
+    const audio = entryFor("audio");
+    const committedVideo = [...state.paths.entries()].find(
+        ([, stream]) => stream.kind === "video" && !stream.replacesPath
+    );
+    const committedAudio = [...state.paths.entries()].find(
+        ([, stream]) => stream.kind === "audio" && !stream.replacesPath
+    );
+    if (!committedVideo) return { reason: "no-committed-video" };
+    if (!committedAudio) return { reason: "no-committed-audio" };
+    const committedItem = itemFolderOf(committedVideo[0]);
+    if (!video)
+        return {
+            reason: state.initByKind.video ? "item-mismatch" : "no-video-init",
+            committedItem
+        };
+    if (!audio)
+        return {
+            reason: state.initByKind.audio ? "item-mismatch" : "no-audio-init",
+            committedItem
+        };
+    // 2: the two kinds must be the SAME item. A switch that lands between them
+    // (video committed, audio still the previous object) would otherwise resolve
+    // as one pair and build a relay out of two different media objects. The item
+    // folder is the identity a media URL carries, so when both are derivable they
+    // must agree; when the shape is unrecognised there is no evidence either way
+    // and the pair is not held back (the alternative — refusing every pair on a
+    // path shape this code does not know — would disable capture entirely).
+    const videoFolder = itemFolderOf(video.path);
+    const audioFolder = itemFolderOf(audio.path);
+    if (videoFolder && audioFolder && videoFolder !== audioFolder)
+        return { reason: "kinds-are-different-items", committedItem };
+    return {
+        snapshot: {
+            captureGeneration: state.captureGeneration,
+            itemKey: state.pageUrl,
+            video,
+            audio
+        },
+        committedItem
+    };
+}
+
 function resetMediaGeneration(state: PageState, reason: string) {
     state.kindGeneration.video++;
     state.kindGeneration.audio++;
+    state.captureGeneration++;
     // Bump the upload epoch and drop the relay identity: any in-flight
     // upload chain from the previous generation must stop touching
     // pendingBytes or POSTing — its captured `pending` array reference points
@@ -251,34 +405,64 @@ function resetMediaGeneration(state: PageState, reason: string) {
 function pageState(tabId: number, pageUrl?: string) {
     const identity = pageIdentity(pageUrl);
     let state = pages.get(tabId);
-    if (state && identity && state.pageUrl && state.pageUrl !== identity) {
-        resetMediaGeneration(state, "page-identity-changed");
-        pages.delete(tabId);
-        state = undefined;
+    if (state) {
+        if (identity && state.pageUrl && state.pageUrl !== identity) {
+            // An SPA item change is NOT a reason to discard captured bytes.
+            //
+            // The page's own representation switch (commitReplacement) already
+            // drew the media-generation boundary, and everything captured since
+            // then belongs to the NEW item: the page does not re-fetch byte
+            // ranges its MSE already holds, so a wipe here destroys exactly the
+            // bytes the successor relay needs. Measured on a part switch with
+            // the wipe in place: the predecessor relay had been torn down, the
+            // successor got an init for BOTH kinds and not one audio fragment
+            // (audio's few ranges had already been fetched and were dropped),
+            // the bridge then parked waiting for the covering fragment, the
+            // readiness gate never closed, and the Roku never received a LOAD.
+            //
+            // What must genuinely not happen is handing the PREVIOUS item's
+            // pair to a new item's load. That is now decided from evidence —
+            // the pair must be declared by the page's newest manifest and match
+            // the item the sender states (pairSnapshot) — instead of from this
+            // URL string, which lags the media by hundreds of milliseconds
+            // (measured: the new representation committed 100ms BEFORE the URL
+            // updated).
+            logger.info(
+                "[Bilibili page capture] page identity changed; captured bytes are kept",
+                { tabId, from: state.pageUrl, to: identity }
+            );
+            // Disarm WITHOUT dropping: the previous relay no longer describes
+            // the page's current item, so continuing to POST into it would get
+            // the new item's payloads rejected (a 409 is dropped, not kept) and
+            // silently destroy the very bytes being retained. The sender's next
+            // `begin` re-arms and re-queues them (see beginBilibiliPageCapture).
+            invalidateRelayUploads(state);
+            state.pageUrl = identity;
+        } else if (identity) {
+            state.pageUrl = identity;
+        }
+        return state;
     }
-    if (!state) {
-        state = {
-            tabId,
-            pageUrl: identity,
-            paths: new Map(),
-            representations: new Map(),
-            initByKind: {},
-            kindGeneration: { video: 0, audio: 0 },
-            notifyWhenInitialized: new Set(),
-            pending: { video: [], audio: [] },
-            pendingBytes: 0,
-            upload: { video: Promise.resolve(), audio: Promise.resolve() },
-            retryTimers: {},
-            retryAttempts: {},
-            handoff: { video: [], audio: [] },
-            handoffBytes: 0,
-            handoffPending: false,
-            uploadEpoch: 0
-        };
-        pages.set(tabId, state);
-    } else if (identity) {
-        state.pageUrl = identity;
-    }
+    state = {
+        tabId,
+        pageUrl: identity,
+        paths: new Map(),
+        representations: new Map(),
+        initByKind: {},
+        kindGeneration: { video: 0, audio: 0 },
+        notifyWhenInitialized: new Set(),
+        pending: { video: [], audio: [] },
+        pendingBytes: 0,
+        upload: { video: Promise.resolve(), audio: Promise.resolve() },
+        retryTimers: {},
+        retryAttempts: {},
+        handoff: { video: [], audio: [] },
+        handoffBytes: 0,
+        handoffPending: false,
+        uploadEpoch: 0,
+        captureGeneration: 0
+    };
+    pages.set(tabId, state);
     return state;
 }
 function addRepresentations(state: PageState, value: unknown) {
@@ -748,6 +932,11 @@ function finalize(id: string) {
     }
     if (!previous || init.end > previous.end) {
         request.page.initByKind[stream.kind] = init;
+        // Version bump for the first-commit case (no replaceReplacement is
+        // involved when the page simply starts a new item's representation), so
+        // the sender's post-`input-listening` check sees a pair that changed
+        // under it there too.
+        request.page.captureGeneration++;
     }
 }
 
@@ -958,6 +1147,10 @@ function commitReplacement(state: PageState, stream: PathState, path: string) {
     // Promote the candidate init to the page-level init INSIDE the same
     // atomic state transition as the stream replacement — never before.
     state.initByKind[stream.kind] = stream.init;
+    // Version bump: the pair the page has committed just changed, and the
+    // sender re-reads this around `input-listening` to prove the bytes a relay
+    // is being fed are still that pair's (see pairSnapshot).
+    state.captureGeneration++;
     state.paths.delete(replacedPath);
     stream.replacesPath = undefined;
     state.pendingBytes -= state.pending[stream.kind].reduce(
@@ -1157,19 +1350,50 @@ export function initBilibiliPageCapture() {
         }
         if (message?.subject !== "bilibili:getCapturedMedia") return undefined;
         if (!state) return undefined;
-        let videoUrl: string | undefined;
-        let audioUrl: string | undefined;
-        for (const stream of state.paths.values()) {
-            if (stream.replacesPath) continue;
-            if (stream.kind === "video") videoUrl = stream.url;
-            if (stream.kind === "audio") audioUrl = stream.url;
+        // `item` is the item the caller is about to load (the cid its own
+        // playlist resolution produced). It is optional so an older caller
+        // still gets the pre-existing behaviour, but when it is present the
+        // pair must belong to it: handing out the previous item's bytes is the
+        // one failure this gate exists to make impossible.
+        const item = message.data?.item;
+        // `probe` marks the sender's own readiness polling (the transition's
+        // gate, its post-`input-listening` re-check). Those poll every 200ms, so
+        // logging each refusal buries the one refusal that actually decided
+        // something — a real session produced 40 of them in eight seconds.
+        const probe = message.data?.probe === true;
+        const resolution = pairResolution(
+            state,
+            typeof item === "string" && item ? item : undefined
+        );
+        const snapshot = resolution.snapshot;
+        if (!snapshot) {
+            if (!probe) {
+                logger.info("[Bilibili page capture] captured pair not ready", {
+                    tabId,
+                    reason: resolution.reason,
+                    requestedItem: item,
+                    committedItem: resolution.committedItem,
+                    pageItem: state.pageUrl,
+                    committed: [...state.paths.entries()]
+                        .filter(([, stream]) => !stream.replacesPath)
+                        .map(([path, stream]) => [path, stream.kind]),
+                    captureGeneration: state.captureGeneration
+                });
+            }
+            return Promise.resolve(undefined);
         }
-        const ready =
-            videoUrl &&
-            audioUrl &&
-            state.initByKind.video &&
-            state.initByKind.audio;
-        return Promise.resolve(ready ? { videoUrl, audioUrl } : undefined);
+        return Promise.resolve({
+            videoUrl: snapshot.video.url,
+            audioUrl: snapshot.audio.url,
+            videoPath: snapshot.video.path,
+            audioPath: snapshot.audio.path,
+            captureGeneration: snapshot.captureGeneration,
+            itemKey: snapshot.itemKey,
+            initEndExclusive: {
+                video: snapshot.video.initEndExclusive,
+                audio: snapshot.audio.initEndExclusive
+            }
+        });
     });
     browser.webRequest.onBeforeRequest.addListener(
         details => {
@@ -1299,7 +1523,14 @@ export function initBilibiliPageCapture() {
                         castGenerationActive
                     }
                 );
-                if (castGenerationActive) state.notifyWhenInitialized.add(kind);
+                // Every kind of one switch must be announced, not only the
+                // first. The first commit invalidates the relay uploads (see
+                // commitReplacement), so a `castGenerationActive` test at this
+                // point is FALSE for the second kind — and the sender, which
+                // only learns about a switch from this notification, would then
+                // never hear that audio moved. Whether a relay should be
+                // rebuilt, and how many, is the sender's decision to make.
+                state.notifyWhenInitialized.add(kind);
             }
             stream = state.paths.get(path);
             if (!stream) {

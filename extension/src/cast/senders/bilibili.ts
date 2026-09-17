@@ -73,9 +73,66 @@ function initBilibiliSender() {
     let selectedRoku = false;
     let originalMuted: boolean | undefined;
     let mutedElement: HTMLVideoElement | undefined;
-    let rokuReloadRunning = false;
-    let rokuReloadQueued = false;
     let debugEnabled = Boolean(window.__fxCastBilibiliInitialDebug);
+
+    /**
+     * The single owner of "the receiver must be reloaded for the page's current
+     * item". Three sources used to start a reload on their own — the capture's
+     * per-kind representation commits, the SPA navigation poll, and a relay
+     * verdict — and on the device one part switch produced three overlapping
+     * relays in one second, each tearing down the previous one (measured:
+     * generation 6 -> 8 -> 10, all inside 550ms, none of them ever ready).
+     *
+     * A source now only reports a FACT (noteRokuItemTransition). This owner
+     * decides when a relay is started, and it starts one only while the capture
+     * holds a COMPLETE pair (see waitForCapturePair) and only once per capture
+     * version.
+     */
+    let itemTransition:
+        | {
+              id: number;
+              /** The capture version the load was started with; undefined when
+               *  no complete pair appeared in time (playurl fallback). */
+              captureGeneration?: number;
+              /** The pair version the LOAD actually resolved with (the capture
+               *  query that carries the target item), or undefined when the load
+               *  fell back to the playurl pair. This — not the gate's version —
+               *  is what the settle step compares against: it is the pair the
+               *  relay is really being fed, and it comes from the same query the
+               *  load used, so the two can never disagree. */
+              loadedPairVersion?: number;
+              loadGeneration?: number;
+          }
+        | undefined;
+    let itemTransitionTimer: number | undefined;
+    /** A fact arrived while a transition was already running, or while the
+     *  settle window was open: re-evaluated when the current one settles, and
+     *  only then allowed to start another load (and only if the capture pair
+     *  actually changed, unless the fact is forced). */
+    let itemTransitionPending = false;
+    let itemTransitionPendingForce = false;
+    /** The change generation of the most recent loadCurrentItem(). */
+    let lastLoadGeneration = 0;
+    /** The capture version the last succeeded load was resolved with. */
+    let lastResolvedCaptureGeneration: number | undefined;
+    /** The last failed transition, so a failure cannot become a retry loop. */
+    let lastItemTransitionFailure:
+        | { at: number; captureGeneration?: number }
+        | undefined;
+    let itemTransitionSequence = 0;
+
+    /** The settle window that turns a burst of facts into one reload. Long
+     *  enough to cover the video+audio commit pair and the page's own item
+     *  event (all measured inside ~150ms of each other), short enough that a
+     *  user-visible switch is not perceptibly delayed. */
+    const ITEM_TRANSITION_SETTLE_MS = 250;
+    /** How long to wait for the capture to hold a complete pair before falling
+     *  back to loading the playurl pair — the pre-capture behaviour, so a
+     *  capture that will never answer cannot wedge the cast. */
+    const ITEM_TRANSITION_PAIR_WAIT_MS = 8000;
+    const ITEM_TRANSITION_PAIR_POLL_MS = 200;
+    /** A failed transition waits for a NEW capture version, or this long. */
+    const ITEM_TRANSITION_RETRY_COOLDOWN_MS = 5000;
 
     function ensureDebugPanel() {
         let panel = document.getElementById(
@@ -154,6 +211,13 @@ function initBilibiliSender() {
         title: string;
         contentType: string;
         audioUrl?: string;
+        /** The page's own cid for this item (from its pagelist). Bilibili
+         *  addresses every media object under a per-item folder, so this is
+         *  what the captured pair is matched against — without it a capture
+         *  holding the PREVIOUS item's pair could be handed to the new item's
+         *  load (see MediaSender's resolver and the page capture's
+         *  pairSnapshot). */
+        cid?: number;
     }
 
     interface PageInfo {
@@ -304,7 +368,8 @@ function initBilibiliSender() {
             mediaUrl,
             audioUrl,
             title: page.part || document.title,
-            contentType: "application/x-mpegURL"
+            contentType: "application/x-mpegURL",
+            cid: page.cid
         };
     }
 
@@ -319,21 +384,37 @@ function initBilibiliSender() {
      * directly (the pre-capture behavior), so the cast still works in
      * pure-proxy mode instead of failing the load.
      */
-    async function resolveCapturedMedia(fallback: {
-        mediaUrl: string;
-        audioUrl?: string;
-    }): Promise<{
+    async function resolveCapturedMedia(
+        fallback: { mediaUrl: string; audioUrl?: string },
+        /** The item this load is for (the page's cid): the capture only hands
+         *  out a pair that belongs to it. */
+        item?: string
+    ): Promise<{
         mediaUrl: string;
         audioUrl?: string;
     }> {
         const captured = (await browser.runtime.sendMessage({
             subject: "bilibili:getCapturedMedia",
-            data: {}
-        })) as { videoUrl?: string; audioUrl?: string } | undefined;
+            data: { item }
+        })) as
+            | {
+                  videoUrl?: string;
+                  audioUrl?: string;
+                  captureGeneration?: number;
+                  itemKey?: string;
+              }
+            | undefined;
+        // Published in BOTH branches: the post-`input-listening` check compares
+        // the version this load was resolved with against the capture's current
+        // one, and "fell back to playurl" is a resolved state too (undefined).
+        lastResolvedCaptureGeneration = captured?.captureGeneration;
         if (captured?.videoUrl && captured.audioUrl) {
             debug("using exact page-captured DASH pair", {
                 videoPath: new URL(captured.videoUrl).pathname,
-                audioPath: new URL(captured.audioUrl).pathname
+                audioPath: new URL(captured.audioUrl).pathname,
+                captureGeneration: captured.captureGeneration,
+                captureItem: captured.itemKey,
+                requestedItem: item
             });
             return {
                 mediaUrl: captured.videoUrl,
@@ -341,6 +422,7 @@ function initBilibiliSender() {
             };
         }
         debug("page-captured DASH pair not ready; using playurl pair", {
+            requestedItem: item,
             videoPath: new URL(fallback.mediaUrl).pathname,
             audioPath: fallback.audioUrl
                 ? new URL(fallback.audioUrl).pathname
@@ -363,6 +445,14 @@ function initBilibiliSender() {
 
     async function loadCurrentItem(isInitial: boolean): Promise<boolean> {
         const generation = ++changeGeneration;
+        // Published for the transition owner: it has to know which load its
+        // transition produced (and whether a newer one superseded it).
+        lastLoadGeneration = generation;
+        // Cleared per load so the transition can never read a version the
+        // resolver set for a PREVIOUS load: a resolver that does not run (the
+        // receiver turned out not to be a Roku) must read as "no pair", not as
+        // the last one.
+        lastResolvedCaptureGeneration = undefined;
         if (!isInitial) sender?.suspendMediaElementSync();
         let mediaElement =
             document.querySelector<HTMLVideoElement>("video") ?? undefined;
@@ -432,10 +522,13 @@ function initBilibiliSender() {
                     );
                 }
                 await localVideo.play();
-                return resolveCapturedMedia({
-                    mediaUrl: media.mediaUrl,
-                    audioUrl: media.audioUrl
-                });
+                return resolveCapturedMedia(
+                    {
+                        mediaUrl: media.mediaUrl,
+                        audioUrl: media.audioUrl
+                    },
+                    media.cid !== undefined ? String(media.cid) : undefined
+                );
             },
             // Let the page's own player controls (play/pause button, progress bar)
             // drive the receiver, but gate on real user gestures so Bilibili's
@@ -702,68 +795,187 @@ function initBilibiliSender() {
     });
 
     /**
-     * Roku capture 恢复（representation 变更 / capture 终态）：重载当前媒体
-     * 输入。仅当前 receiver 是 Roku 时生效；同一时间只跑一次重载，运行期间
-     * 到达的事件合并为最多一次后续重载。失败等待下一个事件自然重试。
+     * The capture's current pair version, or undefined when it has no complete
+     * pair for the page's current item right now.
+     *
+     * `undefined` is NOT a version: it is the absence of one. Treating it as
+     * "the pair changed" is what started a second relay on the device after a
+     * successful switch (the measured `undefined !== 4`), so every caller here
+     * has to say explicitly what it does with an answer it cannot compare.
+     *
+     * `probe` marks the caller as internal polling, which the capture keeps out
+     * of its log (see the getCapturedMedia handler).
      */
-    function reloadRokuCapture(reason: string) {
+    async function capturePairGeneration(
+        probe = false
+    ): Promise<number | undefined> {
+        const snapshot = (await browser.runtime.sendMessage({
+            subject: "bilibili:getCapturedMedia",
+            data: probe ? { probe: true } : {}
+        })) as { captureGeneration?: number } | undefined;
+        return snapshot?.captureGeneration;
+    }
+
+    /**
+     * The atomic gate: wait, bounded, for the capture to hold a COMPLETE pair
+     * (one committed video+audio pair with an init for each, both from the same
+     * commit) before a relay is started for it.
+     *
+     * Starting a relay on a half-captured pair is exactly the measured failure:
+     * the successor generation had an init for both kinds and not one audio
+     * fragment, so the bridge parked waiting for the covering fragment, the
+     * readiness gate never closed, no LOAD was ever sent, and the Roku kept
+     * polling the previous playlist until it got a 404. `undefined` means the
+     * wait expired — the load then proceeds with the playurl pair (the
+     * pre-capture behaviour), so a capture that will never answer cannot wedge
+     * the cast.
+     */
+    async function waitForCapturePair(): Promise<number | undefined> {
+        const deadline = Date.now() + ITEM_TRANSITION_PAIR_WAIT_MS;
+        for (;;) {
+            const generation = await capturePairGeneration(true).catch(
+                () => undefined
+            );
+            if (generation !== undefined) return generation;
+            if (Date.now() >= deadline) {
+                debug(
+                    "capture pair never became complete; loading the item anyway"
+                );
+                return undefined;
+            }
+            await new Promise(resolve =>
+                window.setTimeout(resolve, ITEM_TRANSITION_PAIR_POLL_MS)
+            );
+        }
+    }
+
+    /**
+     * Report a FACT that the receiver may need to be reloaded. Nothing here
+     * starts a load: the transition owner does, after the settle window and
+     * after the capture has a complete pair.
+     */
+    function noteRokuItemTransition(reason: string, force = false) {
         if (!sender?.isRokuReceiver()) return;
-        if (rokuReloadRunning) {
-            // Merge rapid events (video+audio commit, overflow+representation)
-            // into at most one follow-up reload.
-            rokuReloadQueued = true;
+        if (force) itemTransitionPendingForce = true;
+        if (itemTransition || itemTransitionTimer !== undefined) {
+            // Already owned: a burst (both kinds committing, then the page's own
+            // item event) must collapse into ONE reload, and a fact arriving
+            // during a running transition is re-evaluated when it settles.
+            itemTransitionPending = true;
             return;
         }
-        rokuReloadRunning = true;
-        void loadCurrentItem(false)
-            .then(loaded => {
+        itemTransitionTimer = window.setTimeout(() => {
+            itemTransitionTimer = undefined;
+            void runRokuItemTransition(reason);
+        }, ITEM_TRANSITION_SETTLE_MS);
+    }
+
+    async function runRokuItemTransition(reason: string) {
+        const transition: NonNullable<typeof itemTransition> = {
+            id: ++itemTransitionSequence
+        };
+        itemTransition = transition;
+        try {
+            const captureGeneration = await waitForCapturePair();
+            // Recorded BEFORE any decision below: the settle step decides
+            // whether to run again by comparing the capture's pair against THIS
+            // transition's, and an unset value reads as "everything changed" —
+            // which made a held-back transition re-arm itself forever. The
+            // harness caught that as "a changed pair never earns its one retry".
+            transition.captureGeneration = captureGeneration;
+            const previous = lastItemTransitionFailure;
+            if (
+                previous &&
+                previous.captureGeneration === captureGeneration &&
+                Date.now() - previous.at < ITEM_TRANSITION_RETRY_COOLDOWN_MS
+            ) {
+                // The last attempt failed with this very pair. Retrying it now
+                // would tear down a relay for no new information; the 750ms
+                // navigation poll keeps reporting the fact, so the cooldown
+                // expiry still retries. This is what stops "failed generation ->
+                // immediate rebuild" chains.
+                debug(
+                    "roku item transition held back; the pair has not changed",
+                    {
+                        reason,
+                        captureGeneration,
+                        sinceFailureMs: Date.now() - previous.at
+                    }
+                );
+            } else {
+                const loaded = await loadCurrentItem(false);
+                transition.loadGeneration = lastLoadGeneration;
+                // Read straight after the load: the resolver has just set it for
+                // THIS load (undefined when the capture refused this item and the
+                // playurl pair was used instead).
+                transition.loadedPairVersion = lastResolvedCaptureGeneration;
                 if (!loaded) {
-                    debug("roku capture reload superseded", { reason });
-                    return;
+                    debug("roku item transition superseded", { reason });
+                } else {
+                    lastItemTransitionFailure = undefined;
+                    debug("roku item transition loaded", {
+                        reason,
+                        gatePairVersion: captureGeneration,
+                        loadedPairVersion: transition.loadedPairVersion,
+                        loadGeneration: transition.loadGeneration
+                    });
                 }
-                debug("roku capture reload completed", { reason });
-            })
-            .catch(err => {
-                logger.error("Bilibili roku capture reload failed", err);
-                debug("roku capture reload failed", {
-                    reason,
-                    error: err instanceof Error ? err.message : String(err)
-                });
-                // Single retry for terminal conditions (overflow) where no
-                // future event is guaranteed to trigger a new rebuild. The
-                // retry is invalidated if any newer load starts.
-                if (reason === "capture-overflow") {
-                    const retryGeneration = changeGeneration;
-                    setTimeout(() => {
-                        if (
-                            changeGeneration !== retryGeneration ||
-                            !sender?.isRokuReceiver()
-                        ) {
-                            return;
-                        }
-                        void loadCurrentItem(false).catch(reloadErr => {
-                            logger.error(
-                                "Bilibili roku capture retry failed",
-                                reloadErr
-                            );
-                            debug("roku capture retry failed", {
-                                reason,
-                                error:
-                                    reloadErr instanceof Error
-                                        ? reloadErr.message
-                                        : String(reloadErr)
-                            });
-                        });
-                    }, 2000);
-                }
-            })
-            .finally(() => {
-                rokuReloadRunning = false;
-                if (rokuReloadQueued) {
-                    rokuReloadQueued = false;
-                    reloadRokuCapture("queued");
-                }
+            }
+        } catch (err) {
+            lastItemTransitionFailure = {
+                at: Date.now(),
+                captureGeneration: transition.captureGeneration
+            };
+            logger.error("Bilibili roku item transition failed", err);
+            debug("roku item transition failed", {
+                reason,
+                error: err instanceof Error ? err.message : String(err)
             });
+        }
+        // Settle. Every path above reaches this — a `return` inside the try used
+        // to skip it and leave the transition owning the reload forever, so no
+        // later fact could ever start one (the harness's "changed pair earns one
+        // more relay" row).
+        const pending = itemTransitionPending;
+        const forced = itemTransitionPendingForce;
+        itemTransition = undefined;
+        itemTransitionPending = false;
+        itemTransitionPendingForce = false;
+        if (!pending && !forced) return;
+        // A fact arrived while this transition ran (on the device this was the
+        // 750ms navigation poll re-reporting the switch until `activeKey` caught
+        // up). Start another load only when the pair really moved on:
+        // re-reporting the same pair would restart a relay that is already
+        // correct — and restarting it tears the previous one down, which is how
+        // a healthy stream became a black screen.
+        //
+        // The comparison is deliberately three-valued. `now === undefined` means
+        // "the capture cannot form a pair for this item right now", which is NOT
+        // evidence that the pair changed; treating it as a change is the
+        // measured defect. And when the load itself fell back (no captured pair
+        // at all), a pair that appears later does not justify a reload either:
+        // on the Roku path ffmpeg's inputs are the capture endpoints, so the
+        // fallback plays the captured bytes anyway and "upgrading" it would only
+        // interrupt a working relay. A later, genuinely new pair announces itself
+        // as a new fact (every commit notifies) and gets its own transition.
+        const now = await capturePairGeneration(true).catch(() => undefined);
+        const changed =
+            now !== undefined &&
+            transition.loadedPairVersion !== undefined &&
+            now !== transition.loadedPairVersion;
+        if (!forced && !changed) {
+            debug("roku item transition fact merged; no new pair to load", {
+                factVersion: now,
+                loadedPairVersion: transition.loadedPairVersion
+            });
+            return;
+        }
+        debug("roku item transition superseded by a changed pair", {
+            from: transition.loadedPairVersion,
+            to: now,
+            forced
+        });
+        noteRokuItemTransition("fact-after-transition", forced);
     }
 
     // Bilibili changes BV/p inside a SPA. Reload the receiver only when the media
@@ -771,10 +983,29 @@ function initBilibiliSender() {
     if (window.__fxCastBilibiliNavigationInterval !== undefined) {
         window.clearInterval(window.__fxCastBilibiliNavigationInterval);
     }
+    /**
+     * The relay is listening (this message carries its capture port). Re-read
+     * the capture version: if the pair moved on between deciding to load it and
+     * this moment, the bytes this relay will be fed belong to a different media
+     * object, so report a fact instead of letting it starve.
+     */
+    async function verifyCapturePairUnchanged(requestId: string) {
+        if (!sender?.isCurrentMediaServerRequest(requestId)) return;
+        const now = await capturePairGeneration(true).catch(() => undefined);
+        if (now === undefined || now === lastResolvedCaptureGeneration) return;
+        debug("capture pair changed after the relay started listening", {
+            requestId,
+            resolved: lastResolvedCaptureGeneration,
+            now
+        });
+        noteRokuItemTransition("capture-version-changed", true);
+    }
+
     browser.runtime.onMessage.addListener((message: any) => {
         if (message?.subject === "bilibili:pageCaptureReady") {
             const requestId = message.data?.requestId;
             if (typeof requestId === "string") {
+                void verifyCapturePairUnchanged(requestId);
                 sender?.primeCaptureSource(requestId);
             }
             return undefined;
@@ -797,10 +1028,13 @@ function initBilibiliSender() {
             debug("stale capture overflow ignored", message.data);
             return undefined;
         }
-        reloadRokuCapture(
+        noteRokuItemTransition(
             message.subject === "bilibili:captureOverflow"
                 ? "capture-overflow"
-                : "representation-changed"
+                : `representation-changed:${message.data?.kind ?? "unknown"}`,
+            // An overflow is a relay that was torn down, not a re-report of the
+            // same bytes: it must be rebuilt even when the pair is unchanged.
+            message.subject === "bilibili:captureOverflow"
         );
         return undefined;
     });
@@ -813,16 +1047,24 @@ function initBilibiliSender() {
                     from: activeKey,
                     to: nextKey
                 });
-                void loadCurrentItem(false).catch(err => {
-                    debug(
-                        "playlist reload failed",
-                        err instanceof Error ? err.message : String(err)
-                    );
-                    logger.error(
-                        "Failed to reload Bilibili playlist item",
-                        err
-                    );
-                });
+                if (sender?.isRokuReceiver()) {
+                    // A Roku reload is owned by the item transition: it waits
+                    // for a complete capture pair and starts at most one relay
+                    // per pair. Reloading from here as well is what produced
+                    // overlapping generations.
+                    noteRokuItemTransition("navigation");
+                } else {
+                    void loadCurrentItem(false).catch(err => {
+                        debug(
+                            "playlist reload failed",
+                            err instanceof Error ? err.message : String(err)
+                        );
+                        logger.error(
+                            "Failed to reload Bilibili playlist item",
+                            err
+                        );
+                    });
+                }
             }
         } catch {
             // Ignore temporary non-video URLs during SPA transitions.
