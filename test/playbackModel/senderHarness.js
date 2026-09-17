@@ -117,22 +117,67 @@ const receiverCommands = { pause: 0, play: 0, seek: 0 };
  */
 let pendingReceiverEcho;
 /**
- * The media session the LAST play/pause command reached - never cleared, because
- * it answers a different question from `pendingReceiverEcho`: "which session did
- * the command this step dispatched go to". A command is issued INSIDE a step (the
+ * Where the LAST play/pause command went - never cleared, because it answers a
+ * different question from `pendingReceiverEcho`: "which media session did the
+ * command this step dispatched reach". A command is issued INSIDE a step (the
  * seek hold fires when a SETTLE answers the loads), so the session is not the one
  * the step began with, and the reports that answer it arrive before the step ends.
+ *
+ * `mediaSessionId` may be UNDEFINED, and that is a state of the world rather than
+ * a missing field: a receiver that has accepted a LOAD but not yet named its
+ * session cannot have the command attributed to one, and the sender's echo guard
+ * must then behave as "no evidence" instead of matching whatever session reports
+ * next.
  */
-let lastCommandSession;
+let lastCommand = { issued: false, mediaSessionId: undefined };
+/**
+ * The media object the last answered LOAD resolved with.
+ *
+ * The fixture hands it to the sender's LOAD callback, and the real SDK's callback
+ * media is its own object - so this is what the sender binds and commands, not the
+ * placeholder stored on the request.
+ */
+let lastResolvedMedia;
 /** True while a row is holding the page's `seeked` back. */
 let pageSeeksDeferred = false;
 const timers = { timeouts: [] };
 let timerId = 0;
 let latestInterval;
+/**
+ * A clock the cases can move.
+ *
+ * The echo guard's confirmation window is a comparison against `Date.now()`, and
+ * "past the window a report is the user's" is a contract that cannot be tested by
+ * waiting 15 seconds in a unit suite. The skew is applied to `Date.now` itself
+ * (see installGlobals), so the sender and the fixture read the SAME clock: a case
+ * that moves it moves the whole world, which is what makes the assertion about
+ * the sender's rule rather than about the test's own arithmetic.
+ */
+let clockSkewMs = 0;
+/** The senders directory the running cast was built from (see startCast). */
+let sendersDirForWindow = null;
+/** How long the sender waits for a play/pause echo, read from its own source. */
+function receiverEchoConfirmWindowMs(sendersDir) {
+    const source = fs.readFileSync(path.join(sendersDir, "media.ts"), "utf8");
+    const match = /RECEIVER_ECHO_CONFIRM_WINDOW_MS = (\d+);/.exec(source);
+    if (!match) {
+        throw new Error(
+            "senderHarness: media.ts no longer states RECEIVER_ECHO_CONFIRM_WINDOW_MS"
+        );
+    }
+    return Number(match[1]);
+}
+
 /** window handlers, so a real user gesture can be dispatched. */
 const windowListeners = new Map();
 
 function installGlobals() {
+    // The real `Date.now`, plus the case-controlled skew (see clockSkewMs). Set
+    // once; repeated calls must not stack the patch.
+    if (!installGlobals.realNow) {
+        installGlobals.realNow = Date.now;
+        Date.now = () => installGlobals.realNow() + clockSkewMs;
+    }
     global.window = {
         location: {
             protocol: "moz-extension:",
@@ -483,14 +528,14 @@ function makeMedia(playerState, estimatedTime, mediaSessionId, contentId) {
             calls.pause++;
             receiverCommands.pause++;
             pendingReceiverEcho = { playerState: "PAUSED", mediaSessionId };
-            lastCommandSession = mediaSessionId;
+            lastCommand = { issued: true, mediaSessionId };
             return Promise.resolve();
         },
         play: () => {
             calls.play++;
             receiverCommands.play++;
             pendingReceiverEcho = { playerState: "PLAYING", mediaSessionId };
-            lastCommandSession = mediaSessionId;
+            lastCommand = { issued: true, mediaSessionId };
             return Promise.resolve();
         },
         seek: () => {
@@ -515,7 +560,9 @@ async function makeSender(MediaSender, opts = {}) {
     receiverCommands.play = 0;
     receiverCommands.seek = 0;
     pendingReceiverEcho = undefined;
-    lastCommandSession = undefined;
+    lastCommand = { issued: false, mediaSessionId: undefined };
+    lastResolvedMedia = undefined;
+    clockSkewMs = 0;
     pageSeeksDeferred = false;
     timers.timeouts.length = 0;
     windowListeners.clear();
@@ -630,12 +677,45 @@ async function makeSender(MediaSender, opts = {}) {
          * waiting to be confirmed (never commanded, or already answered).
          */
         pendingReceiverEcho: () => pendingReceiverEcho,
-        /** The session the last play/pause command reached (never cleared). */
-        lastCommandSession: () => lastCommandSession,
+        /** Where the last play/pause command went (never cleared). */
+        lastCommand: () => lastCommand,
+        /**
+         * The receiver's current media has no session id (the relaunch window):
+         * same object the sender commands, so a play/pause issued from here cannot
+         * be attributed to a session.
+         */
+        forgetMediaSession: () => {
+            // EVERY media the sender could be commanding: the session's list (what
+            // the tick binds from) and the object the last LOAD resolved with (what
+            // the LOAD callback bound). They are different objects on purpose - the
+            // real SDK's callback media can be the previous session's - so clearing
+            // only one of them leaves the sender commanding a media that still
+            // names a session.
+            for (const media of sessionState.media) {
+                media.mediaSessionId = undefined;
+            }
+            const lastLoad = sessionState.loadRequests.at(-1);
+            if (lastLoad?.media) lastLoad.media.mediaSessionId = undefined;
+            if (lastResolvedMedia) lastResolvedMedia.mediaSessionId = undefined;
+        },
+        /** Move the world's clock (the sender reads the same one). */
+        advanceClock: ms => {
+            clockSkewMs += ms;
+        },
+        /** How long the sender waits for an echo, from its own source. */
+        echoConfirmWindowMs: () => {
+            if (sendersDirForWindow === null) {
+                throw new Error(
+                    "senderHarness: startCast was not told which senders dir it built"
+                );
+            }
+            return receiverEchoConfirmWindowMs(sendersDirForWindow);
+        },
         resolveLoad: media => {
             const entry = sessionState.loadRequests.at(-1);
             if (!entry) return false;
-            entry.onSuccess(media ?? entry.media);
+            lastResolvedMedia = media ?? entry.media;
+            entry.onSuccess(lastResolvedMedia);
             return true;
         }
     };
@@ -835,8 +915,9 @@ async function driveItemChange(
  */
 async function startCast(
     MediaSender,
-    { pageTime = 0, startupPadding = undefined } = {}
+    { pageTime = 0, startupPadding = undefined, sendersDir = null } = {}
 ) {
+    sendersDirForWindow = sendersDir;
     const h = await makeSender(MediaSender, { pageTime, startupPadding });
     const answered = new Set();
     const generations = [];
@@ -876,7 +957,17 @@ async function startCast(
          */
         /** The superseded requests answered along the way (diagnostics). */
         supersededGenerations: () => [...supersededGenerations],
-        async answerNewest() {
+        /**
+         * Answer the newest generation the way the receiver sometimes does: it
+         * accepted the LOAD and has not named the session yet (the relaunch
+         * window). The media the sender binds therefore carries NO mediaSessionId,
+         * so a play/pause issued from here cannot be attributed to a session -
+         * which is a state of the world, not a missing field.
+         */
+        async answerNewestSessionless() {
+            return cast.answerNewest({ sessionless: true });
+        },
+        async answerNewest({ sessionless = false } = {}) {
             const started = h.started.at(-1);
             if (!started) return false;
             // Answer every SUPERSEDED request first.
@@ -910,7 +1001,13 @@ async function startCast(
             global.__lastStartedRequestId = started.requestId;
             await answerBridgeWithPlan(plan);
             const load = h.lastLoad();
+            // The receiver still CREATED a session - it just has not named it yet,
+            // so the counter advances while the media carries no id. Leaving the
+            // counter behind would make the next real report look like a report on
+            // the OLD session, and the fixture would then be testing the
+            // same-session rule instead of the rule under test.
             const session = ++sessionId;
+            const mediaSessionId = sessionless ? undefined : session;
             // What the receiver does with the LOAD follows its `autoplay`, which
             // is the sender's statement of the USER's playback intent: a reload
             // for a paused user loads paused and stays paused. A harness that
@@ -924,7 +1021,7 @@ async function startCast(
                 makeMedia(
                     receiverState,
                     plan.receiverStart,
-                    session,
+                    mediaSessionId,
                     h.contentIdForGeneration(started.requestId)
                 )
             );
@@ -932,7 +1029,7 @@ async function startCast(
             h.setReceiverState(
                 receiverState,
                 plan.receiverStart,
-                session,
+                mediaSessionId,
                 started.requestId
             );
             await h.tick();

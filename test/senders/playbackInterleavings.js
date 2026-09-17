@@ -213,6 +213,26 @@ async function perform(cast, op) {
             );
             return;
         }
+        case "ADVANCE_CLOCK":
+            // The world's clock moves and nothing else does: the sender's windows
+            // are comparisons against `Date.now()`, and a case must be able to
+            // reach the far side of one without waiting for it.
+            cast.h.advanceClock(op.ms ?? 15001);
+            await flush();
+            return;
+        case "LOAD_RESOLVE_SESSIONLESS":
+            // The receiver accepted the LOAD and has not named its session yet, so
+            // the media the sender binds carries no mediaSessionId.
+            await cast.answerNewestSessionless();
+            return;
+        case "MEDIA_WITHOUT_SESSION":
+            // The receiver has accepted a LOAD but has not named its session yet
+            // (the relaunch window). A command issued now cannot be attributed to a
+            // session, which is a state of the world - not a missing field - and the
+            // echo guard has to treat it as no evidence.
+            cast.h.forgetMediaSession();
+            await flush();
+            return;
         case "SETTLE":
             await cast.settle();
             return;
@@ -261,11 +281,12 @@ function snapshotGenerations(cast) {
 async function runCase(
     MediaSender,
     testCase,
-    { startupPaddingEnabled = true } = {}
+    { startupPaddingEnabled = true, sendersDir = null } = {}
 ) {
     const cast = await startCast(MediaSender, {
         pageTime: START_PAGE_TIME,
-        startupPadding: startupPaddingEnabled
+        startupPadding: startupPaddingEnabled,
+        sendersDir
     });
     await cast.boot();
     /** Which video the model is on, for the identities its item changes adopt. */
@@ -340,6 +361,11 @@ async function runCase(
         const modelBefore = model;
         const { state: modelAfter, expect } = applyToModel(model, {
             ...op,
+            // The world's clock (the fixture can move it) and the sender's own
+            // confirmation window, so the model's echo rule is the implementation's
+            // rather than a second copy of it.
+            now: Date.now(),
+            echoWindowMs: cast.h.echoConfirmWindowMs(),
             // The page's REAL play/pause state goes in as an input, because the
             // model cannot predict it: a DASH seek's hold pauses the ELEMENT
             // without touching the intent, and a page op on an element that is
@@ -377,9 +403,14 @@ async function runCase(
         // not start with (the seek hold fires when a SETTLE answers the loads), so
         // the world states it - the echo's identity is an INPUT, not something the
         // model may infer from the state it began with.
-        const commandedSession = cast.h.lastCommandSession();
-        if (commandedSession !== undefined) {
-            model = observeCommandSession(model, commandedSession);
+        // ...but only when THIS step dispatched a play/pause: the record is never
+        // cleared (it is what the step did, not what the receiver owes us), so
+        // re-applying an older one would overwrite the session of the command a
+        // later step made.
+        const commandsThisStep = cast.h.receiverCommandTotals();
+        const commandedCount = commandsThisStep.play + commandsThisStep.pause;
+        if (commandedCount > commandsBefore.play + commandsBefore.pause) {
+            model = observeCommandSession(model, cast.h.lastCommand());
         }
 
         const generationsAfter = snapshotGenerations(cast);
@@ -537,7 +568,8 @@ async function main() {
             MediaSender,
             testCase,
             {
-                startupPaddingEnabled: testCase.startupPaddingEnabled !== false
+                startupPaddingEnabled: testCase.startupPaddingEnabled !== false,
+                sendersDir
             }
         );
         if (!caseFailures.length) {

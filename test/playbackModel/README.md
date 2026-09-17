@@ -199,6 +199,22 @@ this stage keeps teaching: a harness that answers only the newest generation is
 not "the same, but simpler" - it is a different world, and the sender's promise
 chain is what notices.
 
+## World operations a case may state
+
+Beyond the user's own actions and the receiver's reports, three operations exist
+only so a case can put the world in a state the sender has to handle - they are
+the case's INPUT, never a claim about behaviour:
+
+-   `SETTLE` / `LOAD_RESOLVE` — the world advances (`SETTLE` drains the chain,
+    `LOAD_RESOLVE` answers exactly one generation). `LOAD_RESOLVE_SESSIONLESS` is
+    the receiver that accepted a LOAD and has not named its session yet.
+-   `ADVANCE_CLOCK` — the clock moves. The echo guard's confirmation window is a
+    comparison against `Date.now()`, and "past the window a report is the user's"
+    cannot be tested by waiting 15 seconds.
+-   `MEDIA_WITHOUT_SESSION` — the current media has no session id (used to be how
+    the unattributable command was set up; `LOAD_RESOLVE_SESSIONLESS` does it
+    through a production-shaped path now).
+
 ## What the harness cannot say yet
 
 Named rather than hidden, because a silent gap is how a suite comes to look
@@ -248,3 +264,14 @@ PAGE_SEEK` — the mirror image, so the guard cannot be "fixed" by refusing
 -   `PAGE_PLAY → ITEM_CHANGE → RECEIVER_PAUSED → RECEIVER_PLAYING → PAGE_SEEK` —
     a command belongs to the session it was sent to: the new session's reports
     are the user's, not the previous session's echo.
+-   `POPUP_SEEK → ADVANCE_CLOCK(15001) → RECEIVER_PAUSED → PAGE_SEEK` — the
+    confirmation window ENDS: the same state past it is the user's, so the seek
+    that follows reloads with the intent they asked for (without the window the
+    report is refused as an echo and the intent stays playing).
+-   `POPUP_SEEK → LOAD_RESOLVE_SESSIONLESS → POPUP_SEEK → RECEIVER_PLAYING →
+RECEIVER_PAUSED → PAGE_SEEK` — a command issued while the receiver had not
+    named its session cannot be attributed to one, so it must not swallow a real
+    action on whatever session reports next (treating the unknown session as a
+    wildcard fails this case). The leading PLAYING is what makes the PAUSED
+    adoptable at all: the first report of a session is the receiver naming itself,
+    not a user move.

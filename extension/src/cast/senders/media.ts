@@ -895,12 +895,22 @@ export default class MediaSender {
         const reportedPlaybackState =
             state === cast.media.PlayerState.PLAYING ? "PLAYING" : "PAUSED";
         const pending = this.pendingReceiverPlaybackEcho;
-        const echo =
+        // The session must be KNOWN and EQUAL, on both sides. An unknown session
+        // is not evidence that this report is ours, and treating it as a wildcard
+        // would let a command we could not attribute swallow a real action on
+        // whatever session comes next (the relaunch window is exactly when a media
+        // has no session id yet). The safe direction is the same one the generation
+        // gate follows: refuse a state only on evidence, and where there is none,
+        // the user wins - a wrongly-adopted echo shows up immediately as a paused
+        // reload, while a wrongly-refused user pause is silent.
+        const sameKnownSession =
             pending !== undefined &&
+            pending.mediaSessionId !== undefined &&
+            media.mediaSessionId !== undefined &&
+            pending.mediaSessionId === media.mediaSessionId;
+        const echo =
+            sameKnownSession &&
             pending.playerState === reportedPlaybackState &&
-            (pending.mediaSessionId === undefined ||
-                media.mediaSessionId === undefined ||
-                pending.mediaSessionId === media.mediaSessionId) &&
             Date.now() - pending.issuedAt <=
                 MediaSender.RECEIVER_ECHO_CONFIRM_WINDOW_MS;
         this.pendingReceiverPlaybackEcho = undefined;

@@ -69,7 +69,20 @@ const ALPHABET = [
      */
     { id: "RECEIVER_ECHO", params: {} },
     { id: "SETTLE", params: {} },
-    { id: "STOP", params: {} }
+    { id: "STOP", params: {} },
+    /**
+     * The world's CLOCK moves. Not a user action and not a command: the sender's
+     * windows are comparisons against `Date.now()`, and "past the confirmation
+     * window a report is the user's" can only be tested by reaching the far side
+     * of one.
+     */
+    { id: "ADVANCE_CLOCK", params: { ms: [15001] } },
+    /**
+     * The receiver's current media has no session id yet (a LOAD it accepted but
+     * has not named - the relaunch window). Commands issued from here cannot be
+     * attributed to a session, which the echo guard must treat as no evidence.
+     */
+    { id: "LOAD_RESOLVE_SESSIONLESS", params: {} }
 ];
 
 /**
@@ -201,6 +214,41 @@ const PAIRWISE = [
         ids: [
             "PAGE_PAUSE",
             "RECEIVER_ECHO",
+            "RECEIVER_PLAYING",
+            "RECEIVER_PAUSED",
+            "PAGE_SEEK",
+            "SETTLE"
+        ]
+    },
+    {
+        // The echo is only the echo while the confirmation window is open. Past it
+        // the same state is the USER's, and the seek that follows must reload with
+        // the intent the user actually asked for - the window is what keeps "we
+        // asked for this at some point" from becoming a reason to ignore them. The
+        // seek's hold is the command here because its pause does NOT change the
+        // intent: refusing the report keeps the intent playing, adopting it pauses.
+        name: "POPUP_SEEK → ADVANCE_CLOCK(15001) → RECEIVER_PAUSED → PAGE_SEEK (the confirmation window ends)",
+        ids: [
+            "POPUP_SEEK",
+            "ADVANCE_CLOCK",
+            "RECEIVER_PAUSED",
+            "PAGE_SEEK",
+            "SETTLE"
+        ]
+    },
+    {
+        // A command issued while the receiver has not named its session cannot be
+        // attributed to one, and an unattributable command must not swallow a real
+        // action: the report is the user's. (Treating an unknown session as a
+        // wildcard would let it match whatever session reports next.) The leading
+        // PLAYING is what makes the PAUSED adoptable at all - the first report of a
+        // session is never a user move, it is the receiver naming itself - so the
+        // case isolates the echo rule instead of the same-session rule.
+        name: "POPUP_SEEK → LOAD_RESOLVE_SESSIONLESS → POPUP_SEEK → RECEIVER_PLAYING → RECEIVER_PAUSED → PAGE_SEEK (an unattributable command is not an echo)",
+        ids: [
+            "POPUP_SEEK",
+            "LOAD_RESOLVE_SESSIONLESS",
+            "POPUP_SEEK",
             "RECEIVER_PLAYING",
             "RECEIVER_PAUSED",
             "PAGE_SEEK",

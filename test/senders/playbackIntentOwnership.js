@@ -1238,6 +1238,46 @@ function checkMirrorEventsAreSuppressed(mediaSenderSource) {
     );
 }
 
+/**
+ * The echo guard refuses a report only on EVIDENCE.
+ *
+ * The two ways it can over-reach are both silent, and both were real during this
+ * work: a STICKY memory of "the state we last asked for" (which loses a later
+ * genuine remote action that happens to equal it), and an UNKNOWN session treated
+ * as a wildcard (which lets a command we could not attribute swallow whatever
+ * session reports next). The behaviours are pinned by the phase-3 cases; this
+ * pins the shape, so a future simplification has to argue with a test.
+ */
+function checkEchoRequiresEvidence(mediaSenderSource) {
+    const sessionRule =
+        /const sameKnownSession =([\s\S]*?);\n/.exec(mediaSenderSource)?.[1] ??
+        "";
+    check(
+        "echo: the pending command's session must be known and EQUAL (no wildcard)",
+        /pending\.mediaSessionId !== undefined/.test(sessionRule) &&
+            /media\.mediaSessionId !== undefined/.test(sessionRule) &&
+            /pending\.mediaSessionId === media\.mediaSessionId/.test(
+                sessionRule
+            ) &&
+            !/mediaSessionId === undefined \|\|/.test(sessionRule),
+        "an unknown session cannot be evidence that a report is our echo"
+    );
+    check(
+        "echo: the confirmation window is applied, not merely recorded",
+        /Date\.now\(\) - pending\.issuedAt <=\s*MediaSender\.RECEIVER_ECHO_CONFIRM_WINDOW_MS/.test(
+            mediaSenderSource
+        ),
+        "past the window a report is the user's by definition"
+    );
+    check(
+        "echo: the pending command is CONSUMED (cleared) whenever a report settles it",
+        /this\.pendingReceiverPlaybackEcho = undefined;/.test(
+            mediaSenderSource
+        ),
+        "a memory of the last command refuses a later real user action"
+    );
+}
+
 async function main() {
     const { outfile, workDir } = await buildSender();
     installGlobals();
@@ -1258,9 +1298,12 @@ async function main() {
     await checkCaptureWindowsHoldPage(MediaSender);
     await checkTightenNeverWritesPage(MediaSender);
     await checkPresentationIdentityConfirmation(MediaSender);
-    checkMirrorEventsAreSuppressed(
-        fs.readFileSync(path.join(sendersDir, "media.ts"), "utf8")
+    const mediaSenderSource = fs.readFileSync(
+        path.join(sendersDir, "media.ts"),
+        "utf8"
     );
+    checkMirrorEventsAreSuppressed(mediaSenderSource);
+    checkEchoRequiresEvidence(mediaSenderSource);
 
     console.info("");
     console.info(`${pass}/${pass + fail} checks passed`);

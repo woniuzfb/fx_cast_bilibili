@@ -201,7 +201,8 @@ function applyToModel(state, op) {
             // looked for on the session that command was sent to.
             next.pendingEcho = {
                 playerState: wantsPlaying ? "PLAYING" : "PAUSED",
-                mediaSessionId: op.currentMediaSessionId
+                mediaSessionId: op.currentMediaSessionId,
+                issuedAt: op.now
             };
             expect.autoplay = wantsPlaying;
             expect.rule = pageOrigin
@@ -218,7 +219,8 @@ function applyToModel(state, op) {
                 next.pagePlaying = true;
                 next.pendingEcho = {
                     playerState: "PLAYING",
-                    mediaSessionId: op.currentMediaSessionId
+                    mediaSessionId: op.currentMediaSessionId,
+                    issuedAt: op.now
                 };
                 expect.autoplay = true;
                 expect.rule = "ble-play-is-intent";
@@ -227,7 +229,8 @@ function applyToModel(state, op) {
                 next.pagePlaying = false;
                 next.pendingEcho = {
                     playerState: "PAUSED",
-                    mediaSessionId: op.currentMediaSessionId
+                    mediaSessionId: op.currentMediaSessionId,
+                    issuedAt: op.now
                 };
                 expect.autoplay = false;
                 expect.rule = "ble-pause-is-intent";
@@ -271,7 +274,8 @@ function applyToModel(state, op) {
             if (expect.startsGeneration || next.pageControlsAttached) {
                 next.pendingEcho = {
                     playerState: "PAUSED",
-                    mediaSessionId: op.currentMediaSessionId
+                    mediaSessionId: op.currentMediaSessionId,
+                    issuedAt: op.now
                 };
             }
             // A position never sends a receiver play/pause; a positioned reload
@@ -381,12 +385,21 @@ function applyToModel(state, op) {
                 // is showing a state our command does not explain, which is the
                 // user moving it.
                 const pending = next.pendingEcho;
+                // The session must be KNOWN and EQUAL on both sides: an unknown
+                // session is not evidence that this report is ours, and a report
+                // past the confirmation window is the user's by definition. Both
+                // rules are the implementation's (see adoptReceiverPlaybackIntent);
+                // the window itself is read from its source, not restated here.
                 const isEcho =
                     pending !== undefined &&
                     pending.playerState === observed &&
-                    (pending.mediaSessionId === undefined ||
-                        op.mediaSessionId === undefined ||
-                        pending.mediaSessionId === op.mediaSessionId);
+                    pending.mediaSessionId !== undefined &&
+                    op.mediaSessionId !== undefined &&
+                    pending.mediaSessionId === op.mediaSessionId &&
+                    (op.echoWindowMs === undefined ||
+                        op.now === undefined ||
+                        pending.issuedAt === undefined ||
+                        op.now - pending.issuedAt <= op.echoWindowMs);
                 next.pendingEcho = undefined;
                 if (isEcho) {
                     expect.rule = "the-echo-of-our-own-command";
@@ -413,6 +426,35 @@ function applyToModel(state, op) {
             expect.startsGeneration = false;
             expect.receiverCommands = false;
             expect.rule = "stop-ends-the-cast";
+            break;
+        }
+        case "ADVANCE_CLOCK": {
+            // The world's clock moves. Nothing about the cast changes: this is how
+            // a case reaches the far side of the sender's confirmation window.
+            expect.rule = "the-clock-moves";
+            break;
+        }
+        case "LOAD_RESOLVE_SESSIONLESS": {
+            // A generation resolves, exactly as LOAD_RESOLVE does. What differs is
+            // the world's answer (no session id yet), which the runner feeds to the
+            // model through observeCommandSession when a command follows.
+            if (next.pendingSeek !== undefined) {
+                next.activeLoad = {
+                    target: next.pendingSeek.target,
+                    mediaIdentity: next.pendingSeek.mediaIdentity
+                };
+            }
+            next.pendingSeek = undefined;
+            expect.servesPending = true;
+            expect.rule = "resolved-load-serves-the-pending-seek";
+            break;
+        }
+        case "MEDIA_WITHOUT_SESSION": {
+            // The receiver's current media has no session id yet. The cast is
+            // otherwise unchanged - what changes is that a command issued from here
+            // cannot be attributed to a session (see observeCommandSession, which
+            // the runner feeds from the fixture's record of where the command went).
+            expect.rule = "the-media-has-no-session-yet";
             break;
         }
         case "SETTLE": {
@@ -459,7 +501,8 @@ function applyToModel(state, op) {
 }
 
 /**
- * The world states which media session the command this step dispatched reached.
+ * The world states which media session the command this step dispatched reached
+ * (and whether it reached one at all).
  *
  * The model cannot derive it: a command is issued INSIDE an operation - the seek
  * hold fires when the generation starts, which is after a SETTLE answered the
@@ -468,13 +511,19 @@ function applyToModel(state, op) {
  * echo's identity is exactly what decides whether a later report belongs to our
  * command or to a session the user has since moved.
  */
-function observeCommandSession(state, mediaSessionId) {
-    if (state.pendingEcho === undefined || mediaSessionId === undefined) {
-        return state;
-    }
+function observeCommandSession(state, command) {
+    if (state.pendingEcho === undefined) return state;
+    if (!command || command.issued !== true) return state;
+    // `mediaSessionId` may be undefined here, and that is information: it means the
+    // command could not be attributed to a session at all (the receiver had not
+    // named one yet), which the echo guard must treat as "no evidence" rather than
+    // as a licence to match whatever session reports next.
     return {
         ...state,
-        pendingEcho: { ...state.pendingEcho, mediaSessionId }
+        pendingEcho: {
+            ...state.pendingEcho,
+            mediaSessionId: command.mediaSessionId
+        }
     };
 }
 
