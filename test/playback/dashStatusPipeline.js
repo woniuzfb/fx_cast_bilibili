@@ -755,6 +755,93 @@ async function main() {
         JSON.stringify({ published: currentAfterStale })
     );
 
+    // ---- what counts as EVIDENCE of a new generation ------------------------
+    //
+    // The gate exists to drop a report about a stream the device has replaced, and
+    // it may only fire on evidence: the sender's per-remux marker is `?v=<ts>`,
+    // so a contentId carrying ANY OTHER query changed nothing about which stream
+    // the receiver is on. A gate that reads "the query changed" as "the generation
+    // changed" discards legitimate statuses - the popup then sits on a stale
+    // position, which is the symptom the gate was added to prevent.
+    const markerDevice = await registerDevice(modules, {
+        ...ROKU,
+        id: "roku-marker-test"
+    });
+    const markerBase = "http://10.0.0.111:9555/s/roku-marker/index.m3u8";
+    // Generation 1 of this device's stream, loaded from page 300.
+    sendMediaStatus(
+        modules,
+        markerDevice,
+        makeStatus({
+            currentTime: 100,
+            contentId: `${markerBase}?v=1`,
+            customData: dashCustomData(300, 0)
+        })
+    );
+    await flush();
+    const markerBaseline = Number(markerDevice.mediaStatus?.currentTime);
+    /**
+     * A bare report (the periodic broadcast shape: identity fields only) whose
+     * raw position is 10 on this generation's clock. Converted, it is 300 + 10;
+     * dropped as a superseded generation, the published value stays at the
+     * baseline - so the two answers are distinguishable, which is what makes
+     * these rows say something.
+     */
+    const markerProbe = async contentId => {
+        sendMediaStatus(
+            modules,
+            markerDevice,
+            makeStatus({ currentTime: 10, bareMedia: true, contentId }),
+            pollProvenance(9, 4_000_000)
+        );
+        await flush();
+        return Number(markerDevice.mediaStatus?.currentTime);
+    };
+    check(
+        "generation marker: the device's own generation reads on its anchor (300 + 100)",
+        Math.abs(markerBaseline - 400) < 1e-6,
+        JSON.stringify({ published: markerBaseline })
+    );
+    check(
+        "generation marker: a different `?v=` on the same base IS a different generation (dropped, 400)",
+        Math.abs((await markerProbe(`${markerBase}?v=2`)) - 400) < 1e-6,
+        JSON.stringify({ published: markerDevice.mediaStatus?.currentTime })
+    );
+    check(
+        "generation marker: a different `?token=` alone is NOT evidence (converted, 310)",
+        Math.abs((await markerProbe(`${markerBase}?token=b`)) - 310) < 1e-6,
+        JSON.stringify({
+            published: markerDevice.mediaStatus?.currentTime,
+            note: "a non-generation query says nothing about which stream this is"
+        })
+    );
+    check(
+        "generation marker: `?v=1&token=b` is the SAME generation (converted, 310)",
+        Math.abs((await markerProbe(`${markerBase}?v=1&token=b`)) - 310) < 1e-6,
+        JSON.stringify({ published: markerDevice.mediaStatus?.currentTime })
+    );
+    check(
+        "generation marker: an unmarked id is not evidence either way (converted, 310)",
+        Math.abs((await markerProbe(markerBase)) - 310) < 1e-6,
+        JSON.stringify({ published: markerDevice.mediaStatus?.currentTime })
+    );
+    // A different base path is a DIFFERENT media, so it is not a superseded
+    // generation of this device's stream: it is published as reported (it has no
+    // identity of its own here, and an unattributable position is never guessed
+    // at) - where a superseded generation would have left the baseline standing.
+    check(
+        "generation marker: a different BASE is another media, not a superseded generation (published as reported, 10)",
+        Math.abs(
+            (await markerProbe(
+                "http://10.0.0.111:9555/s/roku-other/index.m3u8?v=9"
+            )) - 10
+        ) < 1e-6,
+        JSON.stringify({
+            published: markerDevice.mediaStatus?.currentTime,
+            droppedAsSuperseded: 400
+        })
+    );
+
     // ---- a receiver relaunch must not look like the end of the cast ---------
     // A Roku DASH remux LOAD relaunches the player app, so the device reports no
     // application for a moment. Treating that as the end tore the media status
@@ -890,6 +977,15 @@ async function main() {
                 present: !/differentDashGeneration/.test(deviceManagerSource),
                 rows: /superseded generation's report is ignored/,
                 least: 1
+            },
+            {
+                // ...and its mirror: reading "the query changed" as "the
+                // generation changed", which drops legitimate reports over a
+                // parameter that says nothing about the stream.
+                id: "any query read as a generation marker",
+                present: !/dashGenerationMarker/.test(deviceManagerSource),
+                rows: /NOT evidence|SAME generation/,
+                least: 2
             },
             {
                 id: "the conversion writes into the message object",

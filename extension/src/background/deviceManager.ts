@@ -61,42 +61,56 @@ function dashContentKey(
 }
 
 /**
- * Does this contentId carry the sender's per-generation marker (`?v=<ts>`)?
+ * The sender's per-generation marker of a DASH remux URL, or undefined.
  *
- * The sender appends a fresh query to the DASH remux URL on every remux
- * restart, so the query IS the generation: two ids that both carry one and
- * differ are two different media generations, while an id with no query says
- * nothing (a receiver may report the stream's base id, and the first LOAD of a
- * cast may carry no marker at all).
+ * The sender appends a fresh `?v=<timestamp>` on every remux restart, so that
+ * parameter - and only that one - is the generation. Parsing it by NAME is the
+ * whole point: a contentId carrying any other query (`?token=`, `?expires=`,
+ * `?quality=`, a receiver-added cache-buster) is NOT evidence of a new
+ * generation, and treating "the query changed" as "the generation changed" would
+ * drop a legitimate report - a status discarded on a parameter that says nothing
+ * about which stream the receiver is on.
+ *
+ * The query is parsed as a query string (URLSearchParams) rather than through
+ * `new URL()`: these ids are the receiver's own contentIds, and a value that
+ * `new URL()` would reject is not a reason to throw inside the status pipeline -
+ * an id this function cannot parse simply carries no marker, which is exactly how
+ * an unmarked id behaves.
  */
-function carriesGenerationTag(contentId: unknown): contentId is string {
-    return typeof contentId === "string" && contentId.includes("?");
+function dashGenerationMarker(contentId: unknown): string | undefined {
+    if (typeof contentId !== "string") return undefined;
+    const queryIndex = contentId.indexOf("?");
+    if (queryIndex < 0) return undefined;
+    const marker = new URLSearchParams(contentId.slice(queryIndex + 1)).get(
+        "v"
+    );
+    return marker ? marker : undefined;
 }
 
 /**
  * Are these two ids the SAME media in PROVABLY different DASH remux generations?
  *
- * Both halves matter, and both are evidence rather than inference: the query is
- * the generation (the sender appends a fresh `?v=<ts>` per remux restart), and
- * an equal base path is what makes the two ids the same media at all. An id with
- * no query, or a different base path, is not evidence of a superseded generation
- * — it is an unmarked id or another media entirely, and those have their own
- * handling (leave the position as reported; never inherit a shift).
+ * All three parts are evidence rather than inference: both ids must carry a
+ * generation marker, the markers must differ, and the BASE ids must be equal -
+ * otherwise the two are an unmarked id or another media entirely, and those have
+ * their own handling (leave the position as reported; never inherit a shift).
  *
  * This is the test that tells "a report about the stream the receiver has not
  * finished playing" apart from "a report about the media this device is actually
  * on". Too lax and a superseded stream's clock is converted with the new
- * generation's anchor — a jump of a whole seek target; too eager and a legitimate
+ * generation's anchor - a jump of a whole seek target; too eager and a legitimate
  * report is refused a conversion it needs.
  */
 function differentDashGeneration(
     recorded: unknown,
     reported: unknown
 ): boolean {
-    if (!carriesGenerationTag(recorded) || !carriesGenerationTag(reported)) {
+    const recordedMarker = dashGenerationMarker(recorded);
+    const reportedMarker = dashGenerationMarker(reported);
+    if (recordedMarker === undefined || reportedMarker === undefined) {
         return false;
     }
-    if (recorded === reported) return false;
+    if (recordedMarker === reportedMarker) return false;
     return normalizeContentId(recorded) === normalizeContentId(reported);
 }
 
