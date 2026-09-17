@@ -323,9 +323,19 @@ function applyToModel(state, op) {
             next.activeLoad = undefined;
             if (op.refused === true) {
                 // The load was rejected: the pending seek is KEPT (the load
-                // matrix's R flow pins that) and will be served by the next
-                // successful load.
-                expect.rule = "refused-load-keeps-the-intent";
+                // matrix's R flow pins that) and the sender RETRIES it - the seek
+                // loop advances to its next iteration and reloads for the same
+                // target, so a generation is in flight again. A seek arriving now
+                // therefore COALESCES onto the retry instead of opening its own
+                // transaction, which is the same shape as the successful branch
+                // below; only the pending seek survives.
+                if (next.pendingSeek !== undefined) {
+                    next.activeLoad = {
+                        target: next.pendingSeek.target,
+                        mediaIdentity: next.pendingSeek.mediaIdentity
+                    };
+                }
+                expect.rule = "refused-load-keeps-the-intent-and-retries-it";
             } else {
                 // Serving a pending seek means starting a generation for it: the
                 // load that just resolved is not the end of the chain, so a load is
@@ -449,6 +459,36 @@ function applyToModel(state, op) {
             expect.rule = "resolved-load-serves-the-pending-seek";
             break;
         }
+        case "COMMANDS_REFUSED":
+        case "COMMANDS_ACCEPTED": {
+            // The receiver refuses playback commands (or accepts them again) and
+            // says so at dispatch time. The runner tells the model the consequence
+            // (observeCommandFailure) after any operation that dispatched one.
+            expect.rule =
+                op.id === "COMMANDS_REFUSED"
+                    ? "the-receiver-refuses-commands"
+                    : "the-receiver-accepts-commands-again";
+            break;
+        }
+        case "ARM_COMMAND_FAILURE": {
+            // The world states that the command the NEXT operation dispatches will
+            // be refused. Nothing about the cast changes yet.
+            expect.rule = "the-next-command-may-fail";
+            break;
+        }
+        case "DELIVER_COMMAND_ERROR": {
+            // The receiver refused a command. A failed command is not one we are
+            // waiting to see confirmed, so its echo may not be awaited - but only
+            // ITS echo: a late error for a command a later one replaced must leave
+            // the successor pending.
+            if (op.failedCommandIsLatest !== false) {
+                next.pendingEcho = undefined;
+                expect.rule = "a-refused-command-is-not-awaited";
+            } else {
+                expect.rule = "a-late-refusal-does-not-revoke-the-successor";
+            }
+            break;
+        }
         case "MEDIA_WITHOUT_SESSION": {
             // The receiver's current media has no session id yet. The cast is
             // otherwise unchanged - what changes is that a command issued from here
@@ -528,6 +568,20 @@ function observeCommandSession(state, command) {
 }
 
 /**
+ * The world states that the command we are waiting on was REFUSED by the receiver.
+ *
+ * A refused command will not be confirmed, so its echo may not be awaited any
+ * longer: the window would otherwise stay armed and dismiss a real remote action
+ * that happens to match it. The runner only says this while the refused command is
+ * still the one being awaited (a late refusal for a command a later one replaced
+ * must leave the successor pending).
+ */
+function observeCommandFailure(state) {
+    if (state.pendingEcho === undefined) return state;
+    return { ...state, pendingEcho: undefined };
+}
+
+/**
  * Tell the model what the receiver is doing now, WITHOUT treating it as a user
  * action.
  *
@@ -561,6 +615,7 @@ function observeWorldAdvance(model, { mediaSessionId, playerState }) {
 }
 
 module.exports = {
+    observeCommandFailure,
     observeCommandSession,
     createModel,
     applyToModel,

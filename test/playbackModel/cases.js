@@ -82,7 +82,16 @@ const ALPHABET = [
      * has not named - the relaunch window). Commands issued from here cannot be
      * attributed to a session, which the echo guard must treat as no evidence.
      */
-    { id: "LOAD_RESOLVE_SESSIONLESS", params: {} }
+    { id: "LOAD_RESOLVE_SESSIONLESS", params: {} },
+    /**
+     * The SDK's answer to a dispatch: the receiver REFUSED a play/pause. Not a
+     * user action and not a report - the world telling us our command will never
+     * be confirmed, which is why it cannot be reached from the user's operations.
+     */
+    { id: "COMMANDS_REFUSED", params: {} },
+    { id: "COMMANDS_ACCEPTED", params: {} },
+    { id: "ARM_COMMAND_FAILURE", params: {} },
+    { id: "DELIVER_COMMAND_ERROR", params: {} }
 ];
 
 /**
@@ -250,6 +259,39 @@ const PAIRWISE = [
             "LOAD_RESOLVE_SESSIONLESS",
             "POPUP_SEEK",
             "RECEIVER_PLAYING",
+            "RECEIVER_PAUSED",
+            "PAGE_SEEK",
+            "SETTLE"
+        ]
+    },
+    {
+        // A refused command is not one we are waiting to see confirmed: the echo
+        // that will never come must not stay armed for the whole window, or the
+        // user pressing the same state on the physical remote is dismissed as the
+        // echo of a command the receiver never accepted. The seek's hold is the
+        // command here, because its pause does not change the intent.
+        name: "COMMANDS_REFUSED → POPUP_SEEK → RECEIVER_PAUSED → PAGE_SEEK (a refused command is not awaited)",
+        ids: [
+            "COMMANDS_REFUSED",
+            "POPUP_SEEK",
+            "RECEIVER_PAUSED",
+            "PAGE_SEEK",
+            "SETTLE"
+        ]
+    },
+    {
+        // ...and the revocation is by COMMAND INSTANCE: the SDK reports failures
+        // asynchronously, so an error for a command a later one replaced must not
+        // disarm the successor - the receiver is confirming THAT one now. Here the
+        // PAUSED report is the hold's echo (the intent stays playing); disarming it
+        // would adopt the report as a user pause, and the seek would reload paused.
+        name: "PAGE_PAUSE → ARM_COMMAND_FAILURE → PAGE_PLAY → POPUP_SEEK → DELIVER_COMMAND_ERROR → RECEIVER_PAUSED → PAGE_SEEK (a late refusal cannot revoke its successor)",
+        ids: [
+            "PAGE_PAUSE",
+            "ARM_COMMAND_FAILURE",
+            "PAGE_PLAY",
+            "POPUP_SEEK",
+            "DELIVER_COMMAND_ERROR",
             "RECEIVER_PAUSED",
             "PAGE_SEEK",
             "SETTLE"

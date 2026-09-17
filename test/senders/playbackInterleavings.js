@@ -54,6 +54,7 @@ const {
 const {
     createModel,
     applyToModel,
+    observeCommandFailure,
     observeCommandSession,
     observeWorldAdvance
 } = require("../playbackModel/model");
@@ -220,6 +221,25 @@ async function perform(cast, op) {
             cast.h.advanceClock(op.ms ?? 15001);
             await flush();
             return;
+        case "COMMANDS_REFUSED":
+        case "COMMANDS_ACCEPTED":
+            // The receiver refuses playback commands (or accepts them again),
+            // reported at dispatch time - the common shape, and the one a user
+            // action can follow immediately.
+            cast.h.refuseCommands(op.id === "COMMANDS_REFUSED");
+            await flush();
+            return;
+        case "ARM_COMMAND_FAILURE":
+            // The next dispatch will be refused, but the SDK reports it LATER -
+            // see DELIVER_COMMAND_ERROR, which is the report arriving.
+            cast.h.armCommandFailure({ immediate: false });
+            await flush();
+            return;
+        case "DELIVER_COMMAND_ERROR":
+            // The SDK's asynchronous report that a command was refused.
+            cast.h.deliverCommandErrors();
+            await flush();
+            return;
         case "LOAD_RESOLVE_SESSIONLESS":
             // The receiver accepted the LOAD and has not named its session yet, so
             // the media the sender binds carries no mediaSessionId.
@@ -332,6 +352,13 @@ async function runCase(
                 op.mediaSessionId = pending.mediaSessionId;
             }
         }
+        if (op.id === "DELIVER_COMMAND_ERROR") {
+            // Whether this failure revokes the pending echo is decided by whether
+            // the failed command is still the one being awaited - the sender has
+            // been told other commands since. Read BEFORE the delivery, which does
+            // not dispatch anything by itself.
+            op.failedCommandIsLatest = cast.h.failedCommandIsLatest();
+        }
         if (op.id === "ITEM_CHANGE") {
             // A UNIQUE identity per item change: reusing one placeholder made the
             // model see the second change as "the same video" while the fixture
@@ -411,6 +438,13 @@ async function runCase(
         const commandedCount = commandsThisStep.play + commandsThisStep.pause;
         if (commandedCount > commandsBefore.play + commandsBefore.pause) {
             model = observeCommandSession(model, cast.h.lastCommand());
+        }
+        // A command the receiver REFUSED is not one we are waiting to see
+        // confirmed, and the refusal can arrive at dispatch time. Whether it is
+        // still the command being awaited is the fixture's answer (the sender's own
+        // rule is by command instance).
+        if (cast.h.failedCommandIsLatest()) {
+            model = observeCommandFailure(model);
         }
 
         const generationsAfter = snapshotGenerations(cast);

@@ -709,13 +709,25 @@ export default class MediaSender {
      * not "the last state we ever asked for": the difference is the whole point -
      * a memory of the last command refuses a later REAL remote action that happens
      * to equal it.
+     *
+     * A command the receiver REFUSES is not pending either. The SDK reports that
+     * asynchronously on the error callback, and an echo that never comes would
+     * otherwise stay armed for the whole confirmation window: the user pressing
+     * the same state on the physical remote would be dismissed as the echo of a
+     * command the receiver never accepted. The revocation is by COMMAND INSTANCE,
+     * because the callbacks are asynchronous: a late error for command A must not
+     * disarm command B, which is the one the receiver is actually confirming now.
      */
     private commandReceiverPlayback(
         media: Media,
         action: "play" | "pause",
         onError: (err: unknown) => void
     ) {
-        this.pendingReceiverPlaybackEcho = {
+        const pending: {
+            playerState: "PLAYING" | "PAUSED";
+            mediaSessionId?: number;
+            issuedAt: number;
+        } = {
             playerState:
                 action === "play"
                     ? cast.media.PlayerState.PLAYING
@@ -723,13 +735,26 @@ export default class MediaSender {
             mediaSessionId: media.mediaSessionId,
             issuedAt: Date.now()
         };
+        this.pendingReceiverPlaybackEcho = pending;
+        const failed = (err: unknown) => {
+            // Only THIS command's echo is revoked, and only while it is still the
+            // one being awaited.
+            if (this.pendingReceiverPlaybackEcho === pending) {
+                this.pendingReceiverPlaybackEcho = undefined;
+                this.debug?.(
+                    "receiver refused the play/pause this extension commanded: nothing is awaited",
+                    { playerState: pending.playerState, err: String(err) }
+                );
+            }
+            onError(err);
+        };
         // The SDK's Media takes an explicit `undefined` request and the success
         // callback before the error callback, which is the shape every sender call
         // site already used; routing them through here is what records the command.
         if (action === "play") {
-            media.play(undefined, undefined, onError);
+            media.play(undefined, undefined, failed);
         } else {
-            media.pause(undefined, undefined, onError);
+            media.pause(undefined, undefined, failed);
         }
     }
 

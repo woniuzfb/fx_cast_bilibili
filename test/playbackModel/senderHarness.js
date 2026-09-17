@@ -138,6 +138,30 @@ let lastCommand = { issued: false, mediaSessionId: undefined };
  * placeholder stored on the request.
  */
 let lastResolvedMedia;
+/**
+ * Receiver play/pause commands the SDK will report as FAILED.
+ *
+ * A command the receiver refuses is a real part of this lifecycle - the sender
+ * must stop waiting for an echo that will never come - and it cannot be reached
+ * from the alphabet's user actions, because the failure is the SDK's answer to a
+ * dispatch rather than something the user or the receiver does. `armCommandFailure`
+ * marks the NEXT dispatch, `deliverCommandErrors` is the asynchronous report (so a
+ * case can make it arrive after a later command replaced it), and the ordinal
+ * tells whether the failed command was the one still being awaited.
+ */
+let commandFailureArmed = false;
+/** `true` = the SDK reports the refusal at dispatch time; `false` = later. */
+let commandFailureImmediate = true;
+/**
+ * The receiver is REFUSING playback commands right now (and says so at dispatch
+ * time). A state of the world rather than a one-off: a seek dispatches more than
+ * one command, and "this command was refused, the next one was not" is a different
+ * (and uninteresting) situation from "the receiver is not accepting commands".
+ */
+let commandsRefused = false;
+let receiverCommandOrdinal = 0;
+let failedCommandOrdinal;
+const pendingCommandErrors = [];
 /** True while a row is holding the page's `seeked` back. */
 let pageSeeksDeferred = false;
 const timers = { timeouts: [] };
@@ -524,18 +548,60 @@ function makeMedia(playerState, estimatedTime, mediaSessionId, contentId) {
         getEstimatedTime: () => estimatedTime,
         addUpdateListener: noop,
         removeUpdateListener: noop,
-        pause: () => {
+        pause: (...args) => {
             calls.pause++;
             receiverCommands.pause++;
             pendingReceiverEcho = { playerState: "PAUSED", mediaSessionId };
             lastCommand = { issued: true, mediaSessionId };
+            const ordinal = ++receiverCommandOrdinal;
+            if (commandsRefused) {
+                failedCommandOrdinal = ordinal;
+                args[2]?.({
+                    code: "ERROR",
+                    description: "harness: receiver is refusing commands"
+                });
+            } else if (commandFailureArmed) {
+                commandFailureArmed = false;
+                failedCommandOrdinal = ordinal;
+                if (commandFailureImmediate) {
+                    // The receiver refuses it NOW: the common shape, and the one
+                    // where a real remote action can arrive immediately after.
+                    args[2]?.({
+                        code: "ERROR",
+                        description: "harness: receiver refused the command"
+                    });
+                } else {
+                    pendingCommandErrors.push(args[2]);
+                }
+            }
             return Promise.resolve();
         },
-        play: () => {
+        play: (...args) => {
             calls.play++;
             receiverCommands.play++;
             pendingReceiverEcho = { playerState: "PLAYING", mediaSessionId };
             lastCommand = { issued: true, mediaSessionId };
+            const ordinal = ++receiverCommandOrdinal;
+            if (commandsRefused) {
+                failedCommandOrdinal = ordinal;
+                args[2]?.({
+                    code: "ERROR",
+                    description: "harness: receiver is refusing commands"
+                });
+            } else if (commandFailureArmed) {
+                commandFailureArmed = false;
+                failedCommandOrdinal = ordinal;
+                if (commandFailureImmediate) {
+                    // The receiver refuses it NOW: the common shape, and the one
+                    // where a real remote action can arrive immediately after.
+                    args[2]?.({
+                        code: "ERROR",
+                        description: "harness: receiver refused the command"
+                    });
+                } else {
+                    pendingCommandErrors.push(args[2]);
+                }
+            }
             return Promise.resolve();
         },
         seek: () => {
@@ -562,6 +628,11 @@ async function makeSender(MediaSender, opts = {}) {
     pendingReceiverEcho = undefined;
     lastCommand = { issued: false, mediaSessionId: undefined };
     lastResolvedMedia = undefined;
+    commandFailureArmed = false;
+    commandsRefused = false;
+    receiverCommandOrdinal = 0;
+    failedCommandOrdinal = undefined;
+    pendingCommandErrors.length = 0;
     clockSkewMs = 0;
     pageSeeksDeferred = false;
     timers.timeouts.length = 0;
@@ -697,6 +768,41 @@ async function makeSender(MediaSender, opts = {}) {
             const lastLoad = sessionState.loadRequests.at(-1);
             if (lastLoad?.media) lastLoad.media.mediaSessionId = undefined;
             if (lastResolvedMedia) lastResolvedMedia.mediaSessionId = undefined;
+        },
+        /** The receiver refuses every playback command (or accepts them again). */
+        refuseCommands: value => {
+            commandsRefused = value;
+        },
+        /**
+         * The NEXT receiver play/pause dispatch will be reported as failed:
+         * `immediate` is the SDK answering the dispatch itself, and the default
+         * because that is the shape a user action can follow directly.
+         * `{ immediate: false }` defers the report to `deliverCommandErrors`, which
+         * is how a LATE refusal (one that arrives after a later command replaced
+         * it) is expressed.
+         */
+        armCommandFailure: ({ immediate = true } = {}) => {
+            commandFailureArmed = true;
+            commandFailureImmediate = immediate;
+        },
+        /**
+         * Did the failed command stay the one being awaited? True while no later
+         * play/pause replaced it - which is what decides whether its error may
+         * revoke the sender's pending echo.
+         */
+        failedCommandIsLatest: () =>
+            failedCommandOrdinal !== undefined &&
+            failedCommandOrdinal === receiverCommandOrdinal,
+        /** The SDK reporting the failure of the command it accepted. */
+        deliverCommandErrors: () => {
+            const errors = pendingCommandErrors.splice(0);
+            for (const onError of errors) {
+                onError?.({
+                    code: "ERROR",
+                    description: "harness: receiver refused the command"
+                });
+            }
+            return errors.length;
         },
         /** Move the world's clock (the sender reads the same one). */
         advanceClock: ms => {

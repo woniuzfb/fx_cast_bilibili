@@ -158,7 +158,12 @@ Model corrections (the other direction - the implementation was right):
     `pagePlaying` becomes true on `ITEM_CHANGE` (a `QUALITY_CHANGE` keeps the element);
 -   while the page's controls are detached neither the page's own events nor the
     popup's page route are delivered (the production fallback to the bridge route is
-    the background's layer, covered by the load matrix).
+    the background's layer, covered by the load matrix);
+-   a REFUSED load is retried: the seek loop advances to its next iteration and
+    reloads for the same target, so a generation is in flight again and a seek
+    arriving now coalesces onto the retry. The model used to treat a refusal as the
+    end of the chain, which the reseeded generator exposed once the command-failure
+    operations changed the sequences a seed produces.
 
 ## What the long sweep found (RESOLVED: a fixture artifact)
 
@@ -214,6 +219,14 @@ the case's INPUT, never a claim about behaviour:
 -   `MEDIA_WITHOUT_SESSION` — the current media has no session id (used to be how
     the unattributable command was set up; `LOAD_RESOLVE_SESSIONLESS` does it
     through a production-shaped path now).
+-   `COMMANDS_REFUSED` / `COMMANDS_ACCEPTED` — the receiver is refusing playback
+    commands (and says so at dispatch time). This is a state rather than a one-off
+    because a seek dispatches more than one command: "this command was refused, the
+    next one was not" is a different situation from "the receiver is not accepting
+    commands", and only the second one leaves nothing awaited.
+-   `ARM_COMMAND_FAILURE` + `DELIVER_COMMAND_ERROR` — ONE command is refused, and
+    the SDK reports it LATER, after a subsequent command has replaced it. That is
+    the only way to express "a late refusal must not revoke its successor".
 
 ## What the harness cannot say yet
 
