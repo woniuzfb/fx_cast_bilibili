@@ -1207,6 +1207,38 @@ async function checkPresentationIdentityConfirmation(MediaSender) {
  * refuse: `suppressPlay++` / `suppressPause++` must sit UNCONDITIONALLY in front
  * of the mirror's own play()/pause().
  */
+/**
+ * A command the receiver REFUSED must stop being awaited - revoking only ITS OWN
+ * pending echo, because the SDK reports failures asynchronously and a late error
+ * for command A would otherwise disarm command B.
+ *
+ * Asserted on the shape, scoped to the method that dispatches commands: the
+ * identity guard, exactly one clearing point, and that it sits inside the guard.
+ * The behaviour is pinned by the phase-3 cases; this is the anti-regression shape,
+ * on the same standard as the suppression and session rules.
+ */
+function checkRefusedCommandRevocation(mediaSenderSource) {
+    const body = methodBody(mediaSenderSource, "commandReceiverPlayback");
+    const clears = (
+        body.match(/this\.pendingReceiverPlaybackEcho = undefined;/g) ?? []
+    ).length;
+    check(
+        "a refused command revokes only ITS OWN pending echo (by command instance)",
+        body !== "" &&
+            /this\.pendingReceiverPlaybackEcho = pending;/.test(body) &&
+            /if \(this\.pendingReceiverPlaybackEcho === pending\) \{\s*this\.pendingReceiverPlaybackEcho = undefined;/.test(
+                body
+            ) &&
+            clears === 1,
+        "a late refusal would disarm the command the receiver is confirming now"
+    );
+    check(
+        "a refused command still reports the error to its caller",
+        /onError\(err\);/.test(body),
+        "the caller's error handling must not be swallowed"
+    );
+}
+
 function checkMirrorEventsAreSuppressed(mediaSenderSource) {
     /** Is `increment;` followed (before any closing brace) by `call(`? */
     const unconditionalBefore = (increment, call) =>
@@ -1248,6 +1280,45 @@ function checkMirrorEventsAreSuppressed(mediaSenderSource) {
  * session reports next). The behaviours are pinned by the phase-3 cases; this
  * pins the shape, so a future simplification has to argue with a test.
  */
+/**
+ * One method's body, by brace matching.
+ *
+ * A whole-file match cannot say WHERE a behaviour lives, and the echo lifecycle
+ * has four legitimate places that clear the same field (a settled report, a
+ * refusal, a stop, a fresh command). Scoping the assertion to the method that OWNS
+ * the behaviour is what keeps it from passing on a neighbour's line.
+ */
+function methodBody(source, name) {
+    const start = source.indexOf(`${name}(`);
+    if (start < 0) return "";
+    // Past the PARAMETER LIST first: a parameter's type is an object literal
+    // (`media: { playerState: string }`), so the first `{` after the name is the
+    // type, not the body.
+    let parens = 0;
+    let open = -1;
+    for (let i = start + name.length; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") parens++;
+        else if (ch === ")") {
+            parens--;
+            if (parens === 0) {
+                open = source.indexOf("{", i);
+                break;
+            }
+        }
+    }
+    if (open < 0) return "";
+    let depth = 0;
+    for (let i = open; i < source.length; i++) {
+        if (source[i] === "{") depth++;
+        else if (source[i] === "}") {
+            depth--;
+            if (depth === 0) return source.slice(open, i + 1);
+        }
+    }
+    return "";
+}
+
 function checkEchoRequiresEvidence(mediaSenderSource) {
     const sessionRule =
         /const sameKnownSession =([\s\S]*?);\n/.exec(mediaSenderSource)?.[1] ??
@@ -1269,12 +1340,24 @@ function checkEchoRequiresEvidence(mediaSenderSource) {
         ),
         "past the window a report is the user's by definition"
     );
+    const adoptBody = methodBody(
+        mediaSenderSource,
+        "adoptReceiverPlaybackIntent"
+    );
     check(
-        "echo: the pending command is CONSUMED (cleared) whenever a report settles it",
-        /this\.pendingReceiverPlaybackEcho = undefined;/.test(
-            mediaSenderSource
-        ),
+        "echo: the adoption itself consumes the pending command",
+        adoptBody !== "" &&
+            /this\.pendingReceiverPlaybackEcho = undefined;/.test(adoptBody),
         "a memory of the last command refuses a later real user action"
+    );
+    check(
+        "echo: the adoption computes the echo BEFORE consuming it",
+        adoptBody.indexOf("const echo =") >= 0 &&
+            adoptBody.indexOf("const echo =") <
+                adoptBody.indexOf(
+                    "this.pendingReceiverPlaybackEcho = undefined;"
+                ),
+        "the decision must be made from the pending command it then clears"
     );
 }
 
@@ -1304,6 +1387,7 @@ async function main() {
     );
     checkMirrorEventsAreSuppressed(mediaSenderSource);
     checkEchoRequiresEvidence(mediaSenderSource);
+    checkRefusedCommandRevocation(mediaSenderSource);
 
     console.info("");
     console.info(`${pass}/${pass + fail} checks passed`);

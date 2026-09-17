@@ -23,16 +23,24 @@ sequence that caused it, and that sequence is the reproduction.
 
 ## What is real, and what the model is not
 
-|          |                                                                                                                                                                                                                                                                                       |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| real     | the bundled `MediaSender`; the bridge's plan arithmetic (`plan.js` reads `mediaServer.ts` and evaluates its expressions); a cast-SDK stub that records every receiver command; the page element's real event semantics (`seeking`/`seeked` only for a move that changed the position) |
-| stubbed  | the cast SDK, the browser (`window`, `HTMLMediaElement`, a timer layer the test fires by hand) - the narrowest seams the sender has                                                                                                                                                   |
-| modelled | only the USER'S INTENT: which play/pause state the next LOAD must inherit, which position the newest explicit seek asked for, which video the intent belongs to, whether the page's events can reach the sender, whether the cast is over                                             |
+|          |                                                                                                                                                                                                                                                                                     |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| real     | the bundled `MediaSender`; the bridge's plan arithmetic (`plan.js` reads `mediaServer.ts` and evaluates its expressions); a cast-SDK stub that records every receiver command; the exact operations the harness delivers, including the page event pairs each case explicitly emits |
+| stubbed  | the cast SDK, the browser (`window`, `HTMLMediaElement`, a timer layer the test fires by hand) - the narrowest seams the sender has                                                                                                                                                 |
+| modelled | only the USER'S INTENT: which play/pause state the next LOAD must inherit, which position the newest explicit seek asked for, which video the intent belongs to, whether the page's events can reach the sender, whether the cast is over                                           |
 
 The model deliberately does **not** model transactions, debounce timers, priming
 windows or coalescing mechanics: those are bounded by invariants, not predicted. A
 model that predicted them would be a second implementation, and a disagreement
 would say nothing about the real one.
+
+What the harness does NOT claim: whether a real browser emits `seeking`/`seeked`
+when `currentTime` is assigned the value it already has. `PAGE_SEEK` delivers the
+event pair explicitly (see `pageSeek` in `senderHarness.js`), so a case judges the
+event the sender actually received instead of predicting browser no-op behaviour -
+a `page-is-already-at-the-target` rule was written on that guess once and had to be
+removed when another case showed the sender does see the seek. The same care
+applies to any future rule that reads "the browser would not have fired that".
 
 ## The alphabet names the SOURCE
 
