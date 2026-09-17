@@ -1191,6 +1191,53 @@ async function checkPresentationIdentityConfirmation(MediaSender) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * The extension's OWN page events are attributed by SUPPRESSION, not by the
+ * gesture gate.
+ *
+ * The gate answers "could a page event be a user's?" from a recent interaction,
+ * which is not the same question as "did WE cause this one": with a gesture
+ * window open - a real page seek moments earlier, which is exactly when a
+ * receiver report arrives - the mirror's own `mediaElement.play()` passes the
+ * gate and, without a suppression, is read as a USER play, so an observation
+ * commands the receiver and overwrites the record of what we asked for.
+ *
+ * Asserted against the source because the two mechanisms look interchangeable,
+ * and the `!gated` shortcut is exactly the "optimization" this check exists to
+ * refuse: `suppressPlay++` / `suppressPause++` must sit UNCONDITIONALLY in front
+ * of the mirror's own play()/pause().
+ */
+function checkMirrorEventsAreSuppressed(mediaSenderSource) {
+    /** Is `increment;` followed (before any closing brace) by `call(`? */
+    const unconditionalBefore = (increment, call) =>
+        new RegExp(
+            `\\n\\s*${increment};\\s*\\n(?:[^}]|\\n)*?${call}\\(`,
+            "m"
+        ).test(mediaSenderSource);
+    const guardedByTheGate = /if\s*\(!gated\)\s*suppress(Play|Pause)\+\+/.test(
+        mediaSenderSource
+    );
+    check(
+        "mirror play: suppressPlay++ is unconditional and precedes mediaElement.play()",
+        unconditionalBefore("suppressPlay\\+\\+", "mediaElement\\.play") &&
+            !guardedByTheGate,
+        "the mirror's own play event would be read as a user play"
+    );
+    check(
+        "mirror pause: suppressPause++ is unconditional and precedes mediaElement.pause()",
+        unconditionalBefore("suppressPause\\+\\+", "mediaElement\\.pause") &&
+            !guardedByTheGate,
+        "the mirror's own pause event would be read as a user pause"
+    );
+    check(
+        "mirror play: a rejected play() gives the suppression back",
+        /mediaElement\.play\(\)\.catch\(\s*err\s*=>\s*\{\s*suppressPlay = Math\.max\(0, suppressPlay - 1\)/.test(
+            mediaSenderSource
+        ),
+        "an autoplay refusal would swallow the user's next play"
+    );
+}
+
 async function main() {
     const { outfile, workDir } = await buildSender();
     installGlobals();
@@ -1211,6 +1258,9 @@ async function main() {
     await checkCaptureWindowsHoldPage(MediaSender);
     await checkTightenNeverWritesPage(MediaSender);
     await checkPresentationIdentityConfirmation(MediaSender);
+    checkMirrorEventsAreSuppressed(
+        fs.readFileSync(path.join(sendersDir, "media.ts"), "utf8")
+    );
 
     console.info("");
     console.info(`${pass}/${pass + fail} checks passed`);

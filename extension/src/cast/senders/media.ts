@@ -651,6 +651,8 @@ export default class MediaSender {
         // Every pending intent is void once the cast is gone: no transaction
         // survives a stop, and no orphaned "seeking" phase can hold the page.
         this.playbackCoordinator.reset("stopped");
+        // No command can be confirmed after the cast is gone.
+        this.pendingReceiverPlaybackEcho = undefined;
         this.suspendMediaElementSync();
         this.clearRecoveryActivityWatchdog();
         this.clearRecoveryRetry();
@@ -699,19 +701,28 @@ export default class MediaSender {
      *
      * Every dispatch goes through here - the user's own intents (page, popup, BLE)
      * and the extension's internal one (the seek hold) - so the observation they
-     * cause can be told apart from the user moving the receiver themselves: a
-     * report that matches `lastCommandedReceiverState` is the echo of a command,
-     * and a state the user chose is by definition not the one we asked for.
+     * cause can be told apart from the user moving the receiver themselves: the
+     * report that confirms THIS command is its echo, and a state the user chose is
+     * by definition not the one we asked for.
+     *
+     * What is recorded is a PENDING command (see `pendingReceiverPlaybackEcho`),
+     * not "the last state we ever asked for": the difference is the whole point -
+     * a memory of the last command refuses a later REAL remote action that happens
+     * to equal it.
      */
     private commandReceiverPlayback(
         media: Media,
         action: "play" | "pause",
         onError: (err: unknown) => void
     ) {
-        this.lastCommandedReceiverState =
-            action === "play"
-                ? cast.media.PlayerState.PLAYING
-                : cast.media.PlayerState.PAUSED;
+        this.pendingReceiverPlaybackEcho = {
+            playerState:
+                action === "play"
+                    ? cast.media.PlayerState.PLAYING
+                    : cast.media.PlayerState.PAUSED,
+            mediaSessionId: media.mediaSessionId,
+            issuedAt: Date.now()
+        };
         // The SDK's Media takes an explicit `undefined` request and the success
         // callback before the error callback, which is the shape every sender call
         // site already used; routing them through here is what records the command.
@@ -738,18 +749,47 @@ export default class MediaSender {
         playerState: string;
     };
     /**
-     * The play/pause the extension last COMMANDED the receiver to be in.
+     * The play/pause command still WAITING to be confirmed by the receiver.
      *
      * The receiver reports back what it was told, and one of those commands is
      * ours alone: a DASH seek pauses the receiver to hold the frame while the remux
      * is rebuilt (`onDashSeekStart`), which the user never asked for. Reading that
      * echo as a user intent set `desiredPlayback = paused`, so the seek's own
      * reload came back `autoplay: false` and the page - which follows the receiver -
-     * stopped: a seek that silently paused playback. Comparing an observation
-     * against what we last commanded is what tells the two apart, because a state
-     * the USER moved to is by definition not the one we asked for.
+     * stopped: a seek that silently paused playback.
+     *
+     * It is deliberately NOT "the state we last commanded". Those are different
+     * questions, and answering the second one loses real user actions: our PLAY is
+     * confirmed, the user then PAUSES and PLAYS on the physical remote, and that
+     * later PLAY equals what we once asked for - a sticky memory refuses it as an
+     * echo, so the intent stays paused and the next seek pauses playback again.
+     * Hence the three things this record carries:
+     *
+     *   - the SESSION it was sent to. A command belongs to the media session of its
+     *     day; the item change's new session is the user's to move, and a report
+     *     from it can never be an echo of a command aimed at the previous one.
+     *   - WHEN it was sent. A confirmation that never comes must not arm the
+     *     refusal forever (see RECEIVER_ECHO_CONFIRM_WINDOW_MS).
+     *   - that it is CONSUMED. One command, one echo: once answered - or refuted by
+     *     a settled report on that session that does not match it - it is gone.
      */
-    private lastCommandedReceiverState?: "PLAYING" | "PAUSED";
+    private pendingReceiverPlaybackEcho?: {
+        playerState: "PLAYING" | "PAUSED";
+        mediaSessionId?: number;
+        issuedAt: number;
+    };
+    /**
+     * How long a play/pause command's echo is expected to take.
+     *
+     * Generous on purpose: a Chromecast confirms in well under a second, a Roku
+     * within one of the bridge's ECP polls (~3s). What matters is that the window
+     * ENDS - past it a report is the user's by definition, because "we asked for
+     * this at some point" cannot be a reason to ignore them. Matches the seek's own
+     * confirmation budget (DASH_TIGHTEN_WINDOW_MS, same 15s), which is how long a
+     * seek hold's echo has to come back before the cast is treated as settled on
+     * its own.
+     */
+    private static RECEIVER_ECHO_CONFIRM_WINDOW_MS = 15000;
     /**
      * What the receiver reported BEFORE the report this tick is handling.
      *
@@ -843,17 +883,37 @@ export default class MediaSender {
         // A hold guard (`isHoldingPage()`) is NOT the right test here: a real user
         // action that happens to arrive while our own load settles must still be
         // adopted (the phase-3 generator found exactly that case). What must never
-        // be adopted is the state WE asked for - and one of those commands is not a
-        // user intent at all: a DASH seek pauses the receiver to hold the frame
-        // while the remux is rebuilt. Reading that echo as intent made the seek's
-        // own reload come back `autoplay: false`, and the page, which follows the
-        // receiver, stopped with it.
+        // be adopted is the confirmation of the command we are WAITING on - and one
+        // of those commands is not a user intent at all: a DASH seek pauses the
+        // receiver to hold the frame while the remux is rebuilt. Reading that echo
+        // as intent made the seek's own reload come back `autoplay: false`, and the
+        // page, which follows the receiver, stopped with it.
+        //
+        // Either way this report SETTLES the pending command: it is its echo (and
+        // is consumed), or it is a state our command does not explain - which is the
+        // user moving the receiver, so the command must stop being awaited.
         const reportedPlaybackState =
             state === cast.media.PlayerState.PLAYING ? "PLAYING" : "PAUSED";
-        if (this.lastCommandedReceiverState === reportedPlaybackState) {
+        const pending = this.pendingReceiverPlaybackEcho;
+        const echo =
+            pending !== undefined &&
+            pending.playerState === reportedPlaybackState &&
+            (pending.mediaSessionId === undefined ||
+                media.mediaSessionId === undefined ||
+                pending.mediaSessionId === media.mediaSessionId) &&
+            Date.now() - pending.issuedAt <=
+                MediaSender.RECEIVER_ECHO_CONFIRM_WINDOW_MS;
+        this.pendingReceiverPlaybackEcho = undefined;
+        if (echo) {
             this.debug?.(
-                "receiver reported the state this extension last commanded: not an intent",
-                { receiverState: state, mediaSessionId: media.mediaSessionId }
+                pending?.mediaSessionId === media.mediaSessionId
+                    ? "receiver confirmed the command this extension is waiting on: not an intent"
+                    : "receiver confirmed a command issued before this session's states: not an intent",
+                {
+                    receiverState: state,
+                    mediaSessionId: media.mediaSessionId,
+                    commandedForSession: pending?.mediaSessionId
+                }
             );
             return;
         }
@@ -1270,11 +1330,17 @@ export default class MediaSender {
             // A restart is already running: the running transaction retargets to
             // this (newer) intent. Starting a second generation here is what
             // produced duplicate reloads on rapid seeks.
+            //
+            // WHY it thinks a restart is running is decided by the coordinator
+            // (`isTransactionActive() || loadInFlight`, see requestSeek), so the
+            // whole state that answer is made of goes in the line: a coalesce that
+            // nothing in flight can explain is a lifecycle defect, and inferring
+            // which flag was stale from the symptom is how one gets missed.
             this.debug?.("dash seek coalesced onto the running transaction", {
                 origin,
                 target: request.targetPageSeconds,
                 intentId: request.intentId,
-                coordinator: this.playbackCoordinator.describe()
+                ...this.dashSeekState()
             });
             return true;
         }
@@ -1298,6 +1364,27 @@ export default class MediaSender {
             void this.runDashSeek();
         }, MediaSender.DASH_SEEK_DEBOUNCE_MS);
         return true;
+    }
+
+    /**
+     * Everything a "is a transaction running?" answer is made of.
+     *
+     * One place, so a coalescing decision and its trace can never describe
+     * different states - the same rule `isHoldingPage` follows for the page's
+     * transactions.
+     */
+    private dashSeekState() {
+        return {
+            dashSeekRunning: this.dashSeekRunning,
+            coordinator: this.playbackCoordinator.describe(),
+            activeMediaServerRequestId: this.activeMediaServerRequestId,
+            dashLoadId: this.dashLoadId,
+            tightenSync: this.dashTightenSync,
+            itemTransition: this.dashItemTransitionActive(),
+            sourcePriming: this.dashSeekSourcePriming !== undefined,
+            pendingDashSeekPrime: this.pendingDashSeekPrime !== undefined,
+            holdingPage: this.isHoldingPage()
+        };
     }
 
     /** The coordinator's view, for diagnostics and tests. */

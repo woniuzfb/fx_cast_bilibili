@@ -160,38 +160,44 @@ Model corrections (the other direction - the implementation was right):
     popup's page route are delivered (the production fallback to the bridge route is
     the background's layer, covered by the load matrix).
 
-## The generator's current red (UNRESOLVED)
+## What the long sweep found (RESOLVED: a fixture artifact)
 
-One sequence in the long sweep still fails, and it is written down here rather
-than tuned away, because the failure is a live question about the SENDER:
+The first 60x10 sweep had one red, and it was written down here rather than tuned
+away:
 
 ```sh
 node test/senders/playbackInterleavings.js --random 1 --length 10 --seed 222732
 # explicitSeekStartsItsOwnTarget: 12. PAGE_SEEK (0): no generation was started
 ```
 
-The sequence reaches step 12 with everything the fixture knows drained (no load
-in flight, the model agrees) and the page at 330s. The user's page seek to 0:00
-then moves the element and the sender logs `page control: seek (dash remux
-restart)` followed by `dash seek coalesced onto the running transaction` — so the
-seek is folded into a transaction that has nothing left in flight, and the
-receiver is never reloaded. The page moves and the cast does not.
+The sequence reached step 12 with everything the fixture knew drained, the page
+at 330s, and the user's page seek to 0:00 folded into a transaction that had
+nothing in flight (`dash seek coalesced onto the running transaction`): the page
+moved, the receiver was never reloaded. There were two candidate readings - a
+sender transaction outliving its loads, or the fixture never finishing a
+generation the sender believes is loading - and the coalescing branch now prints
+the state its answer is made of (`dashSeekState()`), which decided it in one run:
 
-The same symptom appears through the POPUP route in the long sweep
-(`--random 60 --length 10 --seed 1000`, the `POPUP_SEEK (300)` row), which is
-evidence AGAINST reading it as an artifact of the page route: two entry points
-that share only the sender's own seek path both fold their request into a
-transaction the fixture has already finished. What is not yet established is
-where that transaction lives:
+```text
+"coordinator": {"phase":"seeking","loadInFlight":false, ...},
+"dashSeekRunning": true, "dashLoadId": 3
+```
 
-1. a sender-side transaction that outlives its loads (`dashSeekRunning` / the
-   coordinator's intent) and swallows the next user seek — a real defect;
-2. a fixture artifact: an earlier `QUALITY_CHANGE` in the same sequence logs
-   `presentation identity NOT confirmed`, so the generation the sender believes
-   is still loading may be one the harness never answered as the sender counts it.
+A seek transaction WAS running, and it was still inside `loadMedia` for a bridge
+request the fixture had started but never answered - the run answers the NEWEST
+generation, and the older request had been superseded by the quality change in
+between. So the sender's `startRemoteMediaServer` promise never settled and
+`runDashSeek` never reached its `finally`. In production that cannot wedge: the
+bridge replies to every request it receives (the sender then discards the reply
+whose load a newer one replaced), and a request that is never answered rejects on
+its own timeout.
 
-Until one of them is established, the sweep is expected to be red on those rows,
-and the pairwise suite (the contract) is not affected by them.
+The fixture now answers superseded requests too, with the plan for their OWN start
+time and their own requestId (`supersededGenerations` lists them, so they can
+never be read as progress), and the sweep is green. The lesson is the same one
+this stage keeps teaching: a harness that answers only the newest generation is
+not "the same, but simpler" - it is a different world, and the sender's promise
+chain is what notices.
 
 ## What the harness cannot say yet
 
@@ -229,3 +235,16 @@ The sequences the stage exists for, and what each one pins:
     generation the user just cancelled (I6).
 -   `LOAD_RESOLVE → RECEIVER_PAUSED → RECEIVER_PLAYING` — the second report is
     judged against the state the first one left, not the pre-load state.
+-   `PAGE_PAUSE → PAGE_PLAY → RECEIVER_ECHO → RECEIVER_PAUSED →
+RECEIVER_PLAYING → PAGE_SEEK` — our PLAY is confirmed, the user then pauses
+    and plays the physical remote, and that later PLAY happens to equal what we
+    once commanded. An echo is CONSUMED, not remembered: the pending command has
+    a session, a time and one confirmation, and a settled report that does not
+    match it settles the question (with the sticky version the user's play is
+    refused and the seek reloads `autoplay: false`).
+-   `PAGE_PAUSE → RECEIVER_ECHO → RECEIVER_PLAYING → RECEIVER_PAUSED →
+PAGE_SEEK` — the mirror image, so the guard cannot be "fixed" by refusing
+    nothing.
+-   `PAGE_PLAY → ITEM_CHANGE → RECEIVER_PAUSED → RECEIVER_PLAYING → PAGE_SEEK` —
+    a command belongs to the session it was sent to: the new session's reports
+    are the user's, not the previous session's echo.

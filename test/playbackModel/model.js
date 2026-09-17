@@ -95,15 +95,23 @@ const DEFAULT_STATE = {
     lastReceiverSession: undefined,
     lastReceiverState: undefined,
     /**
-     * The play/pause the extension last COMMANDED the receiver to be in, and
-     * whether that command was a user intent at all.
+     * The play/pause command still WAITING to be confirmed, with the session it
+     * was sent to: `{ playerState, mediaSessionId }`.
      *
      * A DASH seek pauses the receiver to hold the frame while the remux rebuilds -
      * a command nobody asked for - so `desiredPlayback` deliberately stays where
-     * the user left it while `lastCommanded` becomes PAUSED. The observation that
-     * command produces must therefore not be read as a user action: it is our echo.
+     * the user left it while this records PAUSED. The report that command produces
+     * must not be read as a user action: it is our echo.
+     *
+     * It is a PENDING command, not a memory of the last one. The two are different
+     * questions, and answering the second is how a real remote action gets lost:
+     * the expiry of our PLAY is confirmed, the user pauses and plays the remote,
+     * and that later PLAY equals what we once commanded. Consumed on its echo,
+     * replaced by the next command, and dropped when a settled report on the same
+     * session does NOT match it (that report settles what the receiver is showing
+     * us, and it is not our command).
      */
-    lastCommanded: undefined,
+    pendingEcho: undefined,
     /** The identity each recorded generation belonged to. */
     generationIdentities: []
 };
@@ -189,8 +197,12 @@ function applyToModel(state, op) {
             }
             next.desiredPlayback = wantsPlaying ? "playing" : "paused";
             next.pagePlaying = wantsPlaying;
-            // Both routes end in a receiver play/pause command.
-            next.lastCommanded = wantsPlaying ? "PLAYING" : "PAUSED";
+            // Both routes end in a receiver play/pause command, and the echo is
+            // looked for on the session that command was sent to.
+            next.pendingEcho = {
+                playerState: wantsPlaying ? "PLAYING" : "PAUSED",
+                mediaSessionId: op.currentMediaSessionId
+            };
             expect.autoplay = wantsPlaying;
             expect.rule = pageOrigin
                 ? "page-transition-is-intent"
@@ -204,13 +216,19 @@ function applyToModel(state, op) {
             if (op.id === "BLE_PLAY") {
                 next.desiredPlayback = "playing";
                 next.pagePlaying = true;
-                next.lastCommanded = "PLAYING";
+                next.pendingEcho = {
+                    playerState: "PLAYING",
+                    mediaSessionId: op.currentMediaSessionId
+                };
                 expect.autoplay = true;
                 expect.rule = "ble-play-is-intent";
             } else {
                 next.desiredPlayback = "paused";
                 next.pagePlaying = false;
-                next.lastCommanded = "PAUSED";
+                next.pendingEcho = {
+                    playerState: "PAUSED",
+                    mediaSessionId: op.currentMediaSessionId
+                };
                 expect.autoplay = false;
                 expect.rule = "ble-pause-is-intent";
             }
@@ -251,7 +269,10 @@ function applyToModel(state, op) {
             // rebuilt (onDashSeekStart). That is a command, not an intent: the
             // intent is untouched, and the receiver's report of it is the echo.
             if (expect.startsGeneration || next.pageControlsAttached) {
-                next.lastCommanded = "PAUSED";
+                next.pendingEcho = {
+                    playerState: "PAUSED",
+                    mediaSessionId: op.currentMediaSessionId
+                };
             }
             // A position never sends a receiver play/pause; a positioned reload
             // carries the intent instead.
@@ -344,9 +365,6 @@ function applyToModel(state, op) {
                 next.lastReceiverState !==
                     (observingPlaying ? "PLAYING" : "PAUSED");
             const settled = SETTLED.has(observed);
-            // An observation that matches what WE commanded is our echo, not the
-            // user - and for a seek that command is a hold the user never asked for.
-            const ourOwnCommand = next.lastCommanded === observed;
             next.lastReceiverSession = op.mediaSessionId;
             next.lastReceiverState = observed;
             // The three conditions are the WHOLE contract. `pageControlsAttached`
@@ -355,15 +373,33 @@ function applyToModel(state, op) {
             // adopting the user's intent is not - `noteReceiverReport` records every
             // report, and the same-session rule already refuses our own load's first
             // state, which is the only echo that could be mistaken for the user.
-            if (settled && sameSession && changed && !ourOwnCommand) {
-                next.desiredPlayback = observingPlaying ? "playing" : "paused";
-                next.pagePlaying = observingPlaying;
-                expect.rule = "receiver-moved-the-session-the-user-has";
+            if (settled && sameSession && changed) {
+                // An observation that matches a PENDING command on this session is
+                // that command's echo, not the user - and for a seek it is a hold
+                // the user never asked for. Either way this report SETTLES the
+                // question: the echo is confirmed (and consumed), or the receiver
+                // is showing a state our command does not explain, which is the
+                // user moving it.
+                const pending = next.pendingEcho;
+                const isEcho =
+                    pending !== undefined &&
+                    pending.playerState === observed &&
+                    (pending.mediaSessionId === undefined ||
+                        op.mediaSessionId === undefined ||
+                        pending.mediaSessionId === op.mediaSessionId);
+                next.pendingEcho = undefined;
+                if (isEcho) {
+                    expect.rule = "the-echo-of-our-own-command";
+                } else {
+                    next.desiredPlayback = observingPlaying
+                        ? "playing"
+                        : "paused";
+                    next.pagePlaying = observingPlaying;
+                    expect.rule = "receiver-moved-the-session-the-user-has";
+                }
             } else {
                 expect.rule = !sameSession
                     ? "new-session-is-our-own-load"
-                    : ourOwnCommand
-                    ? "the-echo-of-our-own-command"
                     : "no-change-to-adopt";
             }
             // An observation is never a command and never a generation.
@@ -414,7 +450,32 @@ function applyToModel(state, op) {
             next.mediaIdentity
         ];
     }
+    // Diagnostic only: the echo record AFTER this operation, so a trace can show
+    // which session the model believes our command reached.
+    expect.pendingEchoAfter = next.pendingEcho
+        ? { ...next.pendingEcho }
+        : undefined;
     return { state: next, expect };
+}
+
+/**
+ * The world states which media session the command this step dispatched reached.
+ *
+ * The model cannot derive it: a command is issued INSIDE an operation - the seek
+ * hold fires when the generation starts, which is after a SETTLE answered the
+ * loads - so the session a step began with is not the session the command went
+ * to. The fixture knows (it is the media object the sender commanded), and the
+ * echo's identity is exactly what decides whether a later report belongs to our
+ * command or to a session the user has since moved.
+ */
+function observeCommandSession(state, mediaSessionId) {
+    if (state.pendingEcho === undefined || mediaSessionId === undefined) {
+        return state;
+    }
+    return {
+        ...state,
+        pendingEcho: { ...state.pendingEcho, mediaSessionId }
+    };
 }
 
 /**
@@ -451,6 +512,7 @@ function observeWorldAdvance(model, { mediaSessionId, playerState }) {
 }
 
 module.exports = {
+    observeCommandSession,
     createModel,
     applyToModel,
     observeWorldAdvance,

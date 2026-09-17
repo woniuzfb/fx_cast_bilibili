@@ -99,7 +99,8 @@ let fixtureOptions = null;
 /** Monotonic totals of receiver-side commands, per fixture. */
 const receiverCommands = { pause: 0, play: 0, seek: 0 };
 /**
- * The state the extension last COMMANDED the receiver to be in.
+ * The play/pause command the extension is WAITING to see confirmed, with the
+ * session it was sent to.
  *
  * The receiver echoes what it was told, and one of those commands is the
  * extension's own: a DASH seek pauses the receiver to hold the frame while the
@@ -107,8 +108,22 @@ const receiverCommands = { pause: 0, play: 0, seek: 0 };
  * `RECEIVER_PAUSED` (the user, on the physical remote) from the receiver simply
  * reporting the pause WE just asked for - which is exactly the distinction the
  * sender has to make, and the one that regressed.
+ *
+ * It is PENDING, not a memory of the last command, because that is the
+ * distinction under test: a settled report from the receiver ANSWERS the command
+ * (whether or not it matches), so the echo is available to `RECEIVER_ECHO` once -
+ * exactly like the sender's own record, which is what keeps the fixture from
+ * offering an echo the sender has already stopped waiting for.
  */
-let lastCommandedReceiverState;
+let pendingReceiverEcho;
+/**
+ * The media session the LAST play/pause command reached - never cleared, because
+ * it answers a different question from `pendingReceiverEcho`: "which session did
+ * the command this step dispatched go to". A command is issued INSIDE a step (the
+ * seek hold fires when a SETTLE answers the loads), so the session is not the one
+ * the step began with, and the reports that answer it arrive before the step ends.
+ */
+let lastCommandSession;
 /** True while a row is holding the page's `seeked` back. */
 let pageSeeksDeferred = false;
 const timers = { timeouts: [] };
@@ -467,13 +482,15 @@ function makeMedia(playerState, estimatedTime, mediaSessionId, contentId) {
         pause: () => {
             calls.pause++;
             receiverCommands.pause++;
-            lastCommandedReceiverState = "PAUSED";
+            pendingReceiverEcho = { playerState: "PAUSED", mediaSessionId };
+            lastCommandSession = mediaSessionId;
             return Promise.resolve();
         },
         play: () => {
             calls.play++;
             receiverCommands.play++;
-            lastCommandedReceiverState = "PLAYING";
+            pendingReceiverEcho = { playerState: "PLAYING", mediaSessionId };
+            lastCommandSession = mediaSessionId;
             return Promise.resolve();
         },
         seek: () => {
@@ -497,7 +514,8 @@ async function makeSender(MediaSender, opts = {}) {
     receiverCommands.pause = 0;
     receiverCommands.play = 0;
     receiverCommands.seek = 0;
-    lastCommandedReceiverState = undefined;
+    pendingReceiverEcho = undefined;
+    lastCommandSession = undefined;
     pageSeeksDeferred = false;
     timers.timeouts.length = 0;
     windowListeners.clear();
@@ -607,11 +625,13 @@ async function makeSender(MediaSender, opts = {}) {
          */
         receiverCommandTotals: () => ({ ...receiverCommands }),
         /**
-         * What the extension last told the receiver to do - the state the receiver
-         * will report back on its next status ("the echo"). `undefined` means
-         * nothing has been commanded since the fixture was built.
+         * The command whose echo the receiver has not reported yet: the state it
+         * will report back on its next settled status. `undefined` means nothing is
+         * waiting to be confirmed (never commanded, or already answered).
          */
-        lastCommandedReceiverState: () => lastCommandedReceiverState,
+        pendingReceiverEcho: () => pendingReceiverEcho,
+        /** The session the last play/pause command reached (never cleared). */
+        lastCommandSession: () => lastCommandSession,
         resolveLoad: media => {
             const entry = sessionState.loadRequests.at(-1);
             if (!entry) return false;
@@ -820,6 +840,12 @@ async function startCast(
     const h = await makeSender(MediaSender, { pageTime, startupPadding });
     const answered = new Set();
     const generations = [];
+    /**
+     * Requests that were answered only because a NEWER load had superseded them:
+     * the sender discards these replies, and they are listed separately so they
+     * can never be mistaken for a generation the case made progress with.
+     */
+    const supersededGenerations = [];
     let sessionId = 1;
 
     const cast = {
@@ -848,9 +874,36 @@ async function startCast(
          * clock. That report is also what closes an item transition and releases
          * a seek's priming window, so it belongs in every step.
          */
+        /** The superseded requests answered along the way (diagnostics). */
+        supersededGenerations: () => [...supersededGenerations],
         async answerNewest() {
             const started = h.started.at(-1);
-            if (!started || answered.has(started.requestId)) return false;
+            if (!started) return false;
+            // Answer every SUPERSEDED request first.
+            //
+            // The bridge replies to each request it received, and the sender
+            // discards a reply whose load a newer one replaced (`loadId !==
+            // dashLoadId` -> it stops that media server and returns). Leaving them
+            // unanswered was a fixture artifact with a long reach: the sender's
+            // `startRemoteMediaServer` promise never settled, so the seek
+            // transaction that owned it stayed "running" forever and EVERY later
+            // seek was coalesced onto a ghost transaction - the page moved, the
+            // receiver was never reloaded (seed 222732, where the enriched
+            // coalescing trace showed `phase: "seeking"` with nothing in flight).
+            // In production that cannot wedge: the request has its own timeout,
+            // and answering every request is what the real bridge does.
+            for (const stale of h.started) {
+                if (stale === started || answered.has(stale.requestId))
+                    continue;
+                answered.add(stale.requestId);
+                global.__lastStartedRequestId = stale.requestId;
+                await answerBridgeWithPlan(cast.plan(stale.startTime));
+                supersededGenerations.push({
+                    requestId: stale.requestId,
+                    startTime: stale.startTime
+                });
+            }
+            if (answered.has(started.requestId)) return false;
             answered.add(started.requestId);
             const plan = cast.plan(started.startTime);
             cast.lastPlan = plan;
@@ -1109,6 +1162,16 @@ async function startCast(
          * reload: the old session keeps broadcasting while the new one starts.
          */
         async report(playerState, seconds, mediaSessionId, requestId) {
+            // A settled report from the receiver ANSWERS whatever command was
+            // pending: it either confirms it (the echo) or shows a state the
+            // command does not explain (the user). Either way it is no longer
+            // something the receiver owes us.
+            if (
+                playerState === PlayerState.PLAYING ||
+                playerState === PlayerState.PAUSED
+            ) {
+                pendingReceiverEcho = undefined;
+            }
             h.setReceiverState(
                 playerState,
                 seconds,

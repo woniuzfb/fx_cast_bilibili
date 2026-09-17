@@ -168,6 +168,60 @@ const PAIRWISE = [
         // the first one left - not against the pre-load state.
         name: "LOAD_RESOLVE → RECEIVER_PAUSED → RECEIVER_PLAYING",
         ids: ["LOAD_RESOLVE", "RECEIVER_PAUSED", "RECEIVER_PLAYING"]
+    },
+    // ---- an echo is confirmed ONCE, not forever ------------------------------
+    // The review's sequence, and the reason "the state we last commanded" is not
+    // the same question as "a command is waiting to be confirmed": the echo of our
+    // PLAY is answered, the user then PAUSES and PLAYS the receiver with the
+    // physical remote, and that second PLAY happens to equal the state we once
+    // commanded. A sticky memory refuses it as an echo, so the intent stays paused
+    // and the seek that follows reloads `autoplay: false` - the same symptom the
+    // echo guard exists to prevent, in the opposite direction.
+    {
+        // The leading PAUSE->PLAY pair is what makes this case about an echo at
+        // all: a PAGE_PLAY on a page that is already playing fires no event and
+        // issues no command (the model says so too), so a case that starts there
+        // has nothing pending for the receiver to confirm.
+        name: "PAGE_PAUSE → PAGE_PLAY → RECEIVER_ECHO → RECEIVER_PAUSED → RECEIVER_PLAYING → PAGE_SEEK (an echo is consumed once)",
+        ids: [
+            "PAGE_PAUSE",
+            "PAGE_PLAY",
+            "RECEIVER_ECHO",
+            "RECEIVER_PAUSED",
+            "RECEIVER_PLAYING",
+            "PAGE_SEEK",
+            "SETTLE"
+        ]
+    },
+    {
+        // ...and the mirror image, so the guard cannot be "fixed" by simply never
+        // refusing anything: our PAUSE is echoed, the user then PLAYS and PAUSES,
+        // and the final pause is the user's - the seek must reload paused.
+        name: "PAGE_PAUSE → RECEIVER_ECHO → RECEIVER_PLAYING → RECEIVER_PAUSED → PAGE_SEEK (the mirror image)",
+        ids: [
+            "PAGE_PAUSE",
+            "RECEIVER_ECHO",
+            "RECEIVER_PLAYING",
+            "RECEIVER_PAUSED",
+            "PAGE_SEEK",
+            "SETTLE"
+        ]
+    },
+    {
+        // A command belongs to the SESSION it was sent to. The item change replaces
+        // the session, so the reports of the new one are the user moving THAT
+        // session - the previous session's command cannot dominate them.
+        name: "PAGE_PLAY → ITEM_CHANGE → RECEIVER_PAUSED → RECEIVER_PLAYING → PAGE_SEEK (another session's command)",
+        ids: [
+            "PAGE_PLAY",
+            "SETTLE",
+            "ITEM_CHANGE",
+            "SETTLE",
+            "RECEIVER_PAUSED",
+            "RECEIVER_PLAYING",
+            "PAGE_SEEK",
+            "SETTLE"
+        ]
     }
 ];
 

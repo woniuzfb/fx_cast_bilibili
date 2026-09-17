@@ -54,6 +54,7 @@ const {
 const {
     createModel,
     applyToModel,
+    observeCommandSession,
     observeWorldAdvance
 } = require("../playbackModel/model");
 const { checkInvariants } = require("../playbackModel/invariants");
@@ -184,13 +185,16 @@ async function perform(cast, op) {
             }
             return;
         case "RECEIVER_ECHO": {
-            // The receiver reports what the extension last told it to be. Nothing
-            // else: the state comes from the fixture's record of OUR command.
-            const commanded = h.lastCommandedReceiverState();
+            // The receiver reports what the extension is WAITING to have confirmed.
+            // Nothing else: the state comes from the fixture's record of OUR
+            // command, and only while that command is still unanswered - reporting
+            // a state the sender has stopped waiting for would be a user action
+            // wearing the echo's clothes.
+            const pending = h.pendingReceiverEcho();
             await cast.report(
-                commanded ?? PlayerState.PLAYING,
+                pending?.playerState ?? PlayerState.PLAYING,
                 h.element.currentTime,
-                cast.receiverSessionId()
+                pending?.mediaSessionId ?? cast.receiverSessionId()
             );
             return;
         }
@@ -293,10 +297,19 @@ async function runCase(
             op.mediaSessionId = cast.receiverSessionId();
         }
         if (op.id === "RECEIVER_ECHO") {
-            // Which state the echo carries is the fixture's record of our own last
-            // command - the model is told it, it does not guess.
-            op.playerState =
-                cast.h.lastCommandedReceiverState() ?? PlayerState.PLAYING;
+            // Which state the echo carries is the fixture's record of the command
+            // that is still unanswered - the model is told it, it does not guess.
+            const pending = cast.h.pendingReceiverEcho();
+            op.playerState = pending?.playerState ?? PlayerState.PLAYING;
+            // ...and it comes from the SESSION that command reached, not from
+            // whichever session the cast is on now: a command issued during a
+            // SETTLE goes to the media bound at that moment, while the loads that
+            // same step answered have already moved the cast on. Reporting it from
+            // the newer session would hand the sender an echo it cannot attribute
+            // to its own command.
+            if (pending?.mediaSessionId !== undefined) {
+                op.mediaSessionId = pending.mediaSessionId;
+            }
         }
         if (op.id === "ITEM_CHANGE") {
             // A UNIQUE identity per item change: reusing one placeholder made the
@@ -335,7 +348,12 @@ async function runCase(
             // moved. Assuming the model's own belief here made the generator
             // report a pause the sender never saw (it is the mirror's own freeze,
             // not the user's gesture).
-            pagePaused: pageBefore.paused
+            pagePaused: pageBefore.paused,
+            // The session a command issued now would go to. The pending echo is
+            // looked for on THIS session, so the model needs it as an input for the
+            // same reason it needs the page's own state: it cannot derive which
+            // media session the receiver is on from the operations alone.
+            currentMediaSessionId: cast.receiverSessionId()
         });
         model = modelAfter;
 
@@ -354,6 +372,14 @@ async function runCase(
             // holds it) or one that is being resolved or refused.
         } catch (err) {
             thrown = err instanceof Error ? err.message : String(err);
+        }
+        // The command this step dispatched may have reached a session the step did
+        // not start with (the seek hold fires when a SETTLE answers the loads), so
+        // the world states it - the echo's identity is an INPUT, not something the
+        // model may infer from the state it began with.
+        const commandedSession = cast.h.lastCommandSession();
+        if (commandedSession !== undefined) {
+            model = observeCommandSession(model, commandedSession);
         }
 
         const generationsAfter = snapshotGenerations(cast);
@@ -419,7 +445,19 @@ async function runCase(
                     // Diagnostic only (never asserted on): the sender's own view
                     // of the intent, so a divergence can be located instead of
                     // inferred.
-                    ` commanded=${cast.h.lastCommandedReceiverState() ?? "-"}` +
+                    ` pendingEcho=${
+                        cast.h.pendingReceiverEcho()?.playerState ?? "-"
+                    }` +
+                    // The model's own pending echo, with the session it recorded:
+                    // a divergence here is the identity question, not the state.
+                    ` echo(model)=${
+                        step.expect?.pendingEchoAfter === undefined
+                            ? "-"
+                            : `${step.expect.pendingEchoAfter.playerState}@${
+                                  step.expect.pendingEchoAfter.mediaSessionId ??
+                                  "-"
+                              }`
+                    }` +
                     ` intent(impl)=${cast.h.sender.desiredPlayback} intent(model)=${model.desiredPlayback}` +
                     (thrown ? ` THREW ${thrown}` : "")
             );
