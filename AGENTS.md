@@ -33,9 +33,9 @@ This document provides architectural guidance, core invariants, common pitfalls,
 ### 2.1 Dynamic Content Script Registration (`whitelist.ts`)
 
 -   **Dual-ID Atomic Rotation**: To prevent an invalid user pattern from wiping the live script (leaving all sites without cast SDK shims), the extension rotates between `whitelist-content-a` and `whitelist-content-b`.
--   **Deadlock Guard**: When browser sessions restore or unregistrations fail, both IDs can exist in the registry simultaneously. If both are registered, the code must proactively unregister one before registering the replacement (leaving the other alive for continuity).
--   **Concurrency Serialization**: Always route registrations through `syncSiteWhitelist()`. Never invoke `registerSiteWhitelist()` concurrently.
--   **Background Initialization Isolation**: `initWhitelist()` in `background.ts` must never allow dynamic registration exceptions to crash the core `init()` flow. If `init()` crashes, message listeners (`action:castCurrentTab`) will fail to register, breaking the popup with `"Couldn't open the receiver selector."`.
+-   **Minimal Deadlock Guard**: When browser sessions restore or unregistrations fail, both IDs can exist in the registry simultaneously. If both are registered, the code must proactively unregister `nextId` before registering the replacement (leaving the other alive for continuity). Do NOT wrap registrations in complex async queuing (like `syncSiteWhitelist`) or promise queues, which introduce race conditions and execution stalls.
+-   **No WebRequest Listener Cycling**: Never cycle `webRequest.removeListener` / `addListener` during whitelist updates. Cycling listeners on `<all_urls>` disrupts in-flight requests and content script contexts in open tabs.
+-   **Background Initialization Isolation**: `initWhitelist()` in `background.ts` must be guarded with a `try / catch` so dynamic registration exceptions never crash the core `init()` flow. If `init()` crashes, message listeners (`action:castCurrentTab`) will fail to register, breaking the popup with `"Couldn't open the receiver selector."`.
 
 ### 2.2 Chromecast DMR Remuxing & Timeline (`mediaServer.ts`)
 

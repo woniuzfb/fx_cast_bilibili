@@ -83,34 +83,6 @@ let siteWhitelistEnabled = false;
 let siteWhitelist: Nullable<WhitelistItemData[]> = null;
 let customUserAgent: string | undefined;
 
-let isWhitelistInitialized = false;
-let currentRegisterPromise: Promise<void> | null = null;
-let pendingRegisterRerun = false;
-
-async function syncSiteWhitelist(): Promise<void> {
-    if (currentRegisterPromise) {
-        pendingRegisterRerun = true;
-        await currentRegisterPromise;
-        if (currentRegisterPromise) {
-            await currentRegisterPromise;
-        }
-        return;
-    }
-
-    currentRegisterPromise = (async () => {
-        try {
-            do {
-                pendingRegisterRerun = false;
-                await registerSiteWhitelist();
-            } while (pendingRegisterRerun);
-        } finally {
-            currentRegisterPromise = null;
-        }
-    })();
-
-    await currentRegisterPromise;
-}
-
 export async function initWhitelist() {
     logger.info("init (whitelist)");
 
@@ -133,12 +105,7 @@ export async function initWhitelist() {
     }
 
     // Register on first run
-    await syncSiteWhitelist();
-
-    if (isWhitelistInitialized) {
-        return;
-    }
-    isWhitelistInitialized = true;
+    await registerSiteWhitelist();
 
     options.addEventListener("changed", async ev => {
         // Update custom UA on change
@@ -153,7 +120,7 @@ export async function initWhitelist() {
             // No unregister first: the registration replaces itself
             // atomically, and removing the live script up front is what turned
             // one invalid pattern into "no content script at all".
-            void syncSiteWhitelist().catch(err =>
+            void registerSiteWhitelist().catch(err =>
                 logger.error("Failed to register the site whitelist", err)
             );
         }
@@ -306,18 +273,10 @@ async function registerSiteWhitelist() {
     }
     matchPatterns = valid.map(pattern => new RemoteMatchPattern(pattern));
 
-    browser.webRequest.onBeforeRequest.removeListener(onBeforeCastSDKRequest);
     browser.webRequest.onBeforeRequest.addListener(
         onBeforeCastSDKRequest,
         { urls: CAST_SDK_SCRIPT_URL_PATTERNS },
         ["blocking"]
-    );
-
-    browser.webRequest.onBeforeSendHeaders.removeListener(
-        onWhitelistedBeforeSendHeaders
-    );
-    browser.webRequest.onBeforeSendHeaders.removeListener(
-        onWhitelistedChildBeforeSendHeaders
     );
 
     // Skip whitelist request listeners if disabled or empty. The formerly
@@ -359,27 +318,25 @@ async function registerSiteWhitelist() {
         );
     }
 
-    const registered = await browser.scripting.getRegisteredContentScripts();
-    const registeredIds = new Set(registered.map(script => script.id));
+    const registeredIds = new Set(
+        (await browser.scripting.getRegisteredContentScripts()).map(
+            script => script.id
+        )
+    );
+    const nextId =
+        WHITELIST_SCRIPT_IDS.find(id => !registeredIds.has(id)) ??
+        WHITELIST_SCRIPT_IDS[0];
 
-    // Choose an id from WHITELIST_SCRIPT_IDS that is not currently registered.
-    let nextId = WHITELIST_SCRIPT_IDS.find(id => !registeredIds.has(id));
-
-    // If all IDs in WHITELIST_SCRIPT_IDS are already registered (e.g. from an
-    // interrupted replacement or crash in a previous session), we must free
-    // one before registering it. Unregistering WHITELIST_SCRIPT_IDS[0] still
-    // leaves WHITELIST_SCRIPT_IDS[1] active, so at least one configuration
-    // remains live.
-    if (!nextId) {
-        nextId = WHITELIST_SCRIPT_IDS[0];
+    // If both IDs are already registered (e.g. from an interrupted replacement
+    // or unregistration failure in a previous session), free nextId first so
+    // registering it won't throw "already registered". The other ID remains
+    // registered, so at least one content script stays active throughout.
+    if (registeredIds.has(nextId)) {
         try {
             await browser.scripting.unregisterContentScripts({ ids: [nextId] });
             registeredIds.delete(nextId);
-        } catch (err) {
-            logger.warn("Failed to unregister colliding whitelist script id", {
-                nextId,
-                err
-            });
+        } catch {
+            /* ignore */
         }
     }
 
@@ -391,46 +348,15 @@ async function registerSiteWhitelist() {
     // Register first, remove afterwards: at every instant at least one
     // configuration is live, and a failure here leaves the previous one in
     // place instead of leaving nothing.
-    try {
-        await browser.scripting.registerContentScripts([
-            {
-                id: nextId,
-                matches,
-                js: ["cast/contentInitial.js"],
-                runAt: "document_start",
-                allFrames: true
-            }
-        ]);
-    } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (
-            message.includes("is already registered") ||
-            message.includes("already registered")
-        ) {
-            logger.warn(
-                "Whitelist content script id was unexpectedly already registered, unregistering and retrying",
-                { nextId, err }
-            );
-            try {
-                await browser.scripting.unregisterContentScripts({
-                    ids: [nextId]
-                });
-            } catch {
-                /* ignore */
-            }
-            await browser.scripting.registerContentScripts([
-                {
-                    id: nextId,
-                    matches,
-                    js: ["cast/contentInitial.js"],
-                    runAt: "document_start",
-                    allFrames: true
-                }
-            ]);
-        } else {
-            throw err;
+    await browser.scripting.registerContentScripts([
+        {
+            id: nextId,
+            matches,
+            js: ["cast/contentInitial.js"],
+            runAt: "document_start",
+            allFrames: true
         }
-    }
+    ]);
 
     if (staleIds.length) {
         try {
@@ -446,21 +372,10 @@ async function registerSiteWhitelist() {
 /** Removes every id this module has ever registered. */
 async function removeWhitelistContentScripts() {
     try {
-        const registered =
-            await browser.scripting.getRegisteredContentScripts();
-        const existingIds = registered
-            .map(script => script.id)
-            .filter(
-                id =>
-                    id === LEGACY_WHITELIST_SCRIPT_ID ||
-                    WHITELIST_SCRIPT_IDS.includes(id)
-            );
-        if (existingIds.length) {
-            await browser.scripting.unregisterContentScripts({
-                ids: existingIds
-            });
-        }
-    } catch (err) {
-        logger.warn("Failed to remove whitelist content scripts", err);
+        await browser.scripting.unregisterContentScripts({
+            ids: [LEGACY_WHITELIST_SCRIPT_ID, ...WHITELIST_SCRIPT_IDS]
+        });
+    } catch {
+        /* none of them registered */
     }
 }

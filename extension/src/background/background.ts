@@ -36,9 +36,7 @@ browser.runtime.onInstalled.addListener(async details => {
             await options.setAll(defaultOptions);
 
             // Extension initialization
-            init().catch(err => {
-                logger.error("Background init failed on install", err);
-            });
+            init();
             break;
         }
 
@@ -94,167 +92,153 @@ async function notifyBridgeCompat() {
 }
 
 let isInitialized = false;
-let initPromise: Promise<void> | null = null;
 
-async function init(): Promise<void> {
+async function init() {
     if (isInitialized) {
         return;
     }
-    if (initPromise) {
-        return initPromise;
+
+    /**
+     * If options haven't been set yet, we can't properly initialize,
+     * so wait until init is called again in the onInstalled listener.
+     */
+    if (!(await options.getAll())) {
+        return;
     }
 
-    initPromise = (async () => {
-        /**
-         * If options haven't been set yet, we can't properly initialize,
-         * so wait until init is called again in the onInstalled listener.
-         */
-        if (!(await options.getAll())) {
-            initPromise = null;
-            return;
-        }
+    logger.info("init");
+    isInitialized = true;
 
-        logger.info("init");
-        isInitialized = true;
+    await notifyBridgeCompat();
 
-        await notifyBridgeCompat();
+    await deviceManager.init();
+    await castManager.init();
 
-        await deviceManager.init();
-        await castManager.init();
+    await initAction();
+    await initMenus();
+    try {
+        await initWhitelist();
+    } catch (err) {
+        logger.error("Failed to initialize whitelist", err);
+    }
+    initBleRemote();
+    initCctvLive();
+    initBilibiliPageCapture();
 
-        await initAction();
-        await initMenus();
-        try {
-            await initWhitelist();
-        } catch (err) {
-            logger.error("Failed to initialize whitelist", err);
-        }
-        initBleRemote();
-        initCctvLive();
-        initBilibiliPageCapture();
-
-        // Surface popup debug logs in the background console. The browser-action
-        // popup can't be inspected directly, so Popup.svelte forwards its debug
-        // lines here via runtime.sendMessage({ subject: "popup:debugLog" }).
-        browser.runtime.onMessage.addListener(message => {
-            if (message?.subject !== "popup:debugLog") return;
-            void options.get("bilibiliDebugEnabled").then(enabled => {
-                if (!enabled) return;
-                logger.info(
-                    "[popup] " + String(message?.data?.message),
-                    message?.data?.data ?? {}
-                );
-            });
-        });
-
-        registerPagePlaybackProgressRuntimeRelay(deviceManager);
-
-        // Sender/content-script consoles are separate from the extension
-        // background console. Forward CCTV recovery diagnostics here so a single
-        // background-console export contains both recovery decisions and relay logs.
-        browser.runtime.onMessage.addListener((message, sender) => {
-            if (message?.subject !== "cctv:recoveryDebug") return;
-            if (sender.tab?.id === undefined) return;
-            const level = message?.data?.level === "error" ? "error" : "info";
-            const text =
-                "[cctv recovery] " + String(message?.data?.message ?? "");
-            const data = {
-                tabId: sender.tab.id,
-                ...(message?.data?.data ?? {})
-            };
-            if (level === "error") logger.error(text, data);
-            else logger.info(text, data);
-        });
-
-        browser.runtime.onMessage.addListener(message => {
-            if (message?.subject !== "action:castCurrentTab") return;
-
-            return (async () => {
-                const [tab] = await browser.tabs.query({
-                    active: true,
-                    currentWindow: true
-                });
-                if (tab.id === undefined) {
-                    logger.error("No active tab found for browser-action Cast");
-                    return;
-                }
-                if (message.data?.selection) {
-                    castManager.queueReceiverSelection(
-                        tab.id,
-                        message.data.selection
-                    );
-                }
-                if (
-                    /^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(
-                        tab.url ?? ""
-                    )
-                ) {
-                    await launchBilibiliSender(
-                        tab.id,
-                        Number(message.data?.quality) || 0
-                    );
-                } else if (CCTV_LIVE_PAGE_RE.test(tab.url ?? "")) {
-                    await launchCctvSender(
-                        tab.id,
-                        Number(message.data?.quality) || 0
-                    );
-                } else {
-                    await castManager.triggerCast(tab.id);
-                }
-            })().catch(err => {
-                logger.error("Browser-action Cast failed", err);
-                throw err;
-            });
-        });
-
-        browser.runtime.onMessage.addListener(message => {
-            if (message?.subject !== "action:setBilibiliQuality") return;
-            void (async () => {
-                const [tab] = await browser.tabs.query({
-                    active: true,
-                    currentWindow: true
-                });
-                if (tab.id === undefined) return;
-                await browser.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: ((quality: number) => {
-                        (window as any).__fxCastBilibili?.setQuality?.(quality);
-                    }) as any,
-                    args: [Number(message.data?.quality) || 0]
-                });
-            })().catch(err =>
-                logger.error("Bilibili quality change failed", err)
+    // Surface popup debug logs in the background console. The browser-action
+    // popup can't be inspected directly, so Popup.svelte forwards its debug
+    // lines here via runtime.sendMessage({ subject: "popup:debugLog" }).
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "popup:debugLog") return;
+        void options.get("bilibiliDebugEnabled").then(enabled => {
+            if (!enabled) return;
+            logger.info(
+                "[popup] " + String(message?.data?.message),
+                message?.data?.data ?? {}
             );
         });
+    });
 
-        browser.runtime.onMessage.addListener(message => {
-            if (message?.subject !== "action:setCctvQuality") return;
-            void (async () => {
-                const [tab] = await browser.tabs.query({
-                    active: true,
-                    currentWindow: true
-                });
-                if (tab.id === undefined) return;
-                await setCctvLiveQuality(
+    registerPagePlaybackProgressRuntimeRelay(deviceManager);
+
+    // Sender/content-script consoles are separate from the extension
+    // background console. Forward CCTV recovery diagnostics here so a single
+    // background-console export contains both recovery decisions and relay logs.
+    browser.runtime.onMessage.addListener((message, sender) => {
+        if (message?.subject !== "cctv:recoveryDebug") return;
+        if (sender.tab?.id === undefined) return;
+        const level = message?.data?.level === "error" ? "error" : "info";
+        const text = "[cctv recovery] " + String(message?.data?.message ?? "");
+        const data = {
+            tabId: sender.tab.id,
+            ...(message?.data?.data ?? {})
+        };
+        if (level === "error") logger.error(text, data);
+        else logger.info(text, data);
+    });
+
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "action:castCurrentTab") return;
+
+        return (async () => {
+            const [tab] = await browser.tabs.query({
+                active: true,
+                currentWindow: true
+            });
+            if (tab.id === undefined) {
+                logger.error("No active tab found for browser-action Cast");
+                return;
+            }
+            if (message.data?.selection) {
+                castManager.queueReceiverSelection(
+                    tab.id,
+                    message.data.selection
+                );
+            }
+            if (
+                /^https:\/\/(?:www|m)\.bilibili\.com\/video\//.test(
+                    tab.url ?? ""
+                )
+            ) {
+                await launchBilibiliSender(
                     tab.id,
                     Number(message.data?.quality) || 0
                 );
-            })().catch(err => logger.error("CCTV quality change failed", err));
-        });
-
-        messaging.onMessage.addListener(message => {
-            switch (message.subject) {
-                case "main:refreshDeviceManager":
-                    deviceManager.refresh();
-                    break;
+            } else if (CCTV_LIVE_PAGE_RE.test(tab.url ?? "")) {
+                await launchCctvSender(
+                    tab.id,
+                    Number(message.data?.quality) || 0
+                );
+            } else {
+                await castManager.triggerCast(tab.id);
             }
+        })().catch(err => {
+            logger.error("Browser-action Cast failed", err);
+            throw err;
         });
-    })();
+    });
 
-    return initPromise;
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "action:setBilibiliQuality") return;
+        void (async () => {
+            const [tab] = await browser.tabs.query({
+                active: true,
+                currentWindow: true
+            });
+            if (tab.id === undefined) return;
+            await browser.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: ((quality: number) => {
+                    (window as any).__fxCastBilibili?.setQuality?.(quality);
+                }) as any,
+                args: [Number(message.data?.quality) || 0]
+            });
+        })().catch(err => logger.error("Bilibili quality change failed", err));
+    });
+
+    browser.runtime.onMessage.addListener(message => {
+        if (message?.subject !== "action:setCctvQuality") return;
+        void (async () => {
+            const [tab] = await browser.tabs.query({
+                active: true,
+                currentWindow: true
+            });
+            if (tab.id === undefined) return;
+            await setCctvLiveQuality(
+                tab.id,
+                Number(message.data?.quality) || 0
+            );
+        })().catch(err => logger.error("CCTV quality change failed", err));
+    });
+
+    messaging.onMessage.addListener(message => {
+        switch (message.subject) {
+            case "main:refreshDeviceManager":
+                deviceManager.refresh();
+                break;
+        }
+    });
 }
 
 cacheUaInfo();
-init().catch(err => {
-    logger.error("Unhandled error during background init", err);
-});
+init();
