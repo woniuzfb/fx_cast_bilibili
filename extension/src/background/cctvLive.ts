@@ -9,6 +9,7 @@ import {
     isCctvPageCaptureActive,
     isCctvPageCaptureHeartbeatOnly
 } from "./cctvPageCapture";
+import { isYangshipinLiveTab } from "./yangshipinLive";
 
 /**
  * Resolve the real Chrome UA string (from the cached/bundled docs/ua.json)
@@ -209,7 +210,16 @@ function rememberPlaylistHost(tabId: number, url: string) {
  */
 const cdrmldSeedByTab = new Map<number, { baseUrl: string; at: number }>();
 
+function isVolcfcdn(url: string): boolean {
+    try {
+        return /\.volcfcdn\.com$/i.test(new URL(url).hostname);
+    } catch {
+        return false;
+    }
+}
+
 function rememberCdrmldSeed(tabId: number, url: string) {
+    if (isVolcfcdn(url)) return;
     try {
         const parsed = new URL(url);
         // /<dir>/cdrmld<channel>_1/index.m3u8 -> keep everything BEFORE the
@@ -498,11 +508,10 @@ async function resolveLiveStreamUrl(tabId: number): Promise<string> {
     await ensurePageVariant(tabId, cctvQualityByTab.get(tabId) ?? 0);
 
     // Prefer the media playlist the page player is actually refreshing — when
-    // it is NOT the enc1/AV1 delivery (its variant choice can differ from the
-    // master's max-bandwidth variant, and a mismatched seed makes the relay
-    // fetch a variant the page never plays).
+    // it is NOT the enc1/AV1 delivery and NOT volcfcdn (which uses timestamped
+    // non-linear segment naming with 10s 404 hangs and irregular cadence).
     const media = capturedMediaByTab.get(tabId);
-    if (media && !isEnc1Delivery(media.url)) {
+    if (media && !isEnc1Delivery(media.url) && !isVolcfcdn(media.url)) {
         logger.info(
             "CCTV live stream resolved from the page's own media playlist",
             {
@@ -540,18 +549,24 @@ async function resolveLiveStreamUrl(tabId: number): Promise<string> {
                     .filter((host): host is string => typeof host === "string")
             )
         ];
-        // Candidate cdrmld bases, best first: the SAME provider the page is
-        // currently using (family-mapped from its playlist hosts), then any
-        // cdrmld base the page itself fetched, then the per-channel known host,
-        // then the default. Every candidate is probed before it becomes the
-        // seed, and every probe is logged.
+        const nonVolcPageBases = pageHosts
+            .filter(host => !/\.volcfcdn\.com$/i.test(host))
+            .map(host => cdrmldBaseForPageHost(host))
+            .filter((base): base is string => typeof base === "string");
+
+        // Candidate cdrmld bases, best first: any previously working cdrmld base
+        // for this tab, then the per-channel verified known-good host, then
+        // non-volc providers matching page host, then reliable CDNs (Tencent,
+        // Baidu, Wangsu, Kingsoft), and finally volcfcdn only as last resort.
+        // Every candidate is probed before it becomes the seed.
         const baseCandidates = [
             ...new Set(
                 [
-                    ...pageHosts.map(host => cdrmldBaseForPageHost(host)),
                     cdrmldSeedByTab.get(tabId)?.baseUrl,
                     CDRMLD_HOST_BY_STREAM_ID[streamId],
-                    CDRMLD_DEFAULT_HOST
+                    ...nonVolcPageBases,
+                    ...CDRMLD_RELIABLE_BASES,
+                    CDRMLD_VOLCFCDN_BASE
                 ].filter((base): base is string => typeof base === "string")
             )
         ];
@@ -589,6 +604,12 @@ async function resolveLiveStreamUrl(tabId: number): Promise<string> {
                     cctvQualityByTab.get(tabId) ?? 0
                 );
                 resolved = { masterUrl, selected };
+                if (!isVolcfcdn(selected)) {
+                    cdrmldSeedByTab.set(tabId, {
+                        baseUrl: base,
+                        at: Date.now()
+                    });
+                }
                 break;
             } catch (err) {
                 probes.push({
@@ -662,7 +683,13 @@ async function resolveLiveStreamUrl(tabId: number): Promise<string> {
  * cctv5plus: identical decrypt diagnostics to cctv5).
  */
 const CDRMLD_BITRATE_RANGE = "?b=200-2100";
-const CDRMLD_DEFAULT_HOST = "https://ldocctvwbcdbyte.volcfcdn.com/ldocctvwbcd";
+const CDRMLD_RELIABLE_BASES = [
+    "https://ldcctvwbcdtxy.liveplay.myqcloud.com/ldcctvwbcd",
+    "https://ldcctvwbcdbd.a.bdydns.com/ldcctvwbcd",
+    "https://ldncctvwbcdcnc.v.wscdns.com/ldncctvwbcd",
+    "https://ldcctvwbcdks.v.kcdnvip.com/ldocctvwbcd"
+];
+const CDRMLD_VOLCFCDN_BASE = "https://ldcctvwbcdbyte.volcfcdn.com/ldcctvwbcd";
 const CDRMLD_HOST_BY_STREAM_ID: Record<string, string> = {
     cctv1: "https://ldncctvwbcdcnc.v.wscdns.com/ldncctvwbcd",
     cctv3: "https://ldocctvwbcdks.v.kcdnvip.com/ldocctvwbcd",
@@ -671,7 +698,7 @@ const CDRMLD_HOST_BY_STREAM_ID: Record<string, string> = {
     cctv6: "https://ldocctvwbcdbd.a.bdydns.com/ldocctvwbcd",
     cctv8: "https://ldocctvwbcdks.v.kcdnvip.com/ldocctvwbcd",
     cctv13: "https://ldncctvwbcdbd.a.bdydns.com/ldncctvwbcd",
-    cctv16: "https://ldcctvwbcdks.v.kcdnvip.com/ldocctvwbcd"
+    cctv16: "https://ldcctvwbcdtxy.liveplay.myqcloud.com/ldcctvwbcd"
 };
 
 /**
@@ -686,8 +713,8 @@ const CDRMLD_BASE_BY_CDN_FAMILY: Array<{ match: RegExp; base: string }> = [
         base: "https://ldcctvwbcdbd.a.bdydns.com/ldcctvwbcd"
     },
     {
-        match: /\.volcfcdn\.com$/i,
-        base: "https://ldcctvwbcdbyte.volcfcdn.com/ldcctvwbcd"
+        match: /\.kcdnvip\.com$/i,
+        base: "https://ldcctvwbcdks.v.kcdnvip.com/ldocctvwbcd"
     },
     {
         match: /\.live\.cntv\.cn$/i,
@@ -698,12 +725,12 @@ const CDRMLD_BASE_BY_CDN_FAMILY: Array<{ match: RegExp; base: string }> = [
         base: "https://ldcctvwbcdtxy.liveplay.myqcloud.com/ldcctvwbcd"
     },
     {
-        match: /\.kcdnvip\.com$/i,
-        base: "https://ldcctvwbcdks.v.kcdnvip.com/ldocctvwbcd"
-    },
-    {
         match: /\.wscdns\.com$/i,
         base: "https://ldcctvwbcdcnc.v.wscdns.com/ldncctvwbcd"
+    },
+    {
+        match: /\.volcfcdn\.com$/i,
+        base: "https://ldcctvwbcdbyte.volcfcdn.com/ldcctvwbcd"
     }
 ];
 
@@ -884,7 +911,8 @@ function initTsSegmentResponseCapture() {
         details => {
             if (
                 details.tabId < 0 ||
-                !cctvLiveTabs.has(details.tabId) ||
+                (!cctvLiveTabs.has(details.tabId) &&
+                    !isYangshipinLiveTab(details.tabId)) ||
                 !isCctvPageCaptureActive(details.tabId) ||
                 !/\.ts([?#]|$)/i.test(details.url)
             ) {

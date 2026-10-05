@@ -26,9 +26,11 @@ package-lock.json
 
 # Captured console exports and scratch logs.
 *.log
+*.har
 
 # Session memory: notes, not code.
 .workbuddy/
+.memory/
 
 # Editor/OS noise
 .DS_Store

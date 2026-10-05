@@ -1,0 +1,238 @@
+#!/usr/bin/env node
+"use strict";
+
+/**
+ * Unit test for Yangshipin default highest quality enforcement:
+ * 1. Sanitizing liveinfo requests: default to 1080P 'fhd' and playdurantion=0.
+ * 2. Playlist quality ranking: 1080P outranks 720P, 540P, and audio-only.
+ * 3. Yangshipin live page URL detection.
+ */
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const repoRoot = path.resolve(__dirname, "../..");
+const yangshipinLiveSource = path.join(
+    repoRoot,
+    "extension/src/background/yangshipinLive.ts"
+);
+const esbuildPath = path.join(
+    repoRoot,
+    "extension/node_modules/esbuild/lib/main.js"
+);
+
+let pass = 0;
+let fail = 0;
+const failures = [];
+const check = (name, cond, detail) => {
+    if (cond) {
+        pass++;
+        console.log("  ok  ", name);
+    } else {
+        fail++;
+        failures.push({ name, detail });
+        console.log("  FAIL", name, detail === undefined ? "" : detail);
+    }
+};
+
+async function bundle(outfile, workDir) {
+    const esbuild = require(esbuildPath);
+    const entry = path.join(workDir, "entry.js");
+    fs.writeFileSync(
+        entry,
+        `export {
+            isYangshipinLivePage,
+            sanitizeLiveInfoUrl,
+            getYangshipinPlaylistRank
+        } from ${JSON.stringify(yangshipinLiveSource)};\n`
+    );
+    await esbuild.build({
+        entryPoints: [entry],
+        bundle: true,
+        format: "cjs",
+        platform: "node",
+        outfile,
+        logLevel: "error",
+        define: {
+            BRIDGE_NAME: '"fx_cast_bilibili_bridge"',
+            BRIDGE_VERSION: '"0.0.0-test"',
+            MIRRORING_APP_ID: '"TESTMIRROR"'
+        }
+    });
+}
+
+function installBrowserStub() {
+    const noop = () => {};
+    global.window = global;
+    global.window.addEventListener = noop;
+    global.window.removeEventListener = noop;
+    global.window.matchMedia = () => ({
+        matches: false,
+        addEventListener: noop,
+        removeEventListener: noop,
+        addListener: noop,
+        removeListener: noop
+    });
+    global.document = {
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        createElement: () => ({ setAttribute: () => {} })
+    };
+    const listener = {
+        addListener: noop,
+        removeListener: noop,
+        hasListener: () => false
+    };
+    global.browser = {
+        storage: {
+            local: { get: async () => ({}), set: async () => {} },
+            sync: { get: async () => ({}), set: async () => {} },
+            onChanged: listener
+        },
+        runtime: {
+            sendMessage: async () => undefined,
+            onMessage: listener,
+            onConnectNative: listener,
+            getPlatformInfo: async () => ({ os: "mac" })
+        },
+        webRequest: {
+            onBeforeRequest: listener
+        },
+        webNavigation: {
+            onCommitted: listener
+        },
+        windows: {
+            onFocusChanged: listener
+        },
+        tabs: {
+            query: async () => [],
+            get: async () => undefined,
+            onUpdated: listener,
+            onRemoved: listener
+        },
+        notifications: {
+            create: async () => {}
+        },
+        scripting: {
+            executeScript: async () => []
+        },
+        i18n: { getMessage: key => key }
+    };
+}
+
+async function main() {
+    const workDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "fx-yangshipin-quality-")
+    );
+    const outfile = path.join(workDir, "bundle.js");
+
+    try {
+        installBrowserStub();
+        await bundle(outfile, workDir);
+        const {
+            isYangshipinLivePage,
+            sanitizeLiveInfoUrl,
+            getYangshipinPlaylistRank
+        } = require(outfile);
+
+        console.log("Yangshipin default quality & sanitizer tests");
+
+        // 1. isYangshipinLivePage tests
+        check(
+            "isYangshipinLivePage: matches live video with type=2",
+            isYangshipinLivePage(
+                "https://w.yangshipin.cn/video?type=2&pid=610003121"
+            ) === true
+        );
+        check(
+            "isYangshipinLivePage: matches mobile live URL",
+            isYangshipinLivePage(
+                "https://m.yangshipin.cn/video?type=2&pid=610003121"
+            ) === true
+        );
+        check(
+            "isYangshipinLivePage: rejects non-Yangshipin URL",
+            isYangshipinLivePage(
+                "https://www.bilibili.com/video/BV1xx411c7mD"
+            ) === false
+        );
+
+        // 2. sanitizeLiveInfoUrl tests
+        const autoResult = sanitizeLiveInfoUrl(
+            "https://liveinfo.yangshipin.cn/?callback=jsonp1&defn=auto&cnlid=2050622703&playdurantion=51"
+        );
+        check(
+            "sanitizeLiveInfoUrl: rewrites defn=auto to defn=fhd",
+            new URL(autoResult.url).searchParams.get("defn") === "fhd"
+        );
+        check(
+            "sanitizeLiveInfoUrl: rewrites playdurantion=51 to 0",
+            new URL(autoResult.url).searchParams.get("playdurantion") === "0"
+        );
+        check(
+            "sanitizeLiveInfoUrl: changed flag is true when modified",
+            autoResult.changed === true
+        );
+
+        const hdResult = sanitizeLiveInfoUrl(
+            "https://liveinfo.yangshipin.cn/?callback=jsonp1&defn=hd&cnlid=2050622703"
+        );
+        check(
+            "sanitizeLiveInfoUrl: upgrades stale defn=hd to defn=fhd",
+            new URL(hdResult.url).searchParams.get("defn") === "fhd"
+        );
+
+        const missingDefnResult = sanitizeLiveInfoUrl(
+            "https://liveinfo.yangshipin.cn/?callback=jsonp1&cnlid=2050622703"
+        );
+        check(
+            "sanitizeLiveInfoUrl: missing defn defaults to defn=fhd",
+            new URL(missingDefnResult.url).searchParams.get("defn") === "fhd"
+        );
+
+        const shdResult = sanitizeLiveInfoUrl(
+            "https://liveinfo.yangshipin.cn/?callback=jsonp1&defn=shd&cnlid=2050622703&playdurantion=0"
+        );
+        check(
+            "sanitizeLiveInfoUrl: preserves explicit user selection defn=shd",
+            new URL(shdResult.url).searchParams.get("defn") === "shd" &&
+                shdResult.changed === false
+        );
+
+        // 3. getYangshipinPlaylistRank tests
+        const fhdRank = getYangshipinPlaylistRank(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2050622703.m3u8?from=player"
+        );
+        const shdRank = getYangshipinPlaylistRank(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2050622702.m3u8?from=player"
+        );
+        const hdRank = getYangshipinPlaylistRank(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2050622701.m3u8?from=player"
+        );
+        const audioRank = getYangshipinPlaylistRank(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2050622704.m3u8?from=player"
+        );
+
+        check("rank: 1080P fhd rank is 100", fhdRank === 100);
+        check("rank: 720P shd rank is 50", shdRank === 50);
+        check("rank: 540P hd rank is 20", hdRank === 20);
+        check("rank: audio rank is 1", audioRank === 1);
+        check(
+            "rank: 1080P > 720P > 540P > audio ladder holds strictly",
+            fhdRank > shdRank && shdRank > hdRank && hdRank > audioRank
+        );
+
+        console.log(`\n${pass}/${pass + fail} checks passed`);
+        if (fail > 0) {
+            process.exitCode = 1;
+        }
+    } finally {
+        fs.rmSync(workDir, { recursive: true, force: true });
+    }
+}
+
+void main().catch(err => {
+    console.error("Test harness died with error:", err);
+    process.exit(1);
+});

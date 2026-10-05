@@ -5,6 +5,10 @@ import { MenuId } from "../menuIds";
 
 import castManager, { CastInstanceDestroyedError } from "./castManager";
 import { CCTV_LIVE_PAGE_RE, launchCctvSender } from "./cctvLive";
+import {
+    YANGSHIPIN_LIVE_PAGE_RE,
+    launchYangshipinSender
+} from "./yangshipinLive";
 import { injectSenderFile } from "./injectSender";
 import { flattenInjectionResults } from "./injectLog";
 
@@ -202,6 +206,8 @@ async function onMenuClicked(
                     await launchBilibiliSender(tab.id);
                 } else if (CCTV_LIVE_PAGE_RE.test(tab.url ?? "")) {
                     await launchCctvSender(tab.id);
+                } else if (YANGSHIPIN_LIVE_PAGE_RE.test(tab.url ?? "")) {
+                    await launchYangshipinSender(tab.id);
                 } else {
                     castManager.triggerCast(tab.id, info.frameId);
                 }

@@ -2153,6 +2153,9 @@ function createSelector(tabId: number) {
                 func: ((pageCommand: PlaybackPageCommand) =>
                     (window as any).__fxCastBilibili?.controlPlayback?.(
                         pageCommand
+                    ) ??
+                    (window as any).__fxCastYangshipin?.controlPlayback?.(
+                        pageCommand
                     )) as any,
                 args: [command]
             });

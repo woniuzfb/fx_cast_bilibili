@@ -3162,13 +3162,19 @@ function buildSyntheticDvrPlaylist(
     raw: string,
     playlistUrl: string,
     trust: LiveRelayTrust,
-    resumeAfterSequence?: number
+    resumeAfterSequence?: number,
+    log?: (msg: string, data?: Record<string, unknown>) => void
 ): SyntheticDvrPlaylist | undefined {
     const lines = raw.split("\n");
     const targetMatch = raw.match(/^#EXT-X-TARGETDURATION:\s*(\d+)/im);
     const targetDuration = Number(targetMatch?.[1]);
-    if (!Number.isFinite(targetDuration) || targetDuration <= 0)
+    if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
+        log?.("synthetic DVR rejected: invalid TARGETDURATION", {
+            targetDuration,
+            rawTarget: targetMatch?.[1]
+        });
         return undefined;
+    }
 
     // Pair #EXT-X-PROGRAM-DATE-TIME tags (timezone-aware wall clock) with the
     // media URI that follows them: the myqcloud pattern has no URL timestamp,
@@ -3194,7 +3200,14 @@ function buildSyntheticDvrPlaylist(
         .map(uri => parseHistoricalSegmentTemplate(uri, playlistUrl));
     // Every URI must match a known CCTV pattern; anything else means an
     // unfamiliar playlist shape; the caller rejects unsupported relay input.
-    if (segments.length === 0 || segments.some(s => !s)) return undefined;
+    if (segments.length === 0 || segments.some(s => !s)) {
+        log?.("synthetic DVR rejected: unrecognized segment URI pattern", {
+            totalLines: lines.length,
+            segmentCount: segments.length,
+            unrecognized: segments.filter(s => !s).length
+        });
+        return undefined;
+    }
     const anchor = segments[segments.length - 1]!;
 
     // Measure the real cadence from adjacent segments rather than trusting
@@ -3207,7 +3220,14 @@ function buildSyntheticDvrPlaylist(
         const prev = segments[i - 1]!;
         const cur = segments[i]!;
         const seqDelta = cur.sequence - prev.sequence;
-        if (seqDelta <= 0) return undefined;
+        if (seqDelta <= 0) {
+            log?.("synthetic DVR rejected: non-positive sequence delta", {
+                prev: prev.sequence,
+                cur: cur.sequence,
+                seqDelta
+            });
+            return undefined;
+        }
         const clock = (
             s: HistoricalSegmentTemplate | undefined,
             pdt: number | undefined
@@ -3221,16 +3241,50 @@ function buildSyntheticDvrPlaylist(
     // EXTINF label of the anchor segment (its real duration tag).
     const extinfMatch = [...raw.matchAll(/^#EXTINF:([\d.]+)/gim)].pop();
     const extinfSeconds = extinfMatch ? Number(extinfMatch[1]) : undefined;
-    const stepSeconds =
+    let stepSeconds =
         steps.length > 0
             ? steps.reduce((a, b) => a + b, 0) / steps.length
             : extinfSeconds ?? targetDuration;
-    if (!Number.isFinite(stepSeconds) || stepSeconds <= 0) return undefined;
+    if (!Number.isFinite(stepSeconds) || stepSeconds <= 0) {
+        log?.("synthetic DVR rejected: invalid stepSeconds", {
+            stepSeconds,
+            steps,
+            extinfSeconds,
+            targetDuration
+        });
+        return undefined;
+    }
     // Irregular cadence (encoder restart, inserted segments): extrapolating
     // the window from it would misalign every URL after the first
-    // discontinuity.
-    if (steps.some(s => Math.abs(s - stepSeconds) > 0.25)) return undefined;
-    const extinf = extinfMatch?.[1] ?? stepSeconds.toFixed(3);
+    // discontinuity. For sequence-only patterns (anchor.timestampMs === undefined,
+    // e.g. Yangshipin or myqcloud), URLs do not contain timestamps and are
+    // addressed purely by integer sequence, so slight cadence differences (e.g.
+    // 5.0s vs 6.68s keyframe cuts) do not cause 404s. Only timestamped CDN
+    // patterns require strict uniform cadence.
+    if (anchor.timestampMs !== undefined) {
+        if (steps.some(s => Math.abs(s - stepSeconds) > 0.25)) {
+            log?.(
+                "synthetic DVR rejected: irregular cadence on timestamped CDN",
+                {
+                    steps,
+                    stepSeconds,
+                    threshold: 0.25
+                }
+            );
+            return undefined;
+        }
+    } else if (steps.length > 0) {
+        // For sequence-only patterns, normalize stepSeconds: prefer the clean integer
+        // base cadence if present (e.g. 5.0s instead of average 5.84s across a 6.68s GOP cut).
+        const integerStep = steps.find(s => Math.abs(s - Math.round(s)) < 0.05);
+        if (integerStep !== undefined && integerStep > 0) {
+            stepSeconds = Math.round(integerStep);
+        }
+    }
+    const extinf =
+        anchor.timestampMs !== undefined
+            ? extinfMatch?.[1] ?? stepSeconds.toFixed(3)
+            : stepSeconds.toFixed(3);
 
     const standardHistoryCount = Math.max(
         1,
@@ -3300,7 +3354,12 @@ function buildSyntheticDvrPlaylist(
     for (let offset = 0; offset < totalCount; offset++) {
         const sequence = firstSequence + offset;
         const upstreamUrl = urlOf(sequence);
-        if (!trust.admit(upstreamUrl)) return undefined;
+        if (!trust.admit(upstreamUrl)) {
+            log?.("synthetic DVR rejected: trust rejected url", {
+                upstreamUrl
+            });
+            return undefined;
+        }
         out.push(`#EXTINF:${extinf},`);
         out.push(`/seg?u=${encodeRelayUrl(upstreamUrl)}`);
     }
@@ -3564,7 +3623,18 @@ function ffmpegSegmentDecodesCleanly(
         };
         child.on("error", err => finish({ ok: false, detail: err.message }));
         child.on("close", code => {
-            if (code === 0 && stderr.trim() === "") {
+            const errorLines = stderr
+                .split("\n")
+                .map(line => line.trim())
+                .filter(
+                    line =>
+                        line.length > 0 &&
+                        !line.includes(
+                            "Application provided invalid, non monotonically increasing dts to muxer"
+                        ) &&
+                        !line.startsWith("[null @")
+                );
+            if (code === 0 && errorLines.length === 0) {
                 const durationValues = Array.from(
                     stdout.matchAll(/^out_time_(?:us|ms)=(\d+)$/gm)
                 )
@@ -3584,10 +3654,12 @@ function ffmpegSegmentDecodesCleanly(
             finish({
                 ok: false,
                 detail:
+                    errorLines[0]?.slice(0, 200) ??
                     stderr
                         .split("\n")
                         .find(line => line.trim())
-                        ?.slice(0, 200) ?? `ffmpeg exit ${code}`
+                        ?.slice(0, 200) ??
+                    `ffmpeg exit ${code}`
             });
         });
         // A failing validation makes ffmpeg exit BEFORE consuming all of stdin;
@@ -3628,6 +3700,7 @@ const FUTURE_SEGMENT_STABILITY_INTERVAL_MS = 1000;
 /** Segment pipeline: prefetch workers, retry budgets, cache caps. */
 const PIPELINE_WORKERS = 4;
 const PIPELINE_FETCH_TIMEOUT_MS = 15_000;
+const PIPELINE_HISTORICAL_FETCH_TIMEOUT_MS = 4_000;
 const PIPELINE_FETCH_ATTEMPTS = 3;
 const PIPELINE_DECRYPT_TIMEOUT_MS = 10_000;
 /** How long a receiver /seg request may wait for its slot to fill. */
@@ -3682,6 +3755,11 @@ async function startLiveHlsRelayServer(
     const upstreamHeaders: Record<string, string> = {
         "User-Agent": userAgent || "Mozilla/5.0"
     };
+
+    const isPlaintextRelay =
+        /yangshipin\.cn/i.test(referer) ||
+        /ysp\.cctv\.cn/i.test(playlistUrl) ||
+        /yangshipin\.cn/i.test(playlistUrl);
 
     // Pad runway state for this relay generation. The file lives in a private
     // temp dir: it is generated, served and removed with the relay.
@@ -3856,7 +3934,8 @@ async function startLiveHlsRelayServer(
                 lastUpstreamPlaylist,
                 playlistUrl,
                 trust,
-                resumeAfter
+                resumeAfter,
+                relayLog
             );
         } catch (err) {
             relayLog("debug synthetic DVR build FAILED", {
@@ -4112,12 +4191,12 @@ async function startLiveHlsRelayServer(
         return sequence <= livePageCacheFrontier;
     };
 
-    const fetchWithTimeout = async (url: string): Promise<Response> => {
+    const fetchWithTimeout = async (
+        url: string,
+        timeoutMs = PIPELINE_FETCH_TIMEOUT_MS
+    ): Promise<Response> => {
         const controller = new AbortController();
-        const timeout = setTimeout(
-            () => controller.abort(),
-            PIPELINE_FETCH_TIMEOUT_MS
-        );
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
         timeout.unref?.();
         try {
             return await fetchRemoteMedia(
@@ -4211,6 +4290,9 @@ async function startLiveHlsRelayServer(
         // future sequences must be waited out on the CDN (an HTTP 200 there does
         // not mean the object is complete).
         const isFuture = cdnFutureMode && sequence > plan.anchorSequence;
+        const fetchTimeoutMs = isFuture
+            ? PIPELINE_FETCH_TIMEOUT_MS
+            : PIPELINE_HISTORICAL_FETCH_TIMEOUT_MS;
         const expectedPublishMs = isFuture
             ? plan.builtAtMs +
               (sequence - plan.anchorSequence) * plan.stepSeconds * 1000
@@ -4220,7 +4302,7 @@ async function startLiveHlsRelayServer(
         let lastError = "";
         for (let attempt = 1; attempt <= PIPELINE_FETCH_ATTEMPTS; attempt++) {
             try {
-                let response = await fetchWithTimeout(url);
+                let response = await fetchWithTimeout(url, fetchTimeoutMs);
                 if (isFuture) {
                     let previousBody: Buffer | undefined;
                     let previousHash = "";
@@ -4297,7 +4379,14 @@ async function startLiveHlsRelayServer(
                     }
                     throw new Error("relay replaced");
                 }
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                if (!response.ok) {
+                    const status = response.status;
+                    const err = new Error(`HTTP ${status}`);
+                    if (!isFuture && (status === 404 || status === 410)) {
+                        (err as any).nonRetryable = true;
+                    }
+                    throw err;
+                }
                 const body = Buffer.from(await response.arrayBuffer());
                 if (body.length < 188) {
                     throw new Error(`short body: ${body.length} bytes`);
@@ -4313,12 +4402,19 @@ async function startLiveHlsRelayServer(
                 // A replaced relay may still have an in-flight fetch complete. Drop it
                 // silently: it must not pollute the active relay's diagnostics/state.
                 if (!pipelineAlive()) break;
+                if (
+                    !isFuture &&
+                    error instanceof Error &&
+                    error.name === "AbortError"
+                ) {
+                    (error as any).nonRetryable = true;
+                }
                 relayLog("pipeline fetch attempt failed", {
                     sequence,
                     attempt,
                     error: lastError
                 });
-                if (!pipelineAlive()) break;
+                if ((error as any)?.nonRetryable || !pipelineAlive()) break;
                 if (attempt < PIPELINE_FETCH_ATTEMPTS) {
                     await new Promise(resolve =>
                         setTimeout(resolve, 250 * attempt)
@@ -4347,6 +4443,33 @@ async function startLiveHlsRelayServer(
         const encryptedSnapshot = Buffer.from(fetched.body);
         const startedAt = Date.now();
         try {
+            if (isPlaintextRelay) {
+                const validation = await ffmpegSegmentDecodesCleanly(
+                    fetched.body
+                );
+                if (validation && !validation.ok) {
+                    throw new Error(
+                        `ffmpeg decode validation failed: ${
+                            validation.detail ?? "unknown"
+                        }`
+                    );
+                }
+                if (!pipelineAlive()) throw new Error("relay replaced");
+                relayLog("pipeline segment ready", {
+                    sequence,
+                    bytes: fetched.body.length,
+                    plaintext: true,
+                    ffmpegValidated: validation?.ok === true,
+                    decodedDurationSeconds: validation?.durationSeconds,
+                    elapsedMs: Date.now() - startedAt
+                });
+                return {
+                    body: fetched.body,
+                    contentType: fetched.contentType,
+                    durationSeconds: validation?.durationSeconds,
+                    encryptedBody: encryptedSnapshot
+                };
+            }
             const result = await decryptCctvSegmentIsolated(
                 encryptedSnapshot,
                 PIPELINE_DECRYPT_TIMEOUT_MS
@@ -4839,22 +4962,26 @@ async function startLiveHlsRelayServer(
             contentType = result.contentType;
         }
         let body: Buffer;
-        try {
-            const decrypted = await decryptCctvSegmentIsolated(
-                Buffer.concat(parts),
-                PIPELINE_DECRYPT_TIMEOUT_MS
-            );
-            body = decrypted.body;
-        } catch (error) {
-            slot.failedReason = `slot backfill decrypt failed: ${
-                error instanceof Error ? error.message : String(error)
-            }`;
-            relayLog("slot backfill failed", {
-                slot: slotIndex,
-                memberSequences: members,
-                error: slot.failedReason
-            });
-            return;
+        if (isPlaintextRelay) {
+            body = Buffer.concat(parts);
+        } else {
+            try {
+                const decrypted = await decryptCctvSegmentIsolated(
+                    Buffer.concat(parts),
+                    PIPELINE_DECRYPT_TIMEOUT_MS
+                );
+                body = decrypted.body;
+            } catch (error) {
+                slot.failedReason = `slot backfill decrypt failed: ${
+                    error instanceof Error ? error.message : String(error)
+                }`;
+                relayLog("slot backfill failed", {
+                    slot: slotIndex,
+                    memberSequences: members,
+                    error: slot.failedReason
+                });
+                return;
+            }
         }
         const validation = await ffmpegSegmentDecodesCleanly(
             body,

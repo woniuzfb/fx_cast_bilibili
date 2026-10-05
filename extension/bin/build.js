@@ -110,6 +110,7 @@ const buildOpts = {
         path.join(srcPath, "cast/senders/media.ts"),
         path.join(srcPath, "cast/senders/bilibili.ts"),
         path.join(srcPath, "cast/senders/cctv.ts"),
+        path.join(srcPath, "cast/senders/yangshipin.ts"),
         // Mirroring sender
         path.join(srcPath, "/cast/senders/mirroring.ts"),
         // UI

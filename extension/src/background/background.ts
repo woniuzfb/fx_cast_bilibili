@@ -17,6 +17,11 @@ import {
     launchCctvSender,
     setCctvLiveQuality
 } from "./cctvLive";
+import {
+    YANGSHIPIN_LIVE_PAGE_RE,
+    initYangshipinLive,
+    launchYangshipinSender
+} from "./yangshipinLive";
 import { initWhitelist } from "./whitelist";
 import { initBilibiliPageCapture } from "./bilibiliPageCapture";
 import { initBleRemote } from "./bleRemote";
@@ -123,6 +128,7 @@ async function init() {
     }
     initBleRemote();
     initCctvLive();
+    initYangshipinLive();
     initBilibiliPageCapture();
 
     // Surface popup debug logs in the background console. The browser-action
@@ -189,6 +195,8 @@ async function init() {
                     tab.id,
                     Number(message.data?.quality) || 0
                 );
+            } else if (YANGSHIPIN_LIVE_PAGE_RE.test(tab.url ?? "")) {
+                await launchYangshipinSender(tab.id);
             } else {
                 await castManager.triggerCast(tab.id);
             }
