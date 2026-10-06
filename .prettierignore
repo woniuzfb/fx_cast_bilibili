@@ -28,6 +28,10 @@ package-lock.json
 *.log
 *.har
 
+# Native wasm, C/C++ sources, and binary test fixtures
+bridge/src/yangshipin/native/
+test/fixtures/*.ts
+
 # Session memory: notes, not code.
 .workbuddy/
 .memory/

@@ -38,7 +38,9 @@ input:placeholder-shown {
 .form__footer {
     align-items: center;
     display: flex;
+    justify-content: space-between;
     margin-top: 20px;
+    padding-top: 16px;
 }
 
 .form__buttons {
@@ -277,7 +279,8 @@ input:placeholder-shown {
         ". description";
 }
 
-.option--inline > input {
+.option--inline > input,
+.option--inline > .option__control {
     grid-area: input;
     width: 16px;
 }

@@ -796,6 +796,20 @@ export default new (class extends TypedEventTarget<EventMap> {
         // the Roku actually starts playing.
         const device = this.receiverDevices.get(deviceId);
         if (!device) return;
+
+        const sessionTitle = media.metadata?.title?.trim();
+        if (sessionTitle && device.status?.applications?.[0]) {
+            const app = device.status.applications[0];
+            if (!app.isIdleScreen) {
+                app.statusText = sessionTitle;
+                this.dispatchEvent(
+                    new CustomEvent("deviceUpdated", {
+                        detail: { deviceId, status: device.status }
+                    })
+                );
+            }
+        }
+
         const mergedMedia = this.mergeRokuSessionMedia(deviceId, undefined);
         if (!mergedMedia) return;
         const status: MediaStatus = {
@@ -1326,6 +1340,18 @@ export default new (class extends TypedEventTarget<EventMap> {
                 }
 
                 this.receiverAppGoneAt.delete(deviceId);
+
+                // Preserve or backfill the session media title on the application status line
+                // so the popup status text is never blanked by Roku device polls.
+                if (application && !application.isIdleScreen) {
+                    const sessionMedia =
+                        this.rokuSessionMedia.get(deviceId)?.media;
+                    const sessionTitle = sessionMedia?.metadata?.title?.trim();
+                    if (sessionTitle) {
+                        application.statusText = sessionTitle;
+                    }
+                }
+
                 device.status = status;
 
                 this.dispatchEvent(

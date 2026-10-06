@@ -446,7 +446,18 @@
             />
         </OptionsCategory>
 
-        <div class="form__footer">
+        <OptionsCategory
+            name={_("optionsPlaybackCategoryName")}
+            description={_("optionsPlaybackCategoryDescription")}
+        >
+            <Option
+                id="yangshipinUseDlna"
+                label={_("optionsYangshipinUseDlna")}
+                description={_("optionsYangshipinUseDlnaDescription")}
+                type="checkbox"
+                bind:checked={opts.yangshipinUseDlna}
+                inline
+            />
             <Option
                 id="chromecastDashStartupPadding"
                 label={_("optionsChromecastDashStartupPadding")}
@@ -457,6 +468,9 @@
                 bind:checked={opts.chromecastDashStartupPadding}
                 inline
             />
+
+            <hr />
+
             <Option
                 id="bilibiliDebugEnabled"
                 label={_("optionsBilibiliDebugEnabled")}
@@ -473,6 +487,9 @@
                 bind:checked={opts.cctvDebugEnabled}
                 inline
             />
+        </OptionsCategory>
+
+        <div class="form__footer">
             <Option
                 id="showAdvancedOptions"
                 label={_("optionsShowAdvancedOptions")}

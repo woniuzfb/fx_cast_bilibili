@@ -96,6 +96,7 @@ if (argv.package) {
 
 const NATIVE_BINDING_PATH = path.join(ROOT_PATH, "build/Release");
 const NATIVE_BINDING_NAME = "dns_sd.node";
+const NATIVE_BINDING_NAMES = ["dns_sd.node", "cmg_decrypt.node"];
 
 async function build() {
     // Run tsc
@@ -133,11 +134,13 @@ async function build() {
                 ],
                 scripts: [
                     // Loaded dynamically by the isolated decrypt worker via
-                    // require(path.join(__dirname, "cctvDecrypt.js")). The
+                    // require(path.join(__dirname, "cctvDecrypt.js")) /
+                    // require(path.join(__dirname, "yangshipinDecrypt.js")). The
                     // only static reference is a type-only import in
                     // mediaServer.ts (erased by tsc), so pkg's dependency
                     // analysis never sees it.
-                    "bridge/components/cctvDecrypt.js"
+                    "bridge/components/cctvDecrypt.js",
+                    "bridge/components/yangshipinDecrypt.js"
                 ]
             }
         };
@@ -165,10 +168,12 @@ async function build() {
             path.join(BUILD_PATH, executableName)
         ]);
 
-        fs.copySync(
-            path.join(NATIVE_BINDING_PATH, NATIVE_BINDING_NAME),
-            path.join(BUILD_PATH, NATIVE_BINDING_NAME)
-        );
+        for (const bindingName of NATIVE_BINDING_NAMES) {
+            const src = path.join(NATIVE_BINDING_PATH, bindingName);
+            if (fs.existsSync(src)) {
+                fs.copySync(src, path.join(BUILD_PATH, bindingName));
+            }
+        }
 
         fs.rmSync(path.join(BUILD_PATH, "src"), {
             recursive: true,
@@ -221,11 +226,16 @@ NODE_PATH="${modulesDir}" node $(dirname $0)/src/main.js --__name $(basename $0)
         // silently undo the isolation it exists for.
         manifest.path = path.join(OUT_PATH, path.basename(launcherPath));
 
-        // Copy native binding into build/Release so bindings() finds it
-        fs.copySync(
-            path.join(NATIVE_BINDING_PATH, NATIVE_BINDING_NAME),
-            path.join(BUILD_PATH, "build", "Release", NATIVE_BINDING_NAME)
-        );
+        // Copy native bindings into build/Release so bindings() finds it
+        for (const bindingName of NATIVE_BINDING_NAMES) {
+            const src = path.join(NATIVE_BINDING_PATH, bindingName);
+            if (fs.existsSync(src)) {
+                fs.copySync(
+                    src,
+                    path.join(BUILD_PATH, "build", "Release", bindingName)
+                );
+            }
+        }
     }
 
     // Write a package.json so the bindings module resolves from this directory
@@ -356,10 +366,12 @@ function packageDarwin(
         path.join(BUILD_PATH, platformExecutableName),
         path.join(rootExecutableDirectory, platformExecutableName)
     );
-    fs.moveSync(
-        path.join(BUILD_PATH, NATIVE_BINDING_NAME),
-        path.join(rootExecutableDirectory, NATIVE_BINDING_NAME)
-    );
+    for (const bindingName of NATIVE_BINDING_NAMES) {
+        fs.moveSync(
+            path.join(BUILD_PATH, bindingName),
+            path.join(rootExecutableDirectory, bindingName)
+        );
+    }
     fs.moveSync(
         path.join(BUILD_PATH, paths.MANIFEST_NAME),
         path.join(rootManifestDirectory, paths.MANIFEST_NAME)
@@ -454,10 +466,12 @@ function packageLinuxDeb(
         path.join(BUILD_PATH, platformExecutableName),
         path.join(rootExecutableDirectory, platformExecutableName)
     );
-    fs.moveSync(
-        path.join(BUILD_PATH, NATIVE_BINDING_NAME),
-        path.join(rootExecutableDirectory, NATIVE_BINDING_NAME)
-    );
+    for (const bindingName of NATIVE_BINDING_NAMES) {
+        fs.moveSync(
+            path.join(BUILD_PATH, bindingName),
+            path.join(rootExecutableDirectory, bindingName)
+        );
+    }
     fs.moveSync(
         path.join(BUILD_PATH, paths.MANIFEST_NAME),
         path.join(rootManifestDirectory, paths.MANIFEST_NAME)
@@ -529,7 +543,8 @@ function packageLinuxRpm(
         manifestPath: platformManifestDirectory,
         executableName: platformExecutableName,
         manifestName: paths.MANIFEST_NAME,
-        bindingName: NATIVE_BINDING_NAME
+        bindingName: NATIVE_BINDING_NAME,
+        bindingNames: NATIVE_BINDING_NAMES
     };
 
     fs.writeFileSync(
@@ -580,6 +595,7 @@ function packageWin32(
         executablePath: platformExecutableDirectory,
         manifestName: paths.MANIFEST_NAME,
         bindingName: NATIVE_BINDING_NAME,
+        bindingNames: NATIVE_BINDING_NAMES,
         winRegistryKey: paths.REGISTRY_KEY,
         outputName,
         licensePath: paths.LICENSE_PATH,

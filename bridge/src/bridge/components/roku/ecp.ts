@@ -304,7 +304,7 @@ export function mediaFormatFor(url: string): ["v" | "a", string] {
  * Assistant. */
 export function buildLaunchParams(
     url: string,
-    title: string,
+    _title?: string,
     startPositionSeconds?: number
 ): Record<string, string> {
     const [kind, format] = mediaFormatFor(url);
@@ -312,9 +312,15 @@ export function buildLaunchParams(
         t: kind,
         u: url,
         k: "(null)",
-        videoName: title,
+        // Roku devices lack system CJK fonts and its ECP server interprets
+        // query strings as Latin-1, causing Chinese titles to appear as tofu
+        // squares or mojibake on TV screen. We deliberately omit the title
+        // sent to Roku by passing a single space " ", which keeps the on-screen
+        // trickplay bar title cleanly blank (while avoiding Media Assistant's
+        // fallback to "Unknown Video"). The full title is retained for the popup.
+        videoName: " ",
         videoFormat: format,
-        songName: title,
+        songName: " ",
         audioFormat: format
     };
     // Seek target for the DASH-remux/SEEK re-launch path. Supported by the

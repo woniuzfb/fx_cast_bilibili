@@ -19,7 +19,7 @@
         "test:senders": "node test/senders/pauseSync.js && node test/senders/timeDomainAudit.js && node test/senders/pageTransition.js --fixed && node test/senders/dashSeekSync.js --fixed && node test/senders/dashCastOffset.js && node test/senders/playbackIntentOwnership.js && node test/senders/rokuItemTransition.js && node test/senders/dashLoadMatrix.js && node test/senders/playbackInterleavings.js --pairwise-only && node test/senders/yangshipinQuality.js",
         "test:interleavings": "node test/senders/playbackInterleavings.js --random 20 --length 8 --seed 1000",
         "test:interleavings:explore": "node test/senders/playbackInterleavings.js --random 60 --length 10 --seed 1000",
-        "test:bridge": "node test/bridge/dashRemuxTimeline.js && node test/bridge/pageCaptureRemux.js",
+        "test:bridge": "node test/bridge/dashRemuxTimeline.js && node test/bridge/pageCaptureRemux.js && node test/bridge/yangshipinWasmHarness.mjs",
         "test:playback": "node test/playback/coordinatorObservation.js --fixed && node test/playback/dashPresentationTime.js && node test/playback/dashStatusPipeline.js && node test/playback/runtimeRelay.js && node test/playback/pageCaptureTransition.js",
         "install-manifest": "cd bridge && npm run install-manifest",
         "remove-manifest": "cd bridge && npm run remove-manifest",

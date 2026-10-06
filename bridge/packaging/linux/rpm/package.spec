@@ -18,10 +18,14 @@ mkdir -p $RPM_BUILD_ROOT/{{{executablePath}}} \
          $RPM_BUILD_ROOT/{{{manifestPath}}}
 
 cp %{_distdir}/{{{executableName}}} $RPM_BUILD_ROOT/{{{executablePath}}}
-cp %{_distdir}/{{{bindingName}}} $RPM_BUILD_ROOT/{{{executablePath}}}
+{{#bindingNames}}
+cp %{_distdir}/{{{.}}} $RPM_BUILD_ROOT/{{{executablePath}}}
+{{/bindingNames}}
 cp %{_distdir}/{{{manifestName}}} $RPM_BUILD_ROOT/{{{manifestPath}}}
 
 %files
 {{{executablePath}}}/{{{executableName}}}
-{{{executablePath}}}/{{{bindingName}}}
+{{#bindingNames}}
+{{{executablePath}}}/{{{.}}}
+{{/bindingNames}}
 {{{manifestPath}}}/{{{manifestName}}}

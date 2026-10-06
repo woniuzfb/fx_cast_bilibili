@@ -39,13 +39,23 @@ const check = (name, cond, detail) => {
 async function bundle(outfile, workDir) {
     const esbuild = require(esbuildPath);
     const entry = path.join(workDir, "entry.js");
+    const yangshipinApiPath = path.join(
+        repoRoot,
+        "extension/src/background/yangshipinApi.ts"
+    );
     fs.writeFileSync(
         entry,
         `export {
             isYangshipinLivePage,
             sanitizeLiveInfoUrl,
-            getYangshipinPlaylistRank
-        } from ${JSON.stringify(yangshipinLiveSource)};\n`
+            getYangshipinPlaylistRank,
+            getYangshipinStreamKey,
+            getYangshipinChannelName,
+            getYangshipinChannelInfo
+        } from ${JSON.stringify(yangshipinLiveSource)};
+        export { createYangshipinCKey } from ${JSON.stringify(
+            yangshipinApiPath
+        )};\n`
     );
     await esbuild.build({
         entryPoints: [entry],
@@ -133,7 +143,11 @@ async function main() {
         const {
             isYangshipinLivePage,
             sanitizeLiveInfoUrl,
-            getYangshipinPlaylistRank
+            getYangshipinPlaylistRank,
+            getYangshipinStreamKey,
+            getYangshipinChannelName,
+            getYangshipinChannelInfo,
+            createYangshipinCKey
         } = require(outfile);
 
         console.log("Yangshipin default quality & sanitizer tests");
@@ -152,10 +166,76 @@ async function main() {
             ) === true
         );
         check(
+            "isYangshipinLivePage: matches tv/home page with pid",
+            isYangshipinLivePage(
+                "https://www.yangshipin.cn/tv/home?pid=600099502"
+            ) === true
+        );
+        check(
+            "isYangshipinLivePage: matches tv/home page without pid",
+            isYangshipinLivePage("https://www.yangshipin.cn/tv/home") === true
+        );
+        check(
+            "isYangshipinLivePage: matches live detail page with pid",
+            isYangshipinLivePage(
+                "https://www.yangshipin.cn/live/detail?pid=610003420"
+            ) === true
+        );
+        check(
+            "isYangshipinLivePage: matches live detail page without pid",
+            isYangshipinLivePage("https://www.yangshipin.cn/live/detail") ===
+                true
+        );
+        check(
             "isYangshipinLivePage: rejects non-Yangshipin URL",
             isYangshipinLivePage(
                 "https://www.bilibili.com/video/BV1xx411c7mD"
             ) === false
+        );
+
+        // Channel name lookup tests
+        check(
+            "getYangshipinChannelName: resolves pid 600099502 to CCTV16 4K",
+            getYangshipinChannelName("600099502") === "CCTV16 4K"
+        );
+        check(
+            "getYangshipinChannelName: resolves pid 600001859 to CCTV1综合",
+            getYangshipinChannelName("600001859") === "CCTV1综合"
+        );
+        check(
+            "getYangshipinChannelName: resolves pid 600001818 to CCTV5体育",
+            getYangshipinChannelName("600001818") === "CCTV5体育"
+        );
+        check(
+            "getYangshipinChannelName: returns undefined for unknown pid",
+            getYangshipinChannelName("999999999") === undefined
+        );
+
+        // Channel info lookup tests
+        const cctv16Info = getYangshipinChannelInfo("600099502");
+        check(
+            "getYangshipinChannelInfo: resolves CCTV16 4K channelId and defn",
+            cctv16Info &&
+                cctv16Info.channelId === "2027249301" &&
+                cctv16Info.defn === "fhd"
+        );
+        const hjInfo = getYangshipinChannelInfo("600099620");
+        check(
+            "getYangshipinChannelInfo: resolves CCTV怀旧剧场 defn=shd",
+            hjInfo && hjInfo.channelId === "2026874303" && hjInfo.defn === "shd"
+        );
+
+        // cKey generation tests
+        const ticket = createYangshipinCKey("2027249301");
+        check(
+            "createYangshipinCKey: produces valid cKey starting with --01",
+            typeof ticket.cKey === "string" && ticket.cKey.startsWith("--01")
+        );
+        check(
+            "createYangshipinCKey: produces guid and flowId",
+            typeof ticket.guid === "string" &&
+                ticket.guid.length === 32 &&
+                typeof ticket.flowId === "string"
         );
 
         // 2. sanitizeLiveInfoUrl tests
@@ -221,6 +301,60 @@ async function main() {
         check(
             "rank: 1080P > 720P > 540P > audio ladder holds strictly",
             fhdRank > shdRank && shdRank > hdRank && hdRank > audioRank
+        );
+
+        // _web and _dlna rank tests
+        check(
+            "rank: _web 1080P fhd rank is 100",
+            getYangshipinPlaylistRank(
+                "https://hlslive-tx-cdn.ysp.cctv.cn/live/2027249303_web.m3u8"
+            ) === 100
+        );
+        check(
+            "rank: _web 720P shd rank is 50",
+            getYangshipinPlaylistRank(
+                "https://hlslive-tx-cdn.ysp.cctv.cn/live/2027249302_web.m3u8"
+            ) === 50
+        );
+        check(
+            "rank: _dlna 1080P fhd rank is 100",
+            getYangshipinPlaylistRank(
+                "https://hlslive-tx-cdn.ysp.cctv.cn/live/2027249303_dlna.m3u8"
+            ) === 100
+        );
+
+        // 4. getYangshipinStreamKey tests
+        const angle1Key = getYangshipinStreamKey(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2050631003.m3u8"
+        );
+        const angle1ShdKey = getYangshipinStreamKey(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2050631002.m3u8"
+        );
+        const angle2Key = getYangshipinStreamKey(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2050597203.m3u8"
+        );
+        const webStreamKey = getYangshipinStreamKey(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2027249303_web.m3u8"
+        );
+        const dlnaStreamKey = getYangshipinStreamKey(
+            "https://hlslive-tx-cdn.ysp.cctv.cn/live/2027249301_dlna.m3u8"
+        );
+
+        check(
+            "streamKey: extracts base ID without quality digit",
+            angle1Key === "205063100"
+        );
+        check(
+            "streamKey: same camera angle different qualities share stream key",
+            angle1Key === angle1ShdKey
+        );
+        check(
+            "streamKey: different camera angles have distinct stream keys",
+            angle1Key !== angle2Key && angle2Key === "205059720"
+        );
+        check(
+            "streamKey: strips _web and _dlna suffixes to compare stream identity",
+            webStreamKey === "202724930" && webStreamKey === dlnaStreamKey
         );
 
         console.log(`\n${pass}/${pass + fail} checks passed`);

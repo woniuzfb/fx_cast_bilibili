@@ -248,8 +248,6 @@ export default class RokuSession {
     private launchBaselineSegmentKey = "";
     /** A post-LOAD idle observation proves Roku has torn down the previous item. */
     private sawPostLoadIdle = false;
-    /** Last stream segment signature observed while waiting for the new LOAD. */
-    private lastLaunchSegmentKey = "";
     private detachLiveRelayObserver?: () => void;
     /** The current load is a live-relay cast tracked by the deferral. */
     private liveRelayLoad = false;
@@ -479,12 +477,23 @@ export default class RokuSession {
         let title = metadata?.title || "";
         if (!title) {
             try {
-                title = decodeURIComponent(
+                const candidate = decodeURIComponent(
                     new URL(url).pathname.split("/").filter(Boolean).pop() ??
                         url
                 );
+                if (!/^index\.(m3u8|mpd)$/i.test(candidate)) {
+                    title = candidate;
+                }
             } catch {
-                title = url;
+                title = "";
+            }
+        }
+
+        if (title) {
+            if (!message.media.metadata) {
+                message.media.metadata = { title } as any;
+            } else if (!message.media.metadata.title) {
+                message.media.metadata.title = title;
             }
         }
 
@@ -509,14 +518,12 @@ export default class RokuSession {
             if (deferUntilFreshPlayer) {
                 this.launchBaselineSegmentKey = "";
                 this.sawPostLoadIdle = false;
-                this.lastLaunchSegmentKey = "";
                 try {
                     const before = await queryMediaPlayer(
                         this.receiverDevice.host
                     );
                     this.launchBaselineSegmentKey =
                         this.streamSegmentKey(before);
-                    this.lastLaunchSegmentKey = this.launchBaselineSegmentKey;
                 } catch {
                     // A pre-load telemetry failure is non-fatal; the post-load
                     // idle/segment checks below remain authoritative.
@@ -785,7 +792,6 @@ export default class RokuSession {
                 state.position !== undefined ||
                 state.duration !== undefined);
 
-        if (key) this.lastLaunchSegmentKey = key;
         return changed || newSegmentAfterIdle || newTelemetryWithoutSegment;
     }
 
@@ -1101,8 +1107,9 @@ export default class RokuSession {
         const details: CastSessionUpdatedDetails = {
             sessionId: this.sessionId,
             statusText: this.loadedMedia
-                ? (this.loadedMedia.metadata as { title?: string } | null)
-                      ?.title ?? MEDIA_PLAYER_DISPLAY_NAME
+                ? (
+                      this.loadedMedia.metadata as { title?: string } | null
+                  )?.title?.trim() || MEDIA_PLAYER_DISPLAY_NAME
                 : MEDIA_PLAYER_DISPLAY_NAME,
             namespaces: [{ name: NS_MEDIA }],
             volume: this.volume
@@ -1299,7 +1306,6 @@ export default class RokuSession {
         this.consumeWatchGeneration++;
         this.clearDeferredConsume();
         this.launchBaselineSegmentKey = "";
-        this.lastLaunchSegmentKey = "";
         this.stopPolling();
         this.detachLiveRelayObserver?.();
         this.detachLiveRelayObserver = undefined;

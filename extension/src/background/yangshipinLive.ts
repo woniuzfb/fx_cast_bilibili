@@ -1,15 +1,31 @@
 import logger from "../lib/logger";
+import options from "../lib/options";
 import { getChromeUserAgentString } from "../lib/userAgents";
+import {
+    YANGSHIPIN_CHANNELS_BY_PID,
+    getYangshipinChannelName,
+    getYangshipinChannelInfo
+} from "../lib/yangshipinChannels";
+import { requestYangshipinDlnaStream } from "./yangshipinApi";
+import deviceManager from "./deviceManager";
+import { ReceiverSelectorMediaType } from "../types";
 import castManager, { CastInstanceDestroyedError } from "./castManager";
 import { injectSenderFile } from "./injectSender";
 import { flattenInjectionResults } from "./injectLog";
 
+export {
+    YANGSHIPIN_CHANNELS_BY_PID,
+    getYangshipinChannelName,
+    getYangshipinChannelInfo
+};
+
 /**
  * Page URLs for Yangshipin live streams,
  * e.g. https://w.yangshipin.cn/video?type=2&pid=610003121
+ * or https://www.yangshipin.cn/tv/home?pid=600099502
  */
 export const YANGSHIPIN_LIVE_PAGE_RE =
-    /^https:\/\/(?:w|m|www)\.yangshipin\.cn\/video\?(?=.*(?:type=2|pid=))/i;
+    /^https:\/\/(?:w|m|www)\.yangshipin\.cn\/(?:video\?(?=.*(?:type=2|pid=))|tv(?:\/|\?|$)|live(?:\/|\?|$))/i;
 
 export function isYangshipinLivePage(url?: string): boolean {
     return typeof url === "string" && YANGSHIPIN_LIVE_PAGE_RE.test(url);
@@ -19,8 +35,27 @@ export function isYangshipinLivePage(url?: string): boolean {
 const CAPTURE_TIMEOUT_MS = 12000;
 
 const yangshipinLiveTabs = new Set<number>();
+const pidByTab = new Map<number, string>();
+const cnlidByTab = new Map<number, string>();
+const cnlidByPid = new Map<string, string>();
 const capturedMediaByTab = new Map<number, { url: string; at: number }>();
 const mediaWaitersByTab = new Map<number, Set<(url: string) => void>>();
+
+let cachedYangshipinUseDlna = false;
+void options
+    .getAll()
+    .then(opts => {
+        cachedYangshipinUseDlna = opts?.yangshipinUseDlna === true;
+    })
+    .catch(() => undefined);
+options.addEventListener("changed", async () => {
+    try {
+        const opts = await options.getAll();
+        cachedYangshipinUseDlna = opts?.yangshipinUseDlna === true;
+    } catch {
+        /* ignore */
+    }
+});
 
 export function isYangshipinLiveTab(tabId: number): boolean {
     return yangshipinLiveTabs.has(tabId);
@@ -37,19 +72,28 @@ async function resolveChromeUserAgent(): Promise<string | undefined> {
 }
 
 export function getYangshipinPlaylistRank(url: string): number {
-    if (/\/(\d*4)\.m3u8/i.test(url) || /audio/i.test(url)) {
+    if (/\/(\d*4)(?:_web|_dlna)?\.m3u8/i.test(url) || /audio/i.test(url)) {
         return 1;
     }
-    if (/\/(\d*3)\.m3u8/i.test(url) || /1080|fhd/i.test(url)) {
+    if (/\/(\d*3)(?:_web|_dlna)?\.m3u8/i.test(url) || /1080|fhd/i.test(url)) {
         return 100;
     }
-    if (/\/(\d*2)\.m3u8/i.test(url) || /720|shd/i.test(url)) {
+    if (/\/(\d*2)(?:_web|_dlna)?\.m3u8/i.test(url) || /720|shd/i.test(url)) {
         return 50;
     }
-    if (/\/(\d*1)\.m3u8/i.test(url) || /540|hd/i.test(url)) {
+    if (/\/(\d*1)(?:_web|_dlna)?\.m3u8/i.test(url) || /540|hd/i.test(url)) {
         return 20;
     }
     return 10;
+}
+
+export function getYangshipinStreamKey(url: string): string {
+    const match = url.match(/\/(\d{6,})(\d)(?:_web|_dlna)?\.m3u8/i);
+    if (match) {
+        return match[1];
+    }
+    const genericMatch = url.match(/\/([^\/?#]+?)\.m3u8/i);
+    return genericMatch ? genericMatch[1] : url;
 }
 
 interface LiveInfoCacheEntry {
@@ -84,6 +128,16 @@ function saveLiveInfoCache(
     vkeyIntervalSeconds?: number
 ) {
     if (!pid || !playurl) return;
+    const existingCache = liveInfoCacheByPid.get(pid);
+    if (
+        cachedYangshipinUseDlna &&
+        playurl.includes("_web.") &&
+        existingCache &&
+        !existingCache.playurl.includes("_web.") &&
+        Date.now() - existingCache.timestamp < existingCache.ttlMs
+    ) {
+        return;
+    }
     const ttlMs = (Number(vkeyIntervalSeconds) || 14400) * 1000;
     const entry: LiveInfoCacheEntry = {
         livepid: pid,
@@ -132,27 +186,50 @@ void browser.storage.local.get(null).then(all => {
 });
 
 function publishCapturedMedia(tabId: number, url: string) {
-    const pid = extractYangshipinPid(url);
+    const pid =
+        extractYangshipinPid(url) ||
+        (tabId >= 0 ? pidByTab.get(tabId) : undefined);
     if (pid) {
         saveLiveInfoCache(pid, url);
     }
     const existing = capturedMediaByTab.get(tabId);
+    if (
+        cachedYangshipinUseDlna &&
+        url.includes("_web.") &&
+        existing &&
+        !existing.url.includes("_web.")
+    ) {
+        return;
+    }
     const newRank = getYangshipinPlaylistRank(url);
     if (existing) {
-        const existingRank = getYangshipinPlaylistRank(existing.url);
-        // If existing playlist is higher quality and was captured recently (< 30s),
-        // do not downgrade to a lower quality playlist.
-        if (existingRank > newRank && Date.now() - existing.at < 30000) {
-            logger.info("Yangshipin: keeping higher quality playlist", {
-                tabId,
-                existingUrl: existing.url,
-                ignoredUrl: url
-            });
-            return;
+        const isSameStream =
+            getYangshipinStreamKey(existing.url) ===
+            getYangshipinStreamKey(url);
+        if (isSameStream) {
+            const existingRank = getYangshipinPlaylistRank(existing.url);
+            // If existing playlist is higher quality and was captured recently (< 30s),
+            // do not downgrade to a lower quality playlist for the same stream.
+            if (existingRank > newRank && Date.now() - existing.at < 30000) {
+                logger.info("Yangshipin: keeping higher quality playlist", {
+                    tabId,
+                    existingUrl: existing.url,
+                    ignoredUrl: url
+                });
+                return;
+            }
         }
     }
 
     capturedMediaByTab.set(tabId, { url, at: Date.now() });
+    if (existing && existing.url !== url && tabId >= 0) {
+        void browser.tabs
+            .sendMessage(tabId, {
+                subject: "yangshipin:streamChanged",
+                data: { url }
+            })
+            .catch(() => undefined);
+    }
     const waiters = mediaWaitersByTab.get(tabId);
     if (!waiters) return;
     mediaWaitersByTab.delete(tabId);
@@ -388,13 +465,15 @@ function initLiveInfoRequestSanitizer() {
                 if (details.tabId >= 0) {
                     yangshipinLiveTabs.add(details.tabId);
                 }
-                const { url, changed } = sanitizeLiveInfoUrl(details.url);
-                if (changed) {
-                    logger.info("Yangshipin: sanitized liveinfo params", {
-                        tabId: details.tabId,
-                        url
-                    });
-                    return { redirectUrl: url };
+                if (details.method === "GET") {
+                    const { url, changed } = sanitizeLiveInfoUrl(details.url);
+                    if (changed) {
+                        logger.info("Yangshipin: sanitized liveinfo params", {
+                            tabId: details.tabId,
+                            url
+                        });
+                        return { redirectUrl: url };
+                    }
                 }
 
                 // If URL was already clean/redirected, inspect and cache/substitute the response
@@ -432,66 +511,125 @@ function initLiveInfoRequestSanitizer() {
                     filter.onstop = () => {
                         responseText += decoder.decode();
                         try {
+                            let parsed: any;
+                            let isJsonp = false;
+                            let cbName = "";
                             const jsonpMatch = responseText.match(
                                 /^([a-zA-Z0-9_$]+)\s*\(([\s\S]*)\)\s*;?\s*$/
                             );
                             if (jsonpMatch) {
-                                const cbName = jsonpMatch[1];
-                                const parsed = JSON.parse(jsonpMatch[2]);
+                                isJsonp = true;
+                                cbName = jsonpMatch[1];
+                                parsed = JSON.parse(jsonpMatch[2]);
+                            } else {
+                                try {
+                                    parsed = JSON.parse(responseText);
+                                } catch {
+                                    /* not JSON */
+                                }
+                            }
+
+                            if (parsed && typeof parsed === "object") {
                                 const pid =
                                     extractYangshipinPid(details.url) ||
-                                    String(parsed.livepid || "");
+                                    String(
+                                        parsed.data?.livepid ||
+                                            parsed.livepid ||
+                                            ""
+                                    ) ||
+                                    (details.tabId >= 0
+                                        ? pidByTab.get(details.tabId)
+                                        : undefined);
 
-                                if (parsed.iretcode === 0 && parsed.playurl) {
-                                    saveLiveInfoCache(
-                                        pid,
-                                        parsed.playurl,
-                                        parsed,
-                                        parsed.vkey_renew_interval
-                                    );
+                                const cnlid = String(
+                                    parsed.data?.cnlid || parsed.cnlid || ""
+                                );
+                                if (pid && cnlid) {
+                                    cnlidByPid.set(pid, cnlid);
+                                    if (details.tabId >= 0) {
+                                        cnlidByTab.set(details.tabId, cnlid);
+                                    }
+                                }
+
+                                const playurl =
+                                    parsed.data?.playurl || parsed.playurl;
+                                const isSuccess =
+                                    (parsed.code === 0 ||
+                                        parsed.iretcode === 0) &&
+                                    Boolean(playurl);
+
+                                if (isSuccess && playurl) {
+                                    const vkeyInterval =
+                                        parsed.data?.vkey_renew_interval ||
+                                        parsed.vkey_renew_interval;
+                                    if (pid) {
+                                        saveLiveInfoCache(
+                                            pid,
+                                            playurl,
+                                            parsed,
+                                            vkeyInterval
+                                        );
+                                    }
                                     if (details.tabId >= 0) {
                                         publishCapturedMedia(
                                             details.tabId,
-                                            parsed.playurl
+                                            playurl
                                         );
                                     }
-                                } else if (parsed.iretcode !== 0) {
+                                } else if (
+                                    (parsed.code !== undefined &&
+                                        parsed.code !== 0) ||
+                                    (parsed.iretcode !== undefined &&
+                                        parsed.iretcode !== 0)
+                                ) {
                                     logger.warn(
                                         "Yangshipin liveinfo reported error; checking cache",
                                         {
                                             pid,
+                                            code: parsed.code,
                                             iretcode: parsed.iretcode,
+                                            msg: parsed.msg,
                                             errinfo: parsed.errinfo
                                         }
                                     );
-                                    const cached = getLiveInfoCache(pid);
-                                    if (cached) {
-                                        logger.info(
-                                            "Yangshipin: substituting cached liveinfo for preview limit error",
-                                            {
-                                                pid,
-                                                ageMinutes: Math.round(
-                                                    (Date.now() -
-                                                        cached.timestamp) /
-                                                        60000
-                                                ),
-                                                playurl: cached.playurl
-                                            }
-                                        );
-                                        const substituted = `${cbName}(${JSON.stringify(
-                                            cached.data
-                                        )});`;
-                                        filter.write(
-                                            encoder.encode(substituted).buffer
-                                        );
-                                        filter.disconnect();
-                                        if (details.tabId >= 0) {
-                                            publishCapturedMedia(
-                                                details.tabId,
-                                                cached.playurl
+                                    if (pid) {
+                                        const cached = getLiveInfoCache(pid);
+                                        if (cached) {
+                                            logger.info(
+                                                "Yangshipin: substituting cached liveinfo for preview limit error",
+                                                {
+                                                    pid,
+                                                    ageMinutes: Math.round(
+                                                        (Date.now() -
+                                                            cached.timestamp) /
+                                                            60000
+                                                    ),
+                                                    playurl: cached.playurl
+                                                }
                                             );
+                                            let substituted: string;
+                                            if (isJsonp) {
+                                                substituted = `${cbName}(${JSON.stringify(
+                                                    cached.data
+                                                )});`;
+                                            } else {
+                                                substituted = JSON.stringify(
+                                                    cached.data
+                                                );
+                                            }
+                                            filter.write(
+                                                encoder.encode(substituted)
+                                                    .buffer
+                                            );
+                                            filter.disconnect();
+                                            if (details.tabId >= 0) {
+                                                publishCapturedMedia(
+                                                    details.tabId,
+                                                    cached.playurl
+                                                );
+                                            }
+                                            return;
                                         }
-                                        return;
                                     }
                                 }
                             }
@@ -521,7 +659,8 @@ function initLiveInfoRequestSanitizer() {
         {
             urls: [
                 "*://liveinfo.yangshipin.cn/*",
-                "*://bkliveinfo.yangshipin.cn/*"
+                "*://bkliveinfo.yangshipin.cn/*",
+                "*://player-api.yangshipin.cn/v1/player/get_live_info*"
             ],
             types: ["xmlhttprequest", "script", "other"]
         },
@@ -564,6 +703,10 @@ function initMediaPlaylistCapture() {
         for (const tab of tabs) {
             if (tab.id !== undefined && isYangshipinLivePage(tab.url)) {
                 yangshipinLiveTabs.add(tab.id);
+                const pid = extractYangshipinPid(tab.url);
+                if (pid) {
+                    pidByTab.set(tab.id, pid);
+                }
                 void injectYangshipinHook(tab.id);
             }
         }
@@ -574,6 +717,9 @@ function initMediaPlaylistCapture() {
             mediaWaitersByTab.delete(tabId);
             const currentUrl = changeInfo.url ?? tab.url;
             const pid = extractYangshipinPid(currentUrl);
+            if (pid) {
+                pidByTab.set(tabId, pid);
+            }
             const cached = pid ? getLiveInfoCache(pid) : undefined;
             if (cached) {
                 capturedMediaByTab.set(tabId, {
@@ -589,44 +735,177 @@ function initMediaPlaylistCapture() {
             void injectYangshipinHook(tabId);
         } else if (changeInfo.url !== undefined) {
             yangshipinLiveTabs.delete(tabId);
+            pidByTab.delete(tabId);
         }
     });
 
     browser.webNavigation.onCommitted.addListener(details => {
         if (details.frameId === 0 && isYangshipinLivePage(details.url)) {
             yangshipinLiveTabs.add(details.tabId);
+            const pid = extractYangshipinPid(details.url);
+            if (pid) {
+                pidByTab.set(details.tabId, pid);
+            }
             void injectYangshipinHook(details.tabId);
         }
     });
 
     browser.tabs.onRemoved.addListener(tabId => {
         yangshipinLiveTabs.delete(tabId);
+        pidByTab.delete(tabId);
+        cnlidByTab.delete(tabId);
         capturedMediaByTab.delete(tabId);
         mediaWaitersByTab.delete(tabId);
     });
 }
 
-async function resolveLiveStreamUrl(tabId: number): Promise<string> {
+async function resolveLiveStreamUrl(
+    tabId: number
+): Promise<{ mediaUrl: string; title?: string }> {
+    let tabUrl: string | undefined;
+    try {
+        const tab = await browser.tabs.get(tabId);
+        tabUrl = tab.url;
+    } catch {
+        /* ignore */
+    }
+
+    const pid =
+        extractYangshipinPid(tabUrl) ||
+        (tabId >= 0 ? pidByTab.get(tabId) : undefined);
+
+    const title = getYangshipinChannelName(pid);
+    const opts = await options.getAll().catch(() => ({} as any));
+    const preferDlna = opts?.yangshipinUseDlna === true;
+
+    if (preferDlna && pid) {
+        // DLNA Preferred Mode:
+        // 1. Check if we already have a clean unencrypted DLNA stream cached
+        const cached = getLiveInfoCache(pid);
+        if (
+            cached &&
+            !cached.playurl.includes("_web.") &&
+            (cached.playurl.includes("_dlna") ||
+                cached.playurl.includes("from=player"))
+        ) {
+            logger.info(
+                "Yangshipin live stream resolved from clean DLNA cache",
+                {
+                    tabId,
+                    pid,
+                    url: cached.playurl
+                }
+            );
+            return { mediaUrl: cached.playurl, title };
+        }
+
+        // 2. Try resolving official unencrypted DLNA stream via cKey API
+        const chInfo = getYangshipinChannelInfo(pid);
+        const cnlid =
+            chInfo?.channelId ||
+            cnlidByPid.get(pid) ||
+            (tabId >= 0 ? cnlidByTab.get(tabId) : undefined);
+
+        if (cnlid) {
+            try {
+                logger.info("Yangshipin: resolving DLNA stream via cKey API", {
+                    pid,
+                    cnlid,
+                    name: chInfo?.name
+                });
+                const dlnaRes = await requestYangshipinDlnaStream(
+                    cnlid,
+                    pid,
+                    chInfo?.defn || "fhd"
+                );
+                saveLiveInfoCache(
+                    pid,
+                    dlnaRes.playurl,
+                    dlnaRes.data,
+                    dlnaRes.vkeyIntervalSeconds
+                );
+                if (tabId >= 0) {
+                    capturedMediaByTab.set(tabId, {
+                        url: dlnaRes.playurl,
+                        at: Date.now()
+                    });
+                }
+                logger.info("Yangshipin DLNA stream resolved successfully", {
+                    pid,
+                    url: dlnaRes.playurl
+                });
+                return {
+                    mediaUrl: dlnaRes.playurl,
+                    title: chInfo?.name || title
+                };
+            } catch (dlnaErr) {
+                logger.warn(
+                    "Yangshipin: DLNA stream resolution failed, falling back to page capture",
+                    {
+                        pid,
+                        error:
+                            dlnaErr instanceof Error
+                                ? dlnaErr.message
+                                : String(dlnaErr)
+                    }
+                );
+            }
+        }
+    }
+
+    // Default Mode: WASM Web Stream Preferred (page capture)
     try {
         const url = await captureLivePlaylist(tabId);
-        logger.info("Yangshipin live stream resolved", { tabId, url });
-        return url;
+        logger.info(
+            "Yangshipin live stream resolved from page capture (WASM descrambling)",
+            {
+                tabId,
+                url
+            }
+        );
+        return { mediaUrl: url, title };
     } catch (err) {
-        try {
-            const tab = await browser.tabs.get(tabId);
-            const pid = extractYangshipinPid(tab.url);
-            if (pid) {
-                const cached = getLiveInfoCache(pid);
-                if (cached) {
-                    logger.info(
-                        "Yangshipin live stream resolved from persistent cache",
-                        { tabId, pid, url: cached.playurl }
+        logger.warn(
+            "Yangshipin: page capture timed out, attempting DLNA fallback",
+            { tabId, pid }
+        );
+        if (pid) {
+            const chInfo = getYangshipinChannelInfo(pid);
+            const cnlid =
+                chInfo?.channelId ||
+                cnlidByPid.get(pid) ||
+                (tabId >= 0 ? cnlidByTab.get(tabId) : undefined);
+
+            if (cnlid) {
+                try {
+                    const dlnaRes = await requestYangshipinDlnaStream(
+                        cnlid,
+                        pid,
+                        chInfo?.defn || "fhd"
                     );
-                    return cached.playurl;
+                    saveLiveInfoCache(
+                        pid,
+                        dlnaRes.playurl,
+                        dlnaRes.data,
+                        dlnaRes.vkeyIntervalSeconds
+                    );
+                    return {
+                        mediaUrl: dlnaRes.playurl,
+                        title: chInfo?.name || title
+                    };
+                } catch {
+                    /* ignore */
                 }
             }
-        } catch {
-            /* ignore */
+
+            const cached = getLiveInfoCache(pid);
+            if (cached) {
+                logger.info(
+                    "Yangshipin live stream resolved from fallback persistent cache",
+                    { tabId, pid, url: cached.playurl }
+                );
+                return { mediaUrl: cached.playurl, title };
+            }
         }
         throw err;
     }
@@ -637,6 +916,24 @@ export function initYangshipinLive() {
     initMediaPlaylistCapture();
 
     browser.runtime.onMessage.addListener((message, sender) => {
+        if (message?.subject === "yangshipin:queueReceiver") {
+            const tabId = sender.tab?.id;
+            const deviceId = message.data?.deviceId;
+            if (tabId !== undefined && typeof deviceId === "string") {
+                const device = deviceManager.getDeviceById(deviceId);
+                if (device) {
+                    castManager.queueReceiverSelection(tabId, {
+                        device,
+                        mediaType: ReceiverSelectorMediaType.App
+                    });
+                    logger.info("Yangshipin queued Roku receiver for re-cast", {
+                        tabId,
+                        deviceId
+                    });
+                }
+            }
+            return Promise.resolve({ ok: true });
+        }
         if (message?.subject !== "yangshipin:resolveStreamUrl") return;
         return (async () => {
             const tabId = sender.tab?.id;
@@ -644,9 +941,9 @@ export function initYangshipinLive() {
                 return { error: "No tab associated with sender" };
             }
             try {
-                const mediaUrl = await resolveLiveStreamUrl(tabId);
+                const { mediaUrl, title } = await resolveLiveStreamUrl(tabId);
                 const userAgent = await resolveChromeUserAgent();
-                return { mediaUrl, userAgent };
+                return { mediaUrl, userAgent, title };
             } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
                 logger.error("Yangshipin live stream resolution failed", {

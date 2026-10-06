@@ -694,6 +694,18 @@
     "optionsCctvDebugEnabledDescription": {
         "message": "显示详细的 CCTV 后台日志。"
     },
+    "optionsYangshipinUseDlna": {
+        "message": "央视频优先使用 DLNA 直链"
+    },
+    "optionsYangshipinUseDlnaDescription": {
+        "message": "启用时优先解析官方移动端未加密 DLNA 直链；默认关闭，通过 bridge 原生 WASM 模块直接解扰网页播放器 Web 流。"
+    },
+    "optionsPlaybackCategoryName": {
+        "message": "特色站点与播放兼容性"
+    },
+    "optionsPlaybackCategoryDescription": {
+        "message": "Bilibili、央视频及央视直播的流解析、解扰与调试设置。"
+    },
     "optionsRokuCategoryName": {
         "message": "Roku"
     },

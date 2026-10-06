@@ -799,9 +799,20 @@ export default class RokuRemote {
         const current = this.effectiveState();
         this.lastActiveApp = activeApp;
 
-        // Media title is only known to us when this remote loaded it;
-        // fall back to whatever the player reports.
-        if (state.title && !this.loadedTitle) this.loadedTitle = state.title;
+        // Media title is provided by sessionMedia (from the cast sender).
+        // Roku devices lack CJK fonts, so the title sent to Roku via ECP is
+        // deliberately omitted. Fall back to player-reported title only if
+        // non-blank and not an index / placeholder filename.
+        if (state.title && !this.loadedTitle) {
+            const clean = state.title.trim();
+            if (
+                clean &&
+                !/^index\.(m3u8|mpd)$/i.test(clean) &&
+                clean !== "Unknown Video"
+            ) {
+                this.loadedTitle = clean;
+            }
+        }
 
         const positionMoved =
             previous.position !== undefined &&
@@ -872,8 +883,26 @@ export default class RokuRemote {
         // log unreachable while leaving lastState untouched either way.
     }
 
+    private resolveMediaTitle(): string {
+        const sessionMedia = getRokuSessionMedia(this.device.id);
+        const sessionTitle = sessionMedia?.metadata?.title?.trim();
+        if (sessionTitle) {
+            return sessionTitle;
+        }
+        if (this.loadedTitle && this.loadedTitle.trim()) {
+            const clean = this.loadedTitle.trim();
+            if (
+                !/^index\.(m3u8|mpd)$/i.test(clean) &&
+                clean !== "Unknown Video"
+            ) {
+                return clean;
+            }
+        }
+        return "";
+    }
+
     private buildApplication(): ReceiverApplication {
-        const title = this.loadedTitle;
+        const title = this.resolveMediaTitle();
         // Report the actual foreground channel when known (e.g. the user
         // opened Netflix); fall back to the media player we can control.
         const appId = this.lastActiveApp?.id ?? ROKU_MEDIA_PLAYER_APP_ID;
@@ -889,7 +918,7 @@ export default class RokuRemote {
             launchedFromCloud: false,
             namespaces: [{ name: NS_MEDIA }],
             sessionId: `roku-${this.device.id}`,
-            statusText: title ?? "",
+            statusText: title || displayName,
             transportId: `roku-${this.device.id}`,
             universalAppId: appId
         };
@@ -975,7 +1004,7 @@ export default class RokuRemote {
                 duration: duration == null ? "null" : String(duration),
                 rokuLiveElapsed: isHlsDvr ? "true" : "n/a",
                 loadedUrl: this.loadedUrl ?? "undefined",
-                loadedTitle: this.loadedTitle ?? "undefined",
+                loadedTitle: this.resolveMediaTitle() || "undefined",
                 lastState: flattenDebugLine(this.effectiveState()),
                 sessionMedia: flattenDebugLine(sessionMedia),
                 customDataIn: flattenDebugLine(sessionMedia.customData),
@@ -991,7 +1020,7 @@ export default class RokuRemote {
                 customData: null,
                 duration: playerDuration ?? null,
                 metadata: {
-                    title: this.loadedTitle
+                    title: this.resolveMediaTitle()
                 } as MediaInformation["metadata"],
                 streamType: "BUFFERED" as MediaInformation["streamType"],
                 textTrackStyle: null,
@@ -1010,7 +1039,7 @@ export default class RokuRemote {
                     result.duration == null ? "null" : String(result.duration),
                 rokuLiveElapsed: "n/a",
                 loadedUrl: this.loadedUrl,
-                loadedTitle: this.loadedTitle ?? "undefined",
+                loadedTitle: this.resolveMediaTitle() || "undefined",
                 lastState: flattenDebugLine(this.effectiveState()),
                 sessionMedia: "undefined",
                 customDataIn: "null",
@@ -1029,7 +1058,7 @@ export default class RokuRemote {
             duration: "undefined",
             rokuLiveElapsed: "n/a",
             loadedUrl: "undefined",
-            loadedTitle: this.loadedTitle ?? "undefined",
+            loadedTitle: this.resolveMediaTitle() || "undefined",
             lastState: flattenDebugLine(this.effectiveState()),
             sessionMedia: "undefined",
             customDataIn: "undefined",

@@ -2464,6 +2464,18 @@ export default class MediaSender {
             mediaInfo.streamType = cast.media.StreamType.LIVE;
         }
         if (
+            this.isHlsDvr &&
+            bridgePageDuration !== undefined &&
+            Number.isFinite(bridgePageDuration) &&
+            bridgePageDuration > 0
+        ) {
+            // CCTV / Yangshipin live synthetic DVR: the bridge serves a synthetic-DVR
+            // VOD playlist whose nominal duration is bridgePageDuration (e.g. 2h).
+            // A page <video> element driven by HLS.js (such as on Yangshipin) has a
+            // sliding live-edge duration (~20s) that must NOT override the synthetic
+            // DVR duration.
+            mediaInfo.duration = bridgePageDuration;
+        } else if (
             this.mediaElement instanceof HTMLMediaElement &&
             Number.isFinite(this.mediaElement.duration) &&
             this.mediaElement.duration > 0

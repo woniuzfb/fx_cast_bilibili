@@ -67,6 +67,12 @@ function initCctvSender() {
         return video instanceof HTMLVideoElement ? video : undefined;
     }
 
+    function getCctvTitle(): string {
+        const raw = document.title || "";
+        const title = raw.split("_")[0].trim();
+        return title || "CCTV";
+    }
+
     function buildSenderOpts(
         streamReady: Promise<{ mediaUrl: string; userAgent?: string }>
     ): MediaSenderOpts {
@@ -85,13 +91,7 @@ function initCctvSender() {
                 return resolved;
             },
             mediaElement,
-            // Blank on purpose: the receiver's on-screen title and the popup's
-            // media title come from this field (the m3u8 itself carries no title),
-            // and CCTV page titles are long SEO strings. Empty string (not a
-            // space) keeps both blank — the popup's {#if mediaTitle} hides the
-            // whole block, and the nullish fallback at loadMedia never fires
-            // because "" is not nullish.
-            mediaTitle: "",
+            mediaTitle: getCctvTitle(),
             mediaContentType: "application/x-mpegURL",
             isVideo: true,
             // The page live player and synthetic VOD use unrelated clocks. Let the

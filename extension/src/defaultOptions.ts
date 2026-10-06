@@ -102,6 +102,8 @@ export interface Options {
     chromecastDashStartupPadding: boolean;
     /** Show verbose CCTV relay diagnostics. */
     cctvDebugEnabled: boolean;
+    /** Prefer official unencrypted DLNA live stream for Yangshipin instead of bridge WASM descrambler. */
+    yangshipinUseDlna: boolean;
     /** Enable Voice Edge BLE remote event consumption. */
     bleRemoteEnabled: boolean;
     /** Voice Edge BLE remote newline-delimited JSON event stream URL. */
@@ -173,6 +175,7 @@ export default {
     bilibiliDebugEnabled: false,
     chromecastDashStartupPadding: true,
     cctvDebugEnabled: false,
+    yangshipinUseDlna: false,
     bleRemoteEnabled: true,
     bleRemoteUrl: "http://127.0.0.1:5002/ble-remote/events",
     bleRemoteSeekBackwardSeconds: 30,

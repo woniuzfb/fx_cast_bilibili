@@ -1,4 +1,4 @@
-﻿Unicode True
+Unicode True
 SetCompressor /SOLID LZMA
 
 # Registry keys
@@ -77,7 +77,9 @@ Section
 
     # Main executable
     File "{{executableName}}"
-    File "{{bindingName}}"
+    {{#bindingNames}}
+    File "{{.}}"
+    {{/bindingNames}}
     File "{{manifestName}}"
 
     # Native manifest key
@@ -124,7 +126,9 @@ Section "uninstall"
     # Remove manifest and executable dir
     DeleteRegKey HKLM ${KEY_MANIFEST}
     Delete "$INSTDIR\{{executableName}}"
-    Delete "$INSTDIR\{{bindingName}}"
+    {{#bindingNames}}
+    Delete "$INSTDIR\{{.}}"
+    {{/bindingNames}}
     Delete "$INSTDIR\{{manifestName}}"
     RMDir $INSTDIR
 SectionEnd

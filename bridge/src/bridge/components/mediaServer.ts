@@ -12,6 +12,7 @@ import mime from "mime-types";
 import type { Messenger } from "../messaging";
 import { convertSrtToVtt } from "../lib/subtitles";
 import type { CctvDecryptDiagnostics } from "./cctvDecrypt";
+import type { YangshipinDecryptDiagnostics } from "./yangshipinDecrypt";
 
 export let mediaServer: http.Server | undefined;
 export let mediaServerRequestId: string | undefined;
@@ -3519,6 +3520,93 @@ function decryptCctvSegmentIsolated(
     });
 }
 
+interface IsolatedYangshipinDecryptResult {
+    body: Buffer;
+    diagnostics: YangshipinDecryptDiagnostics;
+}
+
+const YANGSHIPIN_DECRYPT_WORKER_SOURCE = `
+const { parentPort, workerData } = require("worker_threads");
+(async () => {
+  const decryptor = require(workerData.modulePath);
+  let diagnostics;
+  const body = decryptor.decryptYangshipinSegment(
+    Buffer.from(workerData.body),
+    (value) => { diagnostics = value; }
+  );
+  parentPort.postMessage({ body, diagnostics });
+})().catch((error) => {
+  parentPort.postMessage({
+    error: error && (error.stack || error.message) || String(error),
+  });
+});
+`;
+
+function decryptYangshipinSegmentIsolated(
+    input: Buffer,
+    timeoutMs: number
+): Promise<IsolatedYangshipinDecryptResult> {
+    return new Promise((resolve, reject) => {
+        const worker = new Worker(YANGSHIPIN_DECRYPT_WORKER_SOURCE, {
+            eval: true,
+            workerData: {
+                modulePath: path.join(__dirname, "yangshipinDecrypt.js"),
+                body: Buffer.from(input)
+            }
+        });
+        let settled = false;
+        const finish = (
+            error?: Error,
+            value?: IsolatedYangshipinDecryptResult
+        ) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            void worker.terminate();
+            if (error) reject(error);
+            else resolve(value!);
+        };
+        const timeout = setTimeout(
+            () =>
+                finish(
+                    new Error(
+                        `Yangshipin decrypt timed out after ${timeoutMs}ms`
+                    )
+                ),
+            timeoutMs
+        );
+        timeout.unref?.();
+        worker.once("message", message => {
+            if (message?.error) {
+                finish(new Error(String(message.error)));
+                return;
+            }
+            if (!message?.body || !message?.diagnostics) {
+                finish(
+                    new Error(
+                        "Yangshipin decrypt worker returned an invalid result"
+                    )
+                );
+                return;
+            }
+            finish(undefined, {
+                body: Buffer.from(message.body),
+                diagnostics: message.diagnostics as YangshipinDecryptDiagnostics
+            });
+        });
+        worker.once("error", error => finish(error));
+        worker.once("exit", code => {
+            if (!settled && code !== 0) {
+                finish(
+                    new Error(
+                        `Yangshipin decrypt worker exited with code ${code}`
+                    )
+                );
+            }
+        });
+    });
+}
+
 /**
  * Resolve the system ffmpeg binary (dash remux + segment validation). Unlike
  * the dash-remux resolution there is deliberately NO bare-"ffmpeg" PATH
@@ -3756,10 +3844,12 @@ async function startLiveHlsRelayServer(
         "User-Agent": userAgent || "Mozilla/5.0"
     };
 
-    const isPlaintextRelay =
+    const isYangshipinRelay =
         /yangshipin\.cn/i.test(referer) ||
         /ysp\.cctv\.cn/i.test(playlistUrl) ||
         /yangshipin\.cn/i.test(playlistUrl);
+
+    const isPlaintextRelay = isYangshipinRelay && !/_web/i.test(playlistUrl);
 
     // Pad runway state for this relay generation. The file lives in a private
     // temp dir: it is generated, served and removed with the relay.
@@ -4470,6 +4560,47 @@ async function startLiveHlsRelayServer(
                     encryptedBody: encryptedSnapshot
                 };
             }
+            if (isYangshipinRelay) {
+                const result = await decryptYangshipinSegmentIsolated(
+                    encryptedSnapshot,
+                    PIPELINE_DECRYPT_TIMEOUT_MS
+                );
+                if (!result.diagnostics.nativeAvailable) {
+                    throw new Error(
+                        "Yangshipin native descrambler (cmg_decrypt.node) is not available"
+                    );
+                }
+                const changedBytes = countChangedBytes(
+                    encryptedSnapshot,
+                    result.body
+                );
+                const validation = await ffmpegSegmentDecodesCleanly(
+                    result.body
+                );
+                if (validation && !validation.ok) {
+                    throw new Error(
+                        `ffmpeg decode validation failed: ${
+                            validation.detail ?? "unknown"
+                        }`
+                    );
+                }
+                if (!pipelineAlive()) throw new Error("relay replaced");
+                relayLog("pipeline segment ready", {
+                    sequence,
+                    bytes: result.body.length,
+                    slices: result.diagnostics.sliceNalCount,
+                    changedBytes,
+                    ffmpegValidated: validation?.ok === true,
+                    decodedDurationSeconds: validation?.durationSeconds,
+                    elapsedMs: Date.now() - startedAt
+                });
+                return {
+                    body: result.body,
+                    contentType: fetched.contentType,
+                    durationSeconds: validation?.durationSeconds,
+                    encryptedBody: encryptedSnapshot
+                };
+            }
             const result = await decryptCctvSegmentIsolated(
                 encryptedSnapshot,
                 PIPELINE_DECRYPT_TIMEOUT_MS
@@ -4964,6 +5095,29 @@ async function startLiveHlsRelayServer(
         let body: Buffer;
         if (isPlaintextRelay) {
             body = Buffer.concat(parts);
+        } else if (isYangshipinRelay) {
+            try {
+                const decrypted = await decryptYangshipinSegmentIsolated(
+                    Buffer.concat(parts),
+                    PIPELINE_DECRYPT_TIMEOUT_MS
+                );
+                if (!decrypted.diagnostics.nativeAvailable) {
+                    throw new Error(
+                        "Yangshipin native descrambler (cmg_decrypt.node) is not available"
+                    );
+                }
+                body = decrypted.body;
+            } catch (error) {
+                slot.failedReason = `slot backfill decrypt failed: ${
+                    error instanceof Error ? error.message : String(error)
+                }`;
+                relayLog("slot backfill failed", {
+                    slot: slotIndex,
+                    memberSequences: members,
+                    error: slot.failedReason
+                });
+                return;
+            }
         } else {
             try {
                 const decrypted = await decryptCctvSegmentIsolated(

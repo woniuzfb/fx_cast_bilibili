@@ -381,6 +381,24 @@
         }
     }
 
+    // Do not render an extra standalone title line if the receiver status line
+    // right above is already displaying this exact title.
+    $: isTitleAlreadyInStatus = Boolean(
+        mediaTitle &&
+            device?.status?.applications?.[0]?.statusText &&
+            (device.status.applications[0].statusText.trim() ===
+                mediaTitle.trim() ||
+                device.status.applications[0].statusText.includes(
+                    mediaTitle.trim()
+                ))
+    );
+    $: showMetadata = Boolean(
+        mediaTitle &&
+            (!isTitleAlreadyInStatus ||
+                Boolean(mediaImageSet) ||
+                Boolean(mediaSubtitle))
+    );
+
     let currentTime = 0;
     // Recompute reactively on every timeline / play-state change — not just
     // once at init. Written as an explicit call so Svelte tracks `timeline`
@@ -482,7 +500,7 @@
 </script>
 
 <div class="media">
-    {#if mediaTitle}
+    {#if showMetadata}
         <div class="media__metadata">
             {#if mediaImageSet}
                 <img class="media__image" srcset={mediaImageSet} alt="" />
