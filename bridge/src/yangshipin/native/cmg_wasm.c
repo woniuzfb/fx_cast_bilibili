@@ -2,6 +2,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "cmg_wasm.h"
+
 #if defined(_MSC_VER)
 #define UNLIKELY(x) (x)
 #define LIKELY(x) (x)
