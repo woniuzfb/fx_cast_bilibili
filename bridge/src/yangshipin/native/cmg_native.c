@@ -1,11 +1,16 @@
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <pthread.h>
+#include <sys/time.h>
+#endif
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 
 #include "cmg_wasm.h"
 #include "cmg_memory_init.h"
@@ -46,7 +51,23 @@ typedef struct cmg_emval_handle {
   u32 destructor_address;
 } cmg_emval_handle;
 
+#if defined(_WIN32)
+static SRWLOCK g_lock = SRWLOCK_INIT;
+static void cmg_mutex_lock(void) {
+    AcquireSRWLockExclusive(&g_lock);
+}
+static void cmg_mutex_unlock(void) {
+    ReleaseSRWLockExclusive(&g_lock);
+}
+#else
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static void cmg_mutex_lock(void) {
+    pthread_mutex_lock(&g_lock);
+}
+static void cmg_mutex_unlock(void) {
+    pthread_mutex_unlock(&g_lock);
+}
+#endif
 static int g_initialized;
 static wasm_rt_memory_t g_memory;
 static wasm_rt_table_t g_table;
@@ -383,12 +404,21 @@ static void cmg_log_heap_snapshot(const char* label) {
 }
 
 static uint64_t cmg_now_ms64(void) {
-  struct timeval now;
   if (g_forced_clock_ms != 0u) {
     return g_forced_clock_ms;
   }
+#if defined(_WIN32)
+  FILETIME ft;
+  ULARGE_INTEGER li;
+  GetSystemTimeAsFileTime(&ft);
+  li.LowPart = ft.dwLowDateTime;
+  li.HighPart = ft.dwHighDateTime;
+  return (uint64_t) ((li.QuadPart - 116444736000000000ULL) / 10000ULL);
+#else
+  struct timeval now;
   gettimeofday(&now, NULL);
   return (uint64_t) now.tv_sec * 1000u + (uint64_t) now.tv_usec / 1000u;
+#endif
 }
 
 static u32 env_now_ms(void) {
@@ -1030,7 +1060,7 @@ static u32 cmg_replay_official_trace_locked(const char* native_trace,
 
 int cmg_native_init(const char* location_href, const char* player_tag) {
     int res = 0;
-    pthread_mutex_lock(&g_lock);
+    cmg_mutex_lock();
     if (location_href != NULL) {
         snprintf(g_forced_location_href, sizeof(g_forced_location_href), "%s", location_href);
     }
@@ -1038,18 +1068,18 @@ int cmg_native_init(const char* location_href, const char* player_tag) {
         snprintf(g_forced_player_tag, sizeof(g_forced_player_tag), "%s", player_tag);
     }
     res = cmg_init_locked();
-    pthread_mutex_unlock(&g_lock);
+    cmg_mutex_unlock();
     return res;
 }
 
 int cmg_native_update(void) {
     u32 tag = 0;
-    pthread_mutex_lock(&g_lock);
+    cmg_mutex_lock();
     if (cmg_init_locked() && g_player_active) {
         tag = cmg_update_player_with_fresh_tag();
         g_update_tag = tag;
     }
-    pthread_mutex_unlock(&g_lock);
+    cmg_mutex_unlock();
     return (int)tag;
 }
 
@@ -1065,9 +1095,9 @@ int cmg_native_decode_nal_in_place(uint8_t* buffer, int offset, int length, int 
 
     if (buffer == NULL || offset < 0 || length <= 0) return -1;
 
-    pthread_mutex_lock(&g_lock);
+    cmg_mutex_lock();
     if (!cmg_init_locked() || !g_player_active) {
-        pthread_mutex_unlock(&g_lock);
+        cmg_mutex_unlock();
         return -1;
     }
 
@@ -1109,7 +1139,7 @@ int cmg_native_decode_nal_in_place(uint8_t* buffer, int offset, int length, int 
     data_pointer = cmg_pointer(data_address, data_allocation_size);
     tag_pointer = cmg_pointer(tag_address, tag_length);
     if (data_pointer == NULL || tag_pointer == NULL) {
-        pthread_mutex_unlock(&g_lock);
+        cmg_mutex_unlock();
         return -1;
     }
     memcpy(data_pointer, buffer + offset, (size_t) length);
@@ -1146,7 +1176,7 @@ int cmg_native_decode_nal_in_place(uint8_t* buffer, int offset, int length, int 
     } else {
         result = -1;
     }
-    pthread_mutex_unlock(&g_lock);
+    cmg_mutex_unlock();
     return result;
 }
 

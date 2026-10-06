@@ -2,9 +2,14 @@
 #include <math.h>
 #include <string.h>
 
-#include "cmg_wasm.h"
+#if defined(_MSC_VER)
+#define UNLIKELY(x) (x)
+#define LIKELY(x) (x)
+#define __builtin_memcpy memcpy
+#else
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define LIKELY(x) __builtin_expect(!!(x), 1)
+#endif
 
 #define TRAP(x) (wasm_rt_trap(WASM_RT_TRAP_##x), 0)
 
@@ -100,12 +105,67 @@ DEFINE_STORE(i64_store8, u8, u64);
 DEFINE_STORE(i64_store16, u16, u64);
 DEFINE_STORE(i64_store32, u32, u64);
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+
+static inline uint32_t wasm_i32_clz(uint32_t x) {
+    unsigned long index;
+    return _BitScanReverse(&index, x) ? (31 - index) : 32;
+}
+
+static inline uint32_t wasm_i64_clz(uint64_t x) {
+#if defined(_WIN64)
+    unsigned long index;
+    return _BitScanReverse64(&index, x) ? (63 - index) : 64;
+#else
+    uint32_t hi = (uint32_t)(x >> 32);
+    if (hi) return wasm_i32_clz(hi);
+    return 32 + wasm_i32_clz((uint32_t)x);
+#endif
+}
+
+static inline uint32_t wasm_i32_ctz(uint32_t x) {
+    unsigned long index;
+    return _BitScanForward(&index, x) ? index : 32;
+}
+
+static inline uint32_t wasm_i64_ctz(uint64_t x) {
+#if defined(_WIN64)
+    unsigned long index;
+    return _BitScanForward64(&index, x) ? index : 64;
+#else
+    uint32_t lo = (uint32_t)x;
+    if (lo) return wasm_i32_ctz(lo);
+    return 32 + wasm_i32_ctz((uint32_t)(x >> 32));
+#endif
+}
+
+static inline uint32_t wasm_i32_popcnt(uint32_t x) {
+    return __popcnt(x);
+}
+
+static inline uint32_t wasm_i64_popcnt(uint64_t x) {
+#if defined(_WIN64)
+    return (uint32_t)__popcnt64(x);
+#else
+    return __popcnt((uint32_t)x) + __popcnt((uint32_t)(x >> 32));
+#endif
+}
+
+#define I32_CLZ(x) wasm_i32_clz(x)
+#define I64_CLZ(x) wasm_i64_clz(x)
+#define I32_CTZ(x) wasm_i32_ctz(x)
+#define I64_CTZ(x) wasm_i64_ctz(x)
+#define I32_POPCNT(x) wasm_i32_popcnt(x)
+#define I64_POPCNT(x) wasm_i64_popcnt(x)
+#else
 #define I32_CLZ(x) ((x) ? __builtin_clz(x) : 32)
 #define I64_CLZ(x) ((x) ? __builtin_clzll(x) : 64)
 #define I32_CTZ(x) ((x) ? __builtin_ctz(x) : 32)
 #define I64_CTZ(x) ((x) ? __builtin_ctzll(x) : 64)
 #define I32_POPCNT(x) (__builtin_popcount(x))
 #define I64_POPCNT(x) (__builtin_popcountll(x))
+#endif
 
 #define DIV_S(ut, min, x, y)                                 \
    ((UNLIKELY((y) == 0)) ?                TRAP(DIV_BY_ZERO)  \

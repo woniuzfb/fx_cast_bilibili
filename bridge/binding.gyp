@@ -96,9 +96,10 @@
                         "msvs_settings": {
                             "VCCLCompilerTool": {
                                 "ExceptionHandling": 1,
-                                "AdditionalOptions": ["/std:c++20"],
+                                "AdditionalOptions": ["/std:c++20", "/bigobj"],
                             },
                         },
+                        "defines": ["UNICODE", "_UNICODE", "WIN32_LEAN_AND_MEAN"],
                     },
                 ],
             ],

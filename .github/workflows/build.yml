@@ -27,12 +27,13 @@ jobs:
 
     build:
         needs: prepare-release
-        if: ${{ !failure() && !cancelled() }}
+        if: ${{ always() && !cancelled() && needs.prepare-release.result != 'failure' }}
         runs-on: ${{ matrix.os }}
         permissions:
             contents: write
 
         strategy:
+            fail-fast: false
             matrix:
                 os: [macos-latest, macos-15-intel, ubuntu-latest, windows-2022]
                 node-version: [22.x]
@@ -138,7 +139,7 @@ jobs:
 
     build-extension:
         needs: prepare-release
-        if: ${{ !failure() && !cancelled() }}
+        if: ${{ always() && !cancelled() && needs.prepare-release.result != 'failure' }}
         runs-on: ubuntu-latest
         permissions:
             contents: write

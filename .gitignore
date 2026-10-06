@@ -7,3 +7,4 @@ test/ChromeProfile/
 .idea/
 *.iml
 .DS_Store
+logs_*/

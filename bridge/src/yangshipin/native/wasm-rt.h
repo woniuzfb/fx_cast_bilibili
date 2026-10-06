@@ -124,11 +124,15 @@ typedef struct {
   uint32_t size;
 } wasm_rt_table_t;
 
-/** Stop execution immediately and jump back to the call to `wasm_rt_try`.
- *  The result of `wasm_rt_try` will be the provided trap reason.
- *
- *  This is typically called by the generated code, and not the embedder. */
-extern void wasm_rt_trap(wasm_rt_trap_t) __attribute__((noreturn));
+#if defined(_MSC_VER)
+#define WASM_RT_NORETURN __declspec(noreturn)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WASM_RT_NORETURN __attribute__((noreturn))
+#else
+#define WASM_RT_NORETURN
+#endif
+
+extern WASM_RT_NORETURN void wasm_rt_trap(wasm_rt_trap_t);
 
 /** Register a function type with the given signature. The returned function
  * index is guaranteed to be the same for all calls with the same signature.
