@@ -47,11 +47,13 @@ async function bundle(outfile, workDir) {
         entry,
         `export {
             isYangshipinLivePage,
+            isYangshipinHookPage,
             sanitizeLiveInfoUrl,
             getYangshipinPlaylistRank,
             getYangshipinStreamKey,
             getYangshipinChannelName,
-            getYangshipinChannelInfo
+            getYangshipinChannelInfo,
+            sanitizeH5CookieHeader
         } from ${JSON.stringify(yangshipinLiveSource)};
         export { createYangshipinCKey } from ${JSON.stringify(
             yangshipinApiPath
@@ -142,12 +144,14 @@ async function main() {
         await bundle(outfile, workDir);
         const {
             isYangshipinLivePage,
+            isYangshipinHookPage,
             sanitizeLiveInfoUrl,
             getYangshipinPlaylistRank,
             getYangshipinStreamKey,
             getYangshipinChannelName,
             getYangshipinChannelInfo,
-            createYangshipinCKey
+            createYangshipinCKey,
+            sanitizeH5CookieHeader
         } = require(outfile);
 
         console.log("Yangshipin default quality & sanitizer tests");
@@ -191,6 +195,28 @@ async function main() {
             isYangshipinLivePage(
                 "https://www.bilibili.com/video/BV1xx411c7mD"
             ) === false
+        );
+
+        // 1.1 isYangshipinHookPage tests (covers any Yangshipin page)
+        check(
+            "isYangshipinHookPage: matches PC homepage",
+            isYangshipinHookPage("https://www.yangshipin.cn/") === true
+        );
+        check(
+            "isYangshipinHookPage: matches PC live detail",
+            isYangshipinHookPage(
+                "https://www.yangshipin.cn/live/detail?pid=610003406"
+            ) === true
+        );
+        check(
+            "isYangshipinHookPage: matches mobile video page",
+            isYangshipinHookPage(
+                "https://w.yangshipin.cn/video?type=2&pid=610003406&vid=2050639703"
+            ) === true
+        );
+        check(
+            "isYangshipinHookPage: rejects non-Yangshipin URL",
+            isYangshipinHookPage("https://www.bilibili.com/") === false
         );
 
         // Channel name lookup tests
@@ -355,6 +381,60 @@ async function main() {
         check(
             "streamKey: strips _web and _dlna suffixes to compare stream identity",
             webStreamKey === "202724930" && webStreamKey === dlnaStreamKey
+        );
+
+        // 5. sanitizeH5CookieHeader tests
+        const stalePcCookie =
+            "guid=muus8qwb; vplatform=109; appid=1400867594; pc_version=1.1.16; ysp_uinfo_pc=test; vusession=oldSes; endtime=1700000000; uinfo_vuid=123";
+        const sanitized = sanitizeH5CookieHeader(stalePcCookie, 1750000000000);
+        check(
+            "sanitizeH5CookieHeader: modified is true for PC conflict and expired session",
+            sanitized.modified === true
+        );
+        check(
+            "sanitizeH5CookieHeader: rewrites vplatform to 2",
+            sanitized.cookie.includes("vplatform=2")
+        );
+        check(
+            "sanitizeH5CookieHeader: rewrites appid to 1400227916",
+            sanitized.cookie.includes("appid=1400227916")
+        );
+        check(
+            "sanitizeH5CookieHeader: removes pc_version",
+            !sanitized.cookie.includes("pc_version")
+        );
+        check(
+            "sanitizeH5CookieHeader: removes ysp_uinfo_pc",
+            !sanitized.cookie.includes("ysp_uinfo_pc")
+        );
+        check(
+            "sanitizeH5CookieHeader: strips expired vusession",
+            !sanitized.cookie.includes("vusession")
+        );
+        check(
+            "sanitizeH5CookieHeader: strips expired endtime",
+            !sanitized.cookie.includes("endtime")
+        );
+        check(
+            "sanitizeH5CookieHeader: preserves unexpired guid and uinfo_vuid",
+            sanitized.cookie.includes("guid=muus8qwb") &&
+                sanitized.cookie.includes("uinfo_vuid=123")
+        );
+
+        // Valid H5 cookie not expired
+        const validH5Cookie =
+            "guid=muus8qwb; vplatform=2; appid=1400227916; vusession=validSes; endtime=1800000000";
+        const validSanitized = sanitizeH5CookieHeader(
+            validH5Cookie,
+            1700000000000
+        );
+        check(
+            "sanitizeH5CookieHeader: clean valid H5 cookie unmodified",
+            validSanitized.modified === false
+        );
+        check(
+            "sanitizeH5CookieHeader: preserves valid vusession",
+            validSanitized.cookie.includes("vusession=validSes")
         );
 
         console.log(`\n${pass}/${pass + fail} checks passed`);

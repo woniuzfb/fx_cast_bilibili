@@ -3,7 +3,7 @@
     "compilerOptions": {
         "lib": ["ESNext", "DOM", "DOM.Iterable"],
         "skipLibCheck": true,
-        "moduleResolution": "node",
+        "moduleResolution": "bundler",
         "sourceMap": true,
         "module": "esnext"
     }

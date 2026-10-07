@@ -27,8 +27,15 @@ export {
 export const YANGSHIPIN_LIVE_PAGE_RE =
     /^https:\/\/(?:w|m|www)\.yangshipin\.cn\/(?:video\?(?=.*(?:type=2|pid=))|tv(?:\/|\?|$)|live(?:\/|\?|$))/i;
 
+export const YANGSHIPIN_HOOK_PAGE_RE =
+    /^https:\/\/(?:w|m|www)\.yangshipin\.cn(?:\/|$)/i;
+
 export function isYangshipinLivePage(url?: string): boolean {
     return typeof url === "string" && YANGSHIPIN_LIVE_PAGE_RE.test(url);
+}
+
+export function isYangshipinHookPage(url?: string): boolean {
+    return typeof url === "string" && YANGSHIPIN_HOOK_PAGE_RE.test(url);
 }
 
 /** Max time to wait for the player to request an m3u8 playlist. */
@@ -414,6 +421,257 @@ function installYangshipinPageHook() {
     } catch {
         /* player hook unavailable */
     }
+
+    // 5. Cross-platform cookie protection & session persistence (PC vs Mobile isolation)
+    try {
+        const host = window.location.hostname;
+        const isMobileH5 =
+            host === "w.yangshipin.cn" || host === "m.yangshipin.cn";
+        const isPcWeb = host === "www.yangshipin.cn";
+        const VAULT_KEY = "__fxcast_ysp_mobile_session";
+
+        if (isMobileH5) {
+            const deleteCookie = (name: string) => {
+                const domains = [
+                    host,
+                    "." + host,
+                    "yangshipin.cn",
+                    ".yangshipin.cn"
+                ];
+                for (const d of domains) {
+                    document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=${d}; path=/`;
+                }
+                document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+                document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+            };
+
+            const parseCookies = (): Record<string, string> => {
+                const map: Record<string, string> = {};
+                const str = document.cookie || "";
+                for (const item of str.split(";")) {
+                    const eq = item.indexOf("=");
+                    if (eq > 0) {
+                        const k = decodeURIComponent(item.slice(0, eq).trim());
+                        const v = decodeURIComponent(item.slice(eq + 1).trim());
+                        map[k] = v;
+                    }
+                }
+                return map;
+            };
+
+            const sessionKeys = [
+                "vusession",
+                "vusession_backup",
+                "vuserid",
+                "vuserid_backup",
+                "openid",
+                "accesstoken",
+                "access_token",
+                "refreshtoken",
+                "endtime",
+                "expiretime",
+                "uinfo_vuid",
+                "uinfo_logintype",
+                "uinfo_csrf",
+                "yspopenid",
+                "ysptokenappid",
+                "yspunionid"
+            ];
+
+            const cookies = parseCookies();
+            const endtimeSec = Number(cookies["endtime"]);
+            const isSessionExpired =
+                !isNaN(endtimeSec) &&
+                endtimeSec > 0 &&
+                endtimeSec * 1000 < Date.now();
+
+            if (isSessionExpired) {
+                try {
+                    window.localStorage?.removeItem(VAULT_KEY);
+                } catch {
+                    /* ignore */
+                }
+                for (const k of sessionKeys) {
+                    deleteCookie(k);
+                }
+            } else {
+                let vault: Record<string, string> | null = null;
+                try {
+                    const raw = window.localStorage?.getItem(VAULT_KEY);
+                    if (raw) {
+                        vault = JSON.parse(raw);
+                        const vEnd = Number(vault?.["endtime"]);
+                        if (
+                            !isNaN(vEnd) &&
+                            vEnd > 0 &&
+                            vEnd * 1000 < Date.now()
+                        ) {
+                            vault = null;
+                            window.localStorage?.removeItem(VAULT_KEY);
+                        }
+                    }
+                } catch {
+                    /* ignore */
+                }
+
+                const hasCookieSession = Boolean(
+                    cookies["vusession"] && cookies["vuserid"]
+                );
+                const hasVaultSession = Boolean(
+                    vault && vault["vusession"] && vault["vuserid"]
+                );
+
+                if (!hasCookieSession && hasVaultSession && vault) {
+                    // Mobile session was wiped (e.g. by visiting PC) -> RESTORE FROM VAULT
+                    const vEndSec =
+                        Number(vault["endtime"]) ||
+                        Math.floor(Date.now() / 1000) + 86400;
+                    const expStr = new Date(vEndSec * 1000).toUTCString();
+                    for (const [k, v] of Object.entries(vault)) {
+                        document.cookie = `${k}=${encodeURIComponent(
+                            v
+                        )}; expires=${expStr}; domain=.yangshipin.cn; path=/`;
+                    }
+                    document.cookie = `vplatform=2; expires=${expStr}; domain=.yangshipin.cn; path=/`;
+                    document.cookie = `appid=1400227916; expires=${expStr}; domain=.yangshipin.cn; path=/`;
+                } else if (hasCookieSession) {
+                    try {
+                        const toSave: Record<string, string> = {};
+                        for (const k of sessionKeys) {
+                            if (cookies[k]) toSave[k] = cookies[k];
+                        }
+                        if (Object.keys(toSave).length > 0) {
+                            window.localStorage?.setItem(
+                                VAULT_KEY,
+                                JSON.stringify(toSave)
+                            );
+                        }
+                    } catch {
+                        /* ignore */
+                    }
+                }
+
+                const hasPcConflict =
+                    cookies["vplatform"] === "109" ||
+                    cookies["appid"] === "1400867594" ||
+                    Boolean(cookies["pc_version"]) ||
+                    Boolean(cookies["ysp_uinfo_pc"]);
+
+                if (hasPcConflict) {
+                    deleteCookie("pc_version");
+                    deleteCookie("ysp_uinfo_pc");
+                    const validEnd =
+                        Number(cookies["endtime"]) ||
+                        (vault && Number(vault["endtime"])) ||
+                        Math.floor(Date.now() / 1000) + 86400;
+                    const expStr = new Date(validEnd * 1000).toUTCString();
+                    document.cookie = `vplatform=2; expires=${expStr}; domain=.yangshipin.cn; path=/`;
+                    document.cookie = `appid=1400227916; expires=${expStr}; domain=.yangshipin.cn; path=/`;
+                }
+            }
+
+            try {
+                const origFetch = window.fetch;
+                if (typeof origFetch === "function") {
+                    window.fetch = function (input: any, init?: any) {
+                        const urlStr =
+                            typeof input === "string"
+                                ? input
+                                : input?.url || "";
+                        if (
+                            urlStr.includes("auth_logout") ||
+                            urlStr.includes("account-signout")
+                        ) {
+                            try {
+                                window.localStorage?.removeItem(VAULT_KEY);
+                            } catch {
+                                /* ignore */
+                            }
+                        }
+                        return Reflect.apply(origFetch, window, [input, init]);
+                    };
+                }
+            } catch {
+                /* fetch hook unavailable */
+            }
+        } else if (isPcWeb) {
+            try {
+                const proto = Document.prototype;
+                const desc =
+                    Object.getOwnPropertyDescriptor(proto, "cookie") ||
+                    Object.getOwnPropertyDescriptor(
+                        HTMLDocument.prototype,
+                        "cookie"
+                    );
+                if (desc && desc.get && desc.set) {
+                    const origGet = desc.get;
+                    const origSet = desc.set;
+
+                    Object.defineProperty(document, "cookie", {
+                        configurable: true,
+                        enumerable: true,
+                        get: function () {
+                            const raw = origGet.call(this) || "";
+                            if (
+                                raw.indexOf("ysp_strAccesstoken") === -1 &&
+                                raw.indexOf("uinfo_csrf") !== -1
+                            ) {
+                                return raw
+                                    .split(";")
+                                    .map((s: string) => s.trim())
+                                    .filter(
+                                        (s: string) =>
+                                            !s.startsWith("uinfo_csrf=")
+                                    )
+                                    .join("; ");
+                            }
+                            return raw;
+                        },
+                        set: function (val: any) {
+                            if (typeof val === "string") {
+                                const isDeletion =
+                                    /expires=(?:Thu, 01 Jan 1970|1970)/i.test(
+                                        val
+                                    );
+                                if (isDeletion) {
+                                    const match = val.match(/^\s*([^=;]+)=/);
+                                    const key = match ? match[1].trim() : "";
+                                    const protectedMobileKeys = [
+                                        "vusession",
+                                        "vusession_backup",
+                                        "vuserid",
+                                        "vuserid_backup",
+                                        "openid",
+                                        "accesstoken",
+                                        "access_token",
+                                        "refreshtoken",
+                                        "uinfo_vuid",
+                                        "uinfo_csrf"
+                                    ];
+                                    const current = origGet.call(this) || "";
+                                    const hasPcAccount =
+                                        current.indexOf(
+                                            "ysp_strAccesstoken"
+                                        ) !== -1;
+                                    if (
+                                        !hasPcAccount &&
+                                        protectedMobileKeys.includes(key)
+                                    ) {
+                                        return;
+                                    }
+                                }
+                            }
+                            return origSet.call(this, val);
+                        }
+                    });
+                }
+            } catch {
+                /* pc cookie guard unavailable */
+            }
+        }
+    } catch {
+        /* cookie hook unavailable */
+    }
 }
 
 async function injectYangshipinHook(tabId: number) {
@@ -701,13 +959,17 @@ function initMediaPlaylistCapture() {
 
     void browser.tabs.query({}).then(tabs => {
         for (const tab of tabs) {
-            if (tab.id !== undefined && isYangshipinLivePage(tab.url)) {
-                yangshipinLiveTabs.add(tab.id);
-                const pid = extractYangshipinPid(tab.url);
-                if (pid) {
-                    pidByTab.set(tab.id, pid);
+            if (tab.id !== undefined) {
+                if (isYangshipinHookPage(tab.url)) {
+                    void injectYangshipinHook(tab.id);
                 }
-                void injectYangshipinHook(tab.id);
+                if (isYangshipinLivePage(tab.url)) {
+                    yangshipinLiveTabs.add(tab.id);
+                    const pid = extractYangshipinPid(tab.url);
+                    if (pid) {
+                        pidByTab.set(tab.id, pid);
+                    }
+                }
             }
         }
     });
@@ -730,9 +992,12 @@ function initMediaPlaylistCapture() {
                 capturedMediaByTab.delete(tabId);
             }
         }
-        if (isYangshipinLivePage(changeInfo.url ?? tab.url)) {
-            yangshipinLiveTabs.add(tabId);
+        const effectiveUrl = changeInfo.url ?? tab.url;
+        if (isYangshipinHookPage(effectiveUrl)) {
             void injectYangshipinHook(tabId);
+        }
+        if (isYangshipinLivePage(effectiveUrl)) {
+            yangshipinLiveTabs.add(tabId);
         } else if (changeInfo.url !== undefined) {
             yangshipinLiveTabs.delete(tabId);
             pidByTab.delete(tabId);
@@ -740,13 +1005,17 @@ function initMediaPlaylistCapture() {
     });
 
     browser.webNavigation.onCommitted.addListener(details => {
-        if (details.frameId === 0 && isYangshipinLivePage(details.url)) {
-            yangshipinLiveTabs.add(details.tabId);
-            const pid = extractYangshipinPid(details.url);
-            if (pid) {
-                pidByTab.set(details.tabId, pid);
+        if (details.frameId === 0) {
+            if (isYangshipinHookPage(details.url)) {
+                void injectYangshipinHook(details.tabId);
             }
-            void injectYangshipinHook(details.tabId);
+            if (isYangshipinLivePage(details.url)) {
+                yangshipinLiveTabs.add(details.tabId);
+                const pid = extractYangshipinPid(details.url);
+                if (pid) {
+                    pidByTab.set(details.tabId, pid);
+                }
+            }
         }
     });
 
@@ -911,8 +1180,159 @@ async function resolveLiveStreamUrl(
     }
 }
 
+/**
+ * Sanitize cookie string for mobile H5 requests (w.yangshipin.cn / m.yangshipin.cn).
+ * Strips conflicting PC station markers (vplatform: 109, appid: 1400867594, pc_version)
+ * and expired session tokens.
+ */
+export function sanitizeH5CookieHeader(
+    cookieStr: string,
+    nowMs: number = Date.now()
+): { cookie: string; modified: boolean } {
+    if (!cookieStr) return { cookie: cookieStr, modified: false };
+
+    const cookiePairs = cookieStr
+        .split(";")
+        .map(s => s.trim())
+        .filter(Boolean);
+    const cookieMap = new Map<string, string>();
+    for (const pair of cookiePairs) {
+        const eq = pair.indexOf("=");
+        if (eq > 0) {
+            cookieMap.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+        }
+    }
+
+    let modified = false;
+
+    // 1. Sanitize PC platform / appid
+    if (cookieMap.get("vplatform") === "109") {
+        cookieMap.set("vplatform", "2");
+        modified = true;
+    }
+    if (cookieMap.get("appid") === "1400867594") {
+        cookieMap.set("appid", "1400227916");
+        modified = true;
+    }
+    if (cookieMap.has("pc_version")) {
+        cookieMap.delete("pc_version");
+        modified = true;
+    }
+    if (cookieMap.has("ysp_uinfo_pc")) {
+        cookieMap.delete("ysp_uinfo_pc");
+        modified = true;
+    }
+
+    // 2. Check expired session
+    const endtimeStr = cookieMap.get("endtime");
+    if (endtimeStr) {
+        const endtimeSec = Number(endtimeStr);
+        if (!isNaN(endtimeSec) && endtimeSec * 1000 < nowMs) {
+            const expiredKeys = [
+                "vusession",
+                "vusession_backup",
+                "vuserid",
+                "vuserid_backup",
+                "openid",
+                "accesstoken",
+                "access_token",
+                "refreshtoken",
+                "endtime",
+                "expiretime"
+            ];
+            for (const k of expiredKeys) {
+                if (cookieMap.has(k)) {
+                    cookieMap.delete(k);
+                    modified = true;
+                }
+            }
+        }
+    }
+
+    if (modified) {
+        const newCookieStr = Array.from(cookieMap.entries())
+            .map(([k, v]) => `${k}=${v}`)
+            .join("; ");
+        return { cookie: newCookieStr, modified: true };
+    }
+    return { cookie: cookieStr, modified: false };
+}
+
+/**
+ * Intercept requests to h5access.yangshipin.cn originating from mobile H5 pages
+ * (w.yangshipin.cn / m.yangshipin.cn) and sanitize stale/conflicting PC cookies.
+ */
+function initH5AccessCookieSanitizer() {
+    browser.webRequest.onBeforeSendHeaders.addListener(
+        details => {
+            try {
+                const reqHeaders = details.requestHeaders;
+                if (!reqHeaders) return;
+
+                const originHeader = reqHeaders.find(
+                    h => h.name.toLowerCase() === "origin"
+                )?.value;
+                const refererHeader = reqHeaders.find(
+                    h => h.name.toLowerCase() === "referer"
+                )?.value;
+                const documentUrl = (details as any).documentUrl as
+                    | string
+                    | undefined;
+                const originUrl = (details as any).originUrl as
+                    | string
+                    | undefined;
+
+                const isFromH5 =
+                    (originHeader &&
+                        /https?:\/\/(?:w|m)\.yangshipin\.cn/i.test(
+                            originHeader
+                        )) ||
+                    (refererHeader &&
+                        /https?:\/\/(?:w|m)\.yangshipin\.cn/i.test(
+                            refererHeader
+                        )) ||
+                    (documentUrl &&
+                        /https?:\/\/(?:w|m)\.yangshipin\.cn/i.test(
+                            documentUrl
+                        )) ||
+                    (originUrl &&
+                        /https?:\/\/(?:w|m)\.yangshipin\.cn/i.test(originUrl));
+
+                if (!isFromH5) return;
+
+                const cookieHeader = reqHeaders.find(
+                    h => h.name.toLowerCase() === "cookie"
+                );
+                if (!cookieHeader || !cookieHeader.value) return;
+
+                const { cookie, modified } = sanitizeH5CookieHeader(
+                    cookieHeader.value
+                );
+                if (modified) {
+                    cookieHeader.value = cookie;
+                    logger.info(
+                        "Yangshipin: sanitized H5 access cookie header",
+                        {
+                            url: details.url,
+                            tabId: details.tabId
+                        }
+                    );
+                    return { requestHeaders: reqHeaders };
+                }
+            } catch (err) {
+                logger.warn("Yangshipin: error in cookie sanitizer", err);
+            }
+        },
+        {
+            urls: ["*://h5access.yangshipin.cn/*"]
+        },
+        ["blocking", "requestHeaders"]
+    );
+}
+
 export function initYangshipinLive() {
     initLiveInfoRequestSanitizer();
+    initH5AccessCookieSanitizer();
     initMediaPlaylistCapture();
 
     browser.runtime.onMessage.addListener((message, sender) => {
