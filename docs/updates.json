@@ -61,6 +61,11 @@
                     "version": "0.2.7",
                     "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.7/fx_cast_bilibili-0.2.7.xpi",
                     "update_hash": "sha256:de10d8f9f4efa9b06a59e54427a8e60d38af09e6a0c8ee87c18c8457523d9930"
+                },
+                {
+                    "version": "0.2.8",
+                    "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.8/fx_cast_bilibili-0.2.8.xpi",
+                    "update_hash": "sha256:f678534719883a83e3027a6acaaa9180a205c10ab785771f90c293676951cb71"
                 }
             ]
         }
@@ -459,6 +464,39 @@
                         "x64": {
                             "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.7/fx_cast_bilibili_bridge-0.2.7-x64.rpm",
                             "update_hash": "sha256:13dd3a4bb9f4236839ec436b2b99460de33e8f37f4217f5106a35f6d8ea4192f"
+                        }
+                    }
+                }
+            },
+            {
+                "version": "v0.2.8",
+                "platforms": {
+                    "mac": {
+                        "arm64": {
+                            "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.8/fx_cast_bilibili_bridge-0.2.8-arm64.pkg",
+                            "update_hash": "sha256:fd065d9e211f1026a1d39f035d8741cd1e38d806a279f1fd196a8a1debb061fa"
+                        },
+                        "x64": {
+                            "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.8/fx_cast_bilibili_bridge-0.2.8-x64.pkg",
+                            "update_hash": "sha256:111abd929557e32ce391ece43d2b0e3ba4fea3be5115c506c335e860f05f88c6"
+                        }
+                    },
+                    "win": {
+                        "x64": {
+                            "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.8/fx_cast_bilibili_bridge-0.2.8-x64.exe",
+                            "update_hash": "sha256:8408d74b44ade2839019efbf0deb5490ad06c915e963c7d15aa8b68a0ba446a0"
+                        }
+                    },
+                    "linux-deb": {
+                        "x64": {
+                            "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.8/fx_cast_bilibili_bridge-0.2.8-x64.deb",
+                            "update_hash": "sha256:46c2cf5794934f461f326375a1f489547c973d937edc435237746df00478374d"
+                        }
+                    },
+                    "linux-rpm": {
+                        "x64": {
+                            "update_link": "https://github.com/woniuzfb/fx_cast_bilibili/releases/download/v0.2.8/fx_cast_bilibili_bridge-0.2.8-x64.rpm",
+                            "update_hash": "sha256:cad8d6e5fb70d90bcf4b6f9057306310729243439c27b02d3bc9f76dd20a34b4"
                         }
                     }
                 }
