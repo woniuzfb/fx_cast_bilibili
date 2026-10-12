@@ -736,5 +736,49 @@
     },
     "optionsChromecastDashStartupPaddingDescription": {
         "message": "改善部分 Chromecast 接收端的 DASH 起播兼容性。排查播放或跳转问题时可关闭。"
+    },
+    "optionsYangshipinSessionIsolation": {
+        "message": "央视频：PC 与移动端会话隔离",
+        "description": "央视频网络层会话隔离开关的复选框标签。"
+    },
+    "optionsYangshipinSessionIsolationDescription": {
+        "message": "将 PC（www）与移动端（w/m）央视频凭据分别保存在扩展管理的独立分区中，并从浏览器 Cookie 罐中移除。由于这些凭据不再位于 Cookie 罐，关闭该开关等价于登出一次。",
+        "description": "央视频会话隔离开关的说明。"
+    },
+    "optionsYangshipinSessionCategoryName": {
+        "message": "央视频会话",
+        "description": "央视频会话工具所属的设置分类。"
+    },
+    "optionsYangshipinSessionCategoryDescription": {
+        "message": "查看或重置由扩展管理的央视频隔离凭据。",
+        "description": "央视频会话工具分类的说明。"
+    },
+    "optionsYangshipinClearSession": {
+        "message": "清除央视频会话",
+        "description": "清除央视频隔离凭据的按钮。"
+    },
+    "optionsYangshipinClearSessionDescription": {
+        "message": "删除两端分区的隔离凭据与其墓碑。下一次打开央视频页面时处于未登录状态。",
+        "description": "清除央视频会话按钮的说明。"
+    },
+    "optionsYangshipinRerunBaseline": {
+        "message": "重新执行基线清洗",
+        "description": "重新触发央视频基线清洗的按钮。"
+    },
+    "optionsYangshipinRerunBaselineDescription": {
+        "message": "重新执行基线会清除浏览器 Cookie 罐中残留的央视频 Cookie，并需要重新登录一次。",
+        "description": "重新执行基线按钮的说明。"
+    },
+    "optionsYangshipinActionDone": {
+        "message": "已完成。",
+        "description": "央视频会话操作完成后的简短提示。"
+    },
+    "optionsYangshipinDiagnosticsTitle": {
+        "message": "诊断计数（只读）",
+        "description": "只读诊断计数表的标题。"
+    },
+    "optionsYangshipinKnownLimits": {
+        "message": "已知限制：Firefox 多账户容器共享同一扩展分区，隐私窗口不在覆盖范围内。",
+        "description": "央视频会话隔离的已知限制。"
     }
 }

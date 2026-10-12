@@ -33,6 +33,36 @@ Sites may be added to the whitelist, either by clicking one of the whitelist opt
 
 Whitelisted sites should then display a cast button as in Chrome, provided they're compatible with the extension/Firefox.
 
+## Yangshipin (央视频) sessions
+
+The PC site (`www.yangshipin.cn`) and the mobile H5 site (`w.yangshipin.cn` / `m.yangshipin.cn`) share the
+`yangshipin.cn` cookie domain, so browser-level cookies written by one side are visible to the other. The
+extension isolates the two sessions entirely in the WebExtension network layer (`onBeforeSendHeaders` /
+`onHeadersReceived`): credentials served by the shared API hosts are registered in per-platform partitions and
+**removed from the response**, so they never reach the browser cookie jar; requests are then re-populated from
+the partition that owns the page. No page script is injected and no `cookies` permission is requested.
+
+Because the credentials live in the extension's storage rather than the browser jar:
+
+-   **Clearing cookies in Firefox does not sign you out of Yangshipin.** Use the options page button
+    _Clear Yangshipin session_ instead.
+-   **Disabling the switch** (_Yangshipin: isolate the PC and mobile sessions_) removes the extension-managed
+    credentials from every request, which is equivalent to **signing out once**. The same applies to rolling
+    back to an older extension version.
+-   The first Yangshipin page load after installing or re-running the baseline performs a **one-time jar
+    cleanup** and asks you to sign in once more: old cookies cannot be attributed to a platform safely, so
+    they are removed instead of migrated. A notification reports when it is done.
+-   Per-host cleanup runs on the first request to each shared API host that the document-host cleanup cannot
+    reach; such a request is passed through but its cookie values are deliberately not adopted.
+-   **Attribution is fail-closed.** A request that cannot be tied to a Yangshipin document — no top-level
+    context for its tab, or no parseable initiator (`originUrl` / `documentUrl` / `Origin` / `Referer`) — is
+    sent without credentials, and an unattributable response has its `Set-Cookie` discarded. In practice this
+    can happen when the background page was restarted while a Yangshipin tab stayed open; reloading the page
+    restores the context.
+-   **Known limits.** Firefox Multi-Account Containers share one extension partition, so using Yangshipin in
+    several containers is not isolated from itself; private windows are out of scope. Only `pc` and `mobile`
+    partitions exist.
+
 ## Roku
 
 Roku devices are first-class receivers, not a compatibility shim:

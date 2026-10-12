@@ -740,5 +740,49 @@
     },
     "optionsChromecastDashStartupPaddingDescription": {
         "message": "Improves DASH startup compatibility on some Chromecast receivers. Disable it when diagnosing playback or seeking problems."
+    },
+    "optionsYangshipinSessionIsolation": {
+        "message": "Yangshipin: isolate the PC and mobile sessions",
+        "description": "Checkbox label for the Yangshipin network-layer session isolation switch."
+    },
+    "optionsYangshipinSessionIsolationDescription": {
+        "message": "Keeps the PC (www) and mobile (w/m) Yangshipin credentials in separate, extension-managed partitions and removes them from the browser cookie jar. Because those credentials no longer live in the browser jar, turning this off is equivalent to signing out once.",
+        "description": "Description of the Yangshipin session isolation switch."
+    },
+    "optionsYangshipinSessionCategoryName": {
+        "message": "Yangshipin session",
+        "description": "Options category for the Yangshipin session tools."
+    },
+    "optionsYangshipinSessionCategoryDescription": {
+        "message": "Inspect or reset the isolated Yangshipin credentials managed by the extension.",
+        "description": "Options category description for the Yangshipin session tools."
+    },
+    "optionsYangshipinClearSession": {
+        "message": "Clear Yangshipin session",
+        "description": "Button that clears the isolated Yangshipin credentials."
+    },
+    "optionsYangshipinClearSessionDescription": {
+        "message": "Deletes the isolated credentials and their tombstones for both platforms. The next Yangshipin page load starts signed out.",
+        "description": "Description of the clear Yangshipin session button."
+    },
+    "optionsYangshipinRerunBaseline": {
+        "message": "Re-run baseline cleaning",
+        "description": "Button that schedules the Yangshipin baseline cleaning again."
+    },
+    "optionsYangshipinRerunBaselineDescription": {
+        "message": "Re-running the baseline removes any Yangshipin cookie left in the browser jar and asks you to sign in once more.",
+        "description": "Description of the re-run baseline button."
+    },
+    "optionsYangshipinActionDone": {
+        "message": "Done.",
+        "description": "Short confirmation shown after a Yangshipin session action."
+    },
+    "optionsYangshipinDiagnosticsTitle": {
+        "message": "Diagnostics (read only)",
+        "description": "Title of the read-only Yangshipin diagnostics counter table."
+    },
+    "optionsYangshipinKnownLimits": {
+        "message": "Known limits: Firefox containers share one extension partition, and private windows are not covered.",
+        "description": "Known limitations of the Yangshipin session isolation."
     }
 }

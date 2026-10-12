@@ -3,6 +3,7 @@
 
     import Bridge from "./Bridge.svelte";
     import Whitelist from "./Whitelist.svelte";
+    import YangshipinSession from "./YangshipinSession.svelte";
     void Bridge, Whitelist;
 
     import logger from "../../lib/logger";
@@ -459,6 +460,14 @@
                 inline
             />
             <Option
+                id="yangshipinSessionIsolation"
+                label={_("optionsYangshipinSessionIsolation")}
+                description={_("optionsYangshipinSessionIsolationDescription")}
+                type="checkbox"
+                bind:checked={opts.yangshipinSessionIsolation}
+                inline
+            />
+            <Option
                 id="chromecastDashStartupPadding"
                 label={_("optionsChromecastDashStartupPadding")}
                 description={_(
@@ -487,6 +496,13 @@
                 bind:checked={opts.cctvDebugEnabled}
                 inline
             />
+        </OptionsCategory>
+
+        <OptionsCategory
+            name={_("optionsYangshipinSessionCategoryName")}
+            description={_("optionsYangshipinSessionCategoryDescription")}
+        >
+            <YangshipinSession />
         </OptionsCategory>
 
         <div class="form__footer">

@@ -104,6 +104,13 @@ export interface Options {
     cctvDebugEnabled: boolean;
     /** Prefer official unencrypted DLNA live stream for Yangshipin instead of bridge WASM descrambler. */
     yangshipinUseDlna: boolean;
+    /**
+     * Keep the Yangshipin PC / mobile sessions isolated at the network layer.
+     * Disabling it makes the credentials managed by the extension (they do not
+     * live in the browser jar) unreachable, which is equivalent to a one-time
+     * sign-out.
+     */
+    yangshipinSessionIsolation: boolean;
     /** Enable Voice Edge BLE remote event consumption. */
     bleRemoteEnabled: boolean;
     /** Voice Edge BLE remote newline-delimited JSON event stream URL. */
@@ -176,6 +183,7 @@ export default {
     chromecastDashStartupPadding: true,
     cctvDebugEnabled: false,
     yangshipinUseDlna: false,
+    yangshipinSessionIsolation: true,
     bleRemoteEnabled: true,
     bleRemoteUrl: "http://127.0.0.1:5002/ble-remote/events",
     bleRemoteSeekBackwardSeconds: 30,

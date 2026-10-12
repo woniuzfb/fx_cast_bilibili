@@ -17,10 +17,12 @@ const yangshipinLiveSource = path.join(
     repoRoot,
     "extension/src/background/yangshipinLive.ts"
 );
-const esbuildPath = path.join(
-    repoRoot,
-    "extension/node_modules/esbuild/lib/main.js"
-);
+// §17 item 8 / assertion 28: locate esbuild through the module resolver so a
+// clean checkout with a hoisted (or moved) node_modules still works, and a
+// missing dependency fails loudly instead of silently resolving to nothing.
+const esbuildPath = require.resolve("esbuild", {
+    paths: [path.join(repoRoot, "extension"), repoRoot]
+});
 
 let pass = 0;
 let fail = 0;
@@ -47,13 +49,12 @@ async function bundle(outfile, workDir) {
         entry,
         `export {
             isYangshipinLivePage,
-            isYangshipinHookPage,
+            sanitizeLiveInfoResponse,
             sanitizeLiveInfoUrl,
             getYangshipinPlaylistRank,
             getYangshipinStreamKey,
             getYangshipinChannelName,
-            getYangshipinChannelInfo,
-            sanitizeH5CookieHeader
+            getYangshipinChannelInfo
         } from ${JSON.stringify(yangshipinLiveSource)};
         export { createYangshipinCKey } from ${JSON.stringify(
             yangshipinApiPath
@@ -144,17 +145,16 @@ async function main() {
         await bundle(outfile, workDir);
         const {
             isYangshipinLivePage,
-            isYangshipinHookPage,
+            sanitizeLiveInfoResponse,
             sanitizeLiveInfoUrl,
             getYangshipinPlaylistRank,
             getYangshipinStreamKey,
             getYangshipinChannelName,
             getYangshipinChannelInfo,
-            createYangshipinCKey,
-            sanitizeH5CookieHeader
+            createYangshipinCKey
         } = require(outfile);
 
-        console.log("Yangshipin default quality & sanitizer tests");
+        console.log("Yangshipin default quality tests");
 
         // 1. isYangshipinLivePage tests
         check(
@@ -195,28 +195,6 @@ async function main() {
             isYangshipinLivePage(
                 "https://www.bilibili.com/video/BV1xx411c7mD"
             ) === false
-        );
-
-        // 1.1 isYangshipinHookPage tests (covers any Yangshipin page)
-        check(
-            "isYangshipinHookPage: matches PC homepage",
-            isYangshipinHookPage("https://www.yangshipin.cn/") === true
-        );
-        check(
-            "isYangshipinHookPage: matches PC live detail",
-            isYangshipinHookPage(
-                "https://www.yangshipin.cn/live/detail?pid=610003406"
-            ) === true
-        );
-        check(
-            "isYangshipinHookPage: matches mobile video page",
-            isYangshipinHookPage(
-                "https://w.yangshipin.cn/video?type=2&pid=610003406&vid=2050639703"
-            ) === true
-        );
-        check(
-            "isYangshipinHookPage: rejects non-Yangshipin URL",
-            isYangshipinHookPage("https://www.bilibili.com/") === false
         );
 
         // Channel name lookup tests
@@ -383,59 +361,97 @@ async function main() {
             webStreamKey === "202724930" && webStreamKey === dlnaStreamKey
         );
 
-        // 5. sanitizeH5CookieHeader tests
-        const stalePcCookie =
-            "guid=muus8qwb; vplatform=109; appid=1400867594; pc_version=1.1.16; ysp_uinfo_pc=test; vusession=oldSes; endtime=1700000000; uinfo_vuid=123";
-        const sanitized = sanitizeH5CookieHeader(stalePcCookie, 1750000000000);
+        // 6. sanitizeLiveInfoResponse tests (Pure network-layer trial preview bypass)
+        const previewResponse = {
+            iretcode: 0,
+            iretdetailcode: 0,
+            errinfo: "success!",
+            playtime: 300,
+            totalplaytime: 300,
+            preview: 1,
+            previewcnt: 1,
+            restpreviewcnt: 1,
+            playurl: "https://example.com/live.m3u8"
+        };
+        const sanitizedResult = sanitizeLiveInfoResponse(previewResponse);
         check(
-            "sanitizeH5CookieHeader: modified is true for PC conflict and expired session",
-            sanitized.modified === true
+            "sanitizeLiveInfoResponse: zeroes out playtime=300",
+            sanitizedResult.data.playtime === 0
         );
         check(
-            "sanitizeH5CookieHeader: rewrites vplatform to 2",
-            sanitized.cookie.includes("vplatform=2")
+            "sanitizeLiveInfoResponse: zeroes out totalplaytime=300",
+            sanitizedResult.data.totalplaytime === 0
         );
         check(
-            "sanitizeH5CookieHeader: rewrites appid to 1400227916",
-            sanitized.cookie.includes("appid=1400227916")
+            "sanitizeLiveInfoResponse: zeroes out preview=1",
+            sanitizedResult.data.preview === 0
         );
         check(
-            "sanitizeH5CookieHeader: removes pc_version",
-            !sanitized.cookie.includes("pc_version")
+            "sanitizeLiveInfoResponse: zeroes out previewcnt=1",
+            sanitizedResult.data.previewcnt === 0
         );
         check(
-            "sanitizeH5CookieHeader: removes ysp_uinfo_pc",
-            !sanitized.cookie.includes("ysp_uinfo_pc")
+            "sanitizeLiveInfoResponse: zeroes out restpreviewcnt=1",
+            sanitizedResult.data.restpreviewcnt === 0
         );
         check(
-            "sanitizeH5CookieHeader: strips expired vusession",
-            !sanitized.cookie.includes("vusession")
-        );
-        check(
-            "sanitizeH5CookieHeader: strips expired endtime",
-            !sanitized.cookie.includes("endtime")
-        );
-        check(
-            "sanitizeH5CookieHeader: preserves unexpired guid and uinfo_vuid",
-            sanitized.cookie.includes("guid=muus8qwb") &&
-                sanitized.cookie.includes("uinfo_vuid=123")
+            "sanitizeLiveInfoResponse: returns modified=true when preview fields sanitized",
+            sanitizedResult.modified === true
         );
 
-        // Valid H5 cookie not expired
-        const validH5Cookie =
-            "guid=muus8qwb; vplatform=2; appid=1400227916; vusession=validSes; endtime=1800000000";
-        const validSanitized = sanitizeH5CookieHeader(
-            validH5Cookie,
-            1700000000000
-        );
+        // Nested data response
+        const nestedPreviewResponse = {
+            code: 0,
+            data: {
+                playtime: 300,
+                totalplaytime: 300,
+                previewcnt: 1,
+                playurl: "https://example.com/live.m3u8"
+            }
+        };
+        const nestedSanitized = sanitizeLiveInfoResponse(nestedPreviewResponse);
         check(
-            "sanitizeH5CookieHeader: clean valid H5 cookie unmodified",
-            validSanitized.modified === false
+            "sanitizeLiveInfoResponse: handles nested data.playtime=300",
+            nestedSanitized.data.data.playtime === 0 &&
+                nestedSanitized.data.data.previewcnt === 0 &&
+                nestedSanitized.modified === true
         );
+
+        // Already clean response
+        const cleanResponse = {
+            iretcode: 0,
+            playtime: 0,
+            totalplaytime: 0,
+            preview: 0,
+            previewcnt: 0,
+            restpreviewcnt: 0
+        };
+        const cleanSanitized = sanitizeLiveInfoResponse(cleanResponse);
         check(
-            "sanitizeH5CookieHeader: preserves valid vusession",
-            validSanitized.cookie.includes("vusession=validSes")
+            "sanitizeLiveInfoResponse: modified=false when fields already zero",
+            cleanSanitized.modified === false
         );
+
+        // JSONP roundtrip serialization test
+        const rawJsonp =
+            'jsonp1({"iretcode":0,"playtime":300,"previewcnt":1,"playurl":"https://live.m3u8"});';
+        const jsonpMatch = rawJsonp.match(
+            /^([a-zA-Z0-9_$]+)\s*\(([\s\S]*)\)\s*;?\s*$/
+        );
+        check("JSONP response parser regex matches", Boolean(jsonpMatch));
+        if (jsonpMatch) {
+            const cbName = jsonpMatch[1];
+            const parsedJsonp = JSON.parse(jsonpMatch[2]);
+            const { modified } = sanitizeLiveInfoResponse(parsedJsonp);
+            check("JSONP parsed data modified flag is true", modified === true);
+            const rewritten = `${cbName}(${JSON.stringify(parsedJsonp)});`;
+            check(
+                "JSONP rewritten string zeroes out playtime and previewcnt",
+                rewritten.includes('"playtime":0') &&
+                    rewritten.includes('"previewcnt":0') &&
+                    rewritten.startsWith("jsonp1(")
+            );
+        }
 
         console.log(`\n${pass}/${pass + fail} checks passed`);
         if (fail > 0) {

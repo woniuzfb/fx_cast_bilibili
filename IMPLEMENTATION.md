@@ -121,6 +121,23 @@ Because the emulation sits below the cast SDK, **all senders work unchanged**: t
 -   Seeks restart the media player channel (brief reload flash).
 -   **`PLAY`/`PAUSE` cannot work while the device is not displaying.** A keypress is the only play/pause primitive this emulation has (a Roku speaks no Cast protocol), and the platform only delivers app-level keys to the running channel while it has a display. Measured on a Roku 3 with Media Assistant playing: in that state `Pause`, `Play`, `keydown`/`keyup Play`, `InstantReplay` and `Left`/`Right`/`Select`/`Back` all answered HTTP 200 with **no effect**, while `/query/media-player` kept reporting an advancing `state="play"` and `/query/active-app` kept naming the player — and `Home`, which the OS handles itself (and which is what `STOP` uses), still worked. Nothing observes a change either, so the extension's command ends as `not-confirmed` after its 10s receiver window and the popup button reverts to the receiver's real state: the user sees "no reaction" rather than an error. `SEEK` is a `mediaPosition` re-launch rather than a keypress, so it is not subject to this (not verified in that state). `RokuDeviceInfo.powerMode` is parsed by `ecp.ts` but read nowhere, so the display state is not surfaced to the extension today: the limitation is documented, not detected.
 
+## Yangshipin (央视频) network-layer behaviour
+
+All Yangshipin-specific behaviour is implemented with `webRequest` blocking hooks and response-body filters. No Yangshipin page script is injected into the page's world, and nothing modifies `window`, `document`, `Storage.prototype` or timers on a Yangshipin page (AGENTS.md §2.6); the only MAIN-world capture in the extension is the unrelated CCTV byte-tee.
+
+### Session isolation
+
+`extension/src/background/yangshipinSession.ts` keeps the PC (`www.yangshipin.cn`) and mobile (`w.`/`m.yangshipin.cn`) sessions apart without the `cookies` permission: credentials served by the shared API hosts are registered in a per-platform partition and stripped from the response (they never reach the browser cookie jar), and outbound requests are re-populated from the partition that owns the page. Domain attributes are stripped from document-host responses, tombstones with value fingerprints stop deleted credentials from coming back, and a one-time baseline cleaning removes pre-existing jars. The full design, its invariants and its known limits (containers share one partition; private windows out of scope; `yangshipinSessionIsolation` off = one sign-out) are recorded in `.memory/方案修订.md`, summarised in `AGENTS.md` §2.7 and the README.
+
+### Preview-limit parameter rewriting
+
+The Yangshipin player enforces its 5-minute preview window client-side from the values the API returns. Two network-layer rewrites remove the trigger without touching the page:
+
+-   `onBeforeRequest` rewrites `liveinfo`/`get_live_info` query parameters (`playdurantion=0`, `defn=fhd`) and redirects the request; the signed `cKey` does not cover `defn`, so the rewrite does not break the signature.
+-   A `filterResponseData` body filter zeroes the preview fields (`playtime`, `totalplaytime`, `preview`, `previewcnt`, `restpreviewcnt`) in the JSON/JSONP response, so the player's countdown never starts.
+
+This is functionally equivalent to the removed `document.cookie`/`localStorage`/`setInterval` page hooks it replaced: the player still runs its own countdown logic, it is simply handed zeroes. **Compliance risk (explicitly acknowledged):** bypassing the provider's preview restriction is a deviation from the site's intended behaviour and may conflict with its terms of service. The behaviour is not hidden — it is part of a user-installed, user-visible extension — and it can be disabled by removing the Yangshipin interception without affecting any other component.
+
 ## WebExtension Permissions
 
 | Permission        | Description                                        | Usage                                                                                                                                              |
