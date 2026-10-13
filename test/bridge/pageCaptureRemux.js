@@ -5,7 +5,7 @@
  * The Roku capture-input contract, executed through the REAL bridge remux.
  *
  * Why this exists. The replacement-handoff line (see
- * `.workbuddy/memory/2026-09-16.md`, "【推翻】6.32-6.35") was declared fixed on the
+ * `.memory/2026-09-16.md`, "【推翻】6.32-6.35") was declared fixed on the
  * strength of a harness whose success criterion was "some bridge port received a
  * payload with the expected marker". On the device that criterion held — 2.5 MB
  * were replayed — while the remux still failed, because the bridge does NOT need

@@ -5,7 +5,7 @@
  * Chromecast, LOAD a media URL and log every media-channel message plus the
  * receiver state. A standalone probe for receiver behaviour questions that do
  * not need the bridge (used to pin down the middle-window join rule; see
- * .workbuddy/memory/2026-09-16.md).
+ * .memory/2026-09-16.md).
  *
  * Usage:
  *   node test/bridge/cast-drive.js --url URL [--host 10.0.0.140]

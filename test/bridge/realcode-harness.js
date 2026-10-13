@@ -10,7 +10,7 @@
  * outcome. This is the instrument that pinned down the Default Media
  * Receiver's middle-window join rule and validated the production fix
  * (startup pad runway + playlist windowing + presentationStartTime offset).
- * Root cause and findings: .workbuddy/memory/2026-09-16.md.
+ * Root cause and findings: .memory/2026-09-16.md.
  *
  * The harness builds its OWN private copy of the bridge into a per-run temp
  * directory before every run (the same approach as

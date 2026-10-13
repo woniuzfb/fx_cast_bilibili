@@ -153,3 +153,17 @@ This project maintains persistent institutional memory under the [`.memory/`](fi
 -   **After resolving a bug or altering core mechanisms**:
     1. Record the detailed root cause, log fingerprints, and fix logic in `.memory/YYYY-MM-DD.md`.
     2. If the finding introduces a long-term invariant or architectural rule, add a concise summary bullet to [`.memory/MEMORY.md`](file:///.memory/MEMORY.md).
+
+---
+
+## 5. Git & 工作区纪律（强制）
+
+-   **禁止用 `checkout` 或任何类似 HEAD 的手段覆盖工作区中未保存的文件**：
+    -   不得执行 `git checkout <path>`、`git checkout HEAD -- <path>`、`git checkout -- .`、`git restore`、`git reset --hard`、`git reset -- <path>`、`git clean -f/-fd/-fdx`，也不得用 `git stash` 来"把工作区弄干净"。这些命令都会丢弃或覆盖尚未提交的改动，包括别人的。
+    -   需要看 HEAD 版本时只用**只读**手段：`git show HEAD:<path>`、`git diff HEAD -- <path>`、`git log`，或把 HEAD 内容重定向到临时文件再比对——**绝不写回工作区**。
+    -   改文件一律用编辑工具（Edit/Write），不用 git 当文件操作手段。
+    -   唯一例外：用户在同一轮对话中明确要求丢弃/回滚**某个具体文件**。
+-   **禁止未经允许 commit**：
+    -   只有用户在当前对话里明确说"提交/commit"才允许 `git commit`；不要从"任务完成"推断出提交授权。
+    -   只提交用户要求的范围：提交前先 `git status` + `git diff`，把"顺手修的""不在要求内"的改动排除在外；提交后在回复里列出本次包含的文件，以及仍然留在工作区未提交的改动。
+    -   不得使用 `--amend`、`--no-verify`、`--no-gpg-sign`（除非用户明确要求），不得 `git push`（除非用户明确要求）。
