@@ -19,8 +19,15 @@
 
     async function send(subject: string) {
         try {
-            await browser.runtime.sendMessage({ subject });
-            status = _("optionsYangshipinActionDone");
+            const res = await browser.runtime.sendMessage({ subject });
+            // §11.4: the reset only answers ok once its state is confirmed on
+            // disk; a `false` means it was applied in memory but not persisted,
+            // which must not be shown as success (a restart would restore the
+            // old session).
+            status =
+                res && res.ok === false
+                    ? _("optionsYangshipinResetNotPersisted")
+                    : _("optionsYangshipinActionDone");
         } catch {
             status = "";
         }
@@ -33,30 +40,21 @@
 </script>
 
 <div class="option">
-    <div class="option__label">{_("optionsYangshipinClearSession")}</div>
+    <div class="option__label">{_("optionsYangshipinResetSession")}</div>
     <div class="option__control">
         <div class="option__description">
-            {_("optionsYangshipinClearSessionDescription")}
+            {_("optionsYangshipinResetSessionDescription")}
         </div>
         <div class="yangshipin-session__actions">
             <button
                 type="button"
-                on:click={() => send("yangshipin:clearSession")}
+                on:click={() => send("yangshipin:resetSession")}
             >
-                {_("optionsYangshipinClearSession")}
-            </button>
-            <button
-                type="button"
-                on:click={() => send("yangshipin:rerunBaseline")}
-            >
-                {_("optionsYangshipinRerunBaseline")}
+                {_("optionsYangshipinResetSession")}
             </button>
             {#if status}
                 <span class="yangshipin-session__status">{status}</span>
             {/if}
-        </div>
-        <div class="option__description">
-            {_("optionsYangshipinRerunBaselineDescription")}
         </div>
         <div class="option__description">
             {_("optionsYangshipinKnownLimits")}

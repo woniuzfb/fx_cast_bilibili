@@ -753,25 +753,21 @@
         "message": "查看或重置由扩展管理的央视频隔离凭据。",
         "description": "央视频会话工具分类的说明。"
     },
-    "optionsYangshipinClearSession": {
-        "message": "清除央视频会话",
-        "description": "清除央视频隔离凭据的按钮。"
+    "optionsYangshipinResetSession": {
+        "message": "重置央视频会话",
+        "description": "把央视频会话恢复到初始安装状态的按钮。"
     },
-    "optionsYangshipinClearSessionDescription": {
-        "message": "删除两端分区的隔离凭据与其墓碑。下一次打开央视频页面时处于未登录状态。",
-        "description": "清除央视频会话按钮的说明。"
-    },
-    "optionsYangshipinRerunBaseline": {
-        "message": "重新执行基线清洗",
-        "description": "重新触发央视频基线清洗的按钮。"
-    },
-    "optionsYangshipinRerunBaselineDescription": {
-        "message": "重新执行基线会清除浏览器 Cookie 罐中残留的央视频 Cookie，并需要重新登录一次。",
-        "description": "重新执行基线按钮的说明。"
+    "optionsYangshipinResetSessionDescription": {
+        "message": "等效于重新安装扩展：删除两端分区的隔离凭据、墓碑与页面物化台账，并在下一次访问央视频页面时重新执行基线清洗，清除浏览器 Cookie 罐中残留的央视频 Cookie（届时生效）。操作后处于未登录状态。",
+        "description": "重置央视频会话按钮的说明。"
     },
     "optionsYangshipinActionDone": {
         "message": "已完成。",
         "description": "央视频会话操作完成后的简短提示。"
+    },
+    "optionsYangshipinResetNotPersisted": {
+        "message": "内存中已重置，但状态未能写入磁盘（浏览器存储暂时不可用），重启后可能恢复旧会话；请再点一次。",
+        "description": "重置央视频会话时写盘失败（状态只存在于内存）的提示。"
     },
     "optionsYangshipinDiagnosticsTitle": {
         "message": "诊断计数（只读）",

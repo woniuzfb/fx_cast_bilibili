@@ -757,25 +757,21 @@
         "message": "Inspect or reset the isolated Yangshipin credentials managed by the extension.",
         "description": "Options category description for the Yangshipin session tools."
     },
-    "optionsYangshipinClearSession": {
-        "message": "Clear Yangshipin session",
-        "description": "Button that clears the isolated Yangshipin credentials."
+    "optionsYangshipinResetSession": {
+        "message": "Reset Yangshipin session",
+        "description": "Button that resets the Yangshipin session to the fresh-install state."
     },
-    "optionsYangshipinClearSessionDescription": {
-        "message": "Deletes the isolated credentials and their tombstones for both platforms. The next Yangshipin page load starts signed out.",
-        "description": "Description of the clear Yangshipin session button."
-    },
-    "optionsYangshipinRerunBaseline": {
-        "message": "Re-run baseline cleaning",
-        "description": "Button that schedules the Yangshipin baseline cleaning again."
-    },
-    "optionsYangshipinRerunBaselineDescription": {
-        "message": "Re-running the baseline removes any Yangshipin cookie left in the browser jar and asks you to sign in once more.",
-        "description": "Description of the re-run baseline button."
+    "optionsYangshipinResetSessionDescription": {
+        "message": "Equivalent to reinstalling the extension: deletes the isolated credentials, tombstones and materialization ledger of both platforms, and re-runs baseline cleaning of any Yangshipin cookie left in the browser jar the next time a Yangshipin page is visited (that is when the jar cleaning takes effect). You will be signed out.",
+        "description": "Description of the reset Yangshipin session button."
     },
     "optionsYangshipinActionDone": {
         "message": "Done.",
         "description": "Short confirmation shown after a Yangshipin session action."
+    },
+    "optionsYangshipinResetNotPersisted": {
+        "message": "Reset in memory only: the state could not be written to disk (browser storage is temporarily unavailable), so the old session may come back after a restart. Please click again.",
+        "description": "Shown when resetting the Yangshipin session fails to persist (the state exists in memory only)."
     },
     "optionsYangshipinDiagnosticsTitle": {
         "message": "Diagnostics (read only)",

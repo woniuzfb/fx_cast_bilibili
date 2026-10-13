@@ -516,7 +516,7 @@ export class SessionPartition {
 
     /** Fire-and-forget write-through. Never throws, never awaited. */
     persistNow(): void {
-        this.requestWrite();
+        void this.requestWrite();
     }
 
     /** Debounced merge write; the timer participates in no decision (§11.4). */
@@ -524,17 +524,25 @@ export class SessionPartition {
         if (this.debounceTimer) clearTimeout(this.debounceTimer);
         this.debounceTimer = setTimeout(() => {
             this.debounceTimer = null;
-            this.requestWrite();
+            void this.requestWrite();
         }, PERSIST_DEBOUNCE_MS);
     }
 
-    private requestWrite(): void {
-        if (this.writeInFlight) return;
+    /**
+     * The single writer slot (§11.4).  Returns the run that owns the slot
+     * after this call — the one already in flight when there is one (a second
+     * caller must never start a second writer, or an older snapshot could land
+     * after a newer one) or the one just started.  Fire-and-forget callers
+     * ignore the promise.
+     */
+    private requestWrite(): Promise<void> {
+        if (this.writeInFlight) return this.writeInFlight;
         const run = this.runWrites();
         this.writeInFlight = run;
         void run.finally(() => {
             if (this.writeInFlight === run) this.writeInFlight = null;
         });
+        return run;
     }
 
     /** Serial writer: snapshots are written in `stateRev` order (§11.4). */
@@ -565,6 +573,38 @@ export class SessionPartition {
             if (this.writeInFlight === current) break;
             current = this.writeInFlight;
         }
+    }
+
+    /**
+     * §11.4 confirmed flush.  `persistNow()` deliberately swallows write
+     * failures ("never throws, retry on next change"), and `waitForWrites()`
+     * only waits for a write to *settle* — neither can tell a caller whether
+     * the newest revision actually reached storage.  Callers that must not
+     * report success for state that exists only in memory (the §12.3 user
+     * reset) await this instead; on failure the partition stays dirty
+     * (`stateRev > confirmedRev`), so an ordinary later change retries.
+     *
+     * It never starts a writer of its own: it hands the job to the single
+     * writer slot and joins whatever run owns it.  Two overlapping confirmed
+     * calls therefore share one writer instead of racing — a private writer per
+     * caller could let an older snapshot land after a newer one, which is
+     * exactly what §11.4's single queue forbids.
+     */
+    async persistNowConfirmed(): Promise<boolean> {
+        this.cancelDebounce();
+        this.markChanged();
+        const rev = this.stateRev;
+        await this.requestWrite();
+        await this.waitForWrites();
+        if (this.stateRev > this.confirmedRev) {
+            // The run we joined may have written a *lower* revision and then
+            // failed (a failure leaves `confirmedRev` behind and raises
+            // nothing).  Give the newest revision one more pass through the
+            // same slot before reporting failure.
+            await this.requestWrite();
+            await this.waitForWrites();
+        }
+        return this.confirmedRev >= rev;
     }
 
     private buildStoragePayload(): Record<string, unknown> {
@@ -983,6 +1023,10 @@ export class SessionPartition {
             this.nextValueRev = rawRev;
         }
         this.evictTombstones();
+        // A stored payload can exceed the live entry cap (written by an older
+        // build or merged across writes); converge immediately instead of
+        // running oversized until the next upsert.
+        this.enforceEntryBudget();
     }
 }
 
@@ -1072,6 +1116,13 @@ function partitionForPlatform(platform: "pc" | "mobile"): SessionPartition {
     return platform === "pc" ? pcPartition : mobilePartition;
 }
 
+/**
+ * §11.3 operation generation for hydration.  A user-level reset bumps this; a
+ * snapshot whose read started in an earlier generation belongs to state the
+ * user has since discarded and must never be committed (see `hydrateAll`).
+ */
+let stateEpoch = 0;
+
 async function readStorage(): Promise<Record<string, unknown>> {
     if (typeof browser === "undefined" || !browser?.storage?.local) return {};
     const res = await browser.storage.local.get([
@@ -1084,8 +1135,20 @@ async function readStorage(): Promise<Record<string, unknown>> {
 }
 
 async function hydrateAll(): Promise<void> {
+    const epoch = stateEpoch;
     try {
         const res = await readStorage();
+        // §11.3: the snapshot was read in generation `epoch`; if a user reset
+        // landed while the read was in flight, committing it would resurrect
+        // exactly the credentials the reset discarded and would overwrite the
+        // `isBaselineCleanPending` the reset just re-armed.  Drop it whole —
+        // the reset already persisted the state it wants.
+        if (epoch !== stateEpoch) {
+            logger.info(
+                "Yangshipin: discarded an in-flight hydration snapshot (a reset won the race)"
+            );
+            return;
+        }
         const schema = res[YSP_SCHEMA_KEY];
         // §11.6: equal version restores; lower/higher versions are discarded
         // (version 1 has no migration path).
@@ -1122,7 +1185,14 @@ let hydrationPromise: Promise<void> | null = null;
 
 export function ensurePartitionsHydrated(): Promise<void> {
     if (!hydrationPromise) {
-        hydrationPromise = hydrateAll();
+        // A failed hydration must not poison the cache: storage failures can
+        // be transient, and caching the rejection would fail every later
+        // caller closed for the rest of the background lifetime.  Drop the
+        // promise on failure so the next call retries.
+        hydrationPromise = hydrateAll().catch(err => {
+            hydrationPromise = null;
+            throw err;
+        });
     }
     return hydrationPromise;
 }
@@ -1170,16 +1240,51 @@ export async function persistSessionPartitionsNow(): Promise<void> {
     ]);
 }
 
-async function persistBaselineCleanDone(value: boolean): Promise<void> {
-    try {
-        await browser.storage.local.set({
-            [BASELINE_CLEAN_DONE_KEY]: value
-        });
-    } catch (err) {
-        logger.warn("Yangshipin: failed to persist baseline marker", {
-            error: err instanceof Error ? err.message : String(err)
-        });
-    }
+/**
+ * §3.1/§11.4 baseline marker write.  Returns whether the marker reached
+ * storage: the ordinary fire-and-forget call sites ignore it (a lost marker
+ * only costs one extra baseline run), but the §12.3 user reset must not report
+ * success for a marker that is still only in memory.
+ *
+ * The marker is a single scalar written from several paths (baseline
+ * completion, manual re-run, user reset), so the writes go through one chain:
+ * `storage.local.set` for this key is never issued twice concurrently, and the
+ * *last issued* write is the one that decides the stored value.  Same reasoning
+ * as the per-partition writer (§11.4): without it an older write could land
+ * after a newer one.
+ */
+let baselineMarkerWrite: Promise<boolean> = Promise.resolve(true);
+
+function persistBaselineCleanDone(value: boolean): Promise<boolean> {
+    const write = () => {
+        try {
+            return browser.storage.local
+                .set({ [BASELINE_CLEAN_DONE_KEY]: value })
+                .then(
+                    () => true,
+                    err => {
+                        logger.warn(
+                            "Yangshipin: failed to persist baseline marker",
+                            {
+                                error:
+                                    err instanceof Error
+                                        ? err.message
+                                        : String(err)
+                            }
+                        );
+                        return false;
+                    }
+                );
+        } catch (err) {
+            logger.warn("Yangshipin: failed to persist baseline marker", {
+                error: err instanceof Error ? err.message : String(err)
+            });
+            return Promise.resolve(false);
+        }
+    };
+    const next = baselineMarkerWrite.then(write, write);
+    baselineMarkerWrite = next;
+    return next;
 }
 
 // ============================================================================
@@ -1696,6 +1801,22 @@ export async function handleYangshipinBeforeSendHeaders(
         const reqHeaders = details.requestHeaders;
         if (!reqHeaders) return {};
 
+        // §3.2.0 *ordering* (the baseline branch itself sits below the hydrate
+        // gate, and that is deliberate): the in-memory marker starts at `true`
+        // and is only truthful once `fxcast_ysp_baseline_clean_done` has been
+        // read.  Deciding before hydration would treat "not yet known" as
+        // "definitely pending", so a perfectly healthy cold start whose first
+        // navigation beats the storage read would register a *destructive*
+        // one-shot baseline: the response would then materialize the page
+        // copies from the restored partition and immediately delete them with
+        // the baseline rows, while the ledger still books them as
+        // materialized — the restart loses its page-visible session until the
+        // next full background restart (reproduced; see
+        // `.memory/2026-10-14.md` §8).  A baseline that is swallowed by the
+        // fail-closed window below stays pending and is retried by the next
+        // document navigation (§12.4), and the residue it targets can no
+        // longer be *adopted* in the meantime because §12.2 per-host cleaning
+        // now covers document hosts too.
         const hydrated = await ensurePartitionsHydratedWithinTimeout();
         if (!hydrated) {
             // §11.7 / §9.4: fail closed, never forward credentials blind.
@@ -1762,7 +1883,11 @@ export async function handleYangshipinBeforeSendHeaders(
         const reqPath = reqUrl.pathname || "/";
         const reqIsHttps = reqUrl.protocol === "https:";
 
-        // §3.2: the baseline branch is the very first decision point.
+        // §3.2: the one-shot global baseline.  It is reached only after the
+        // marker has actually been read (the hydrate gate above) and only for
+        // an app document navigation of a pc/mobile-classified request — the
+        // trampoline and the unknown/external cases have already returned, so
+        // the redirect shell can never consume the baseline (§9.2).
         if (
             isBaselineCleanPending &&
             details.type === "main_frame" &&
@@ -1787,9 +1912,17 @@ export async function handleYangshipinBeforeSendHeaders(
         // first call of every shared API host with no credentials at all and
         // without the page's cross-host client parameters (observed on a real
         // trace: `ucenter-api //v1/user/userinfo` -> `10011 请求不合法`).
+        //
+        // The coverage set is *every* yangshipin host, document hosts
+        // included.  §3's global baseline only protects the one document host
+        // that happens to be the first `main_frame` navigation; the other two
+        // (`www` / `w` / `m`) used to be excluded here as well, so a page copy
+        // the previous install had materialized on them was adopted by their
+        // first steady-state request as a *parent-domain* client entry —
+        // i.e. "adopt first, clean later" (HAR 2026-10-14 00:16: the m.w
+        // document host admitted the leftovers ~150 ms after install).
         const incomingCookies = parseCookieHeader(cookieHeader?.value || "");
         const hostBaselinePending =
-            !isYangshipinDocHost(reqHost) &&
             !targetPartition.baselineCleanedHosts.has(reqHost);
         if (hostBaselinePending && details.requestId) {
             requestCookieNamesByReq.set(
@@ -1820,6 +1953,13 @@ export async function handleYangshipinBeforeSendHeaders(
         // allowed ones: this partition + this request's raw header.  An
         // uncleaned host skips admission entirely (nothing is adopted, no
         // tombstone is cleared) while still receiving step 2–4 below.
+        //
+        // §3.2.2's "绝对不向分区采纳任何原始值" is enforced by *host* credit,
+        // not by the global marker alone: after an install every host is
+        // uncleaned, so the first request to each of them — document hosts
+        // included — already refuses adoption (see the credit above).  That is
+        // what keeps the intended order "clean, then take over" from being
+        // inverted by a baseline that has not run yet.
         // ------------------------------------------------------------------
         for (const incoming of hostBaselinePending ? [] : incomingCookies) {
             const { name, value } = incoming;
@@ -2319,6 +2459,12 @@ export async function handleYangshipinHeadersReceived(
         const hydrated = await ensurePartitionsHydratedWithinTimeout();
         if (!hydrated) {
             diagnostics.hydrateTimeouts++;
+            // §12.4 / §7.1: a response that cannot be adjudicated must not leave
+            // its request-scoped bookkeeping behind.  The per-host baseline
+            // registration taken in the outbound handler in particular has to
+            // stay retryable: the host is not credited, so its next request
+            // passes through and cleans again.
+            clearRequestScopedState(details.requestId);
             return stripSetCookieHeaders(respHeaders);
         }
 
@@ -2603,6 +2749,17 @@ export async function handleYangshipinHeadersReceived(
             headersModified = true;
             pendingBaselineCleanReqIds.delete(requestId);
             baselineCleanCookieNamesByReq.delete(requestId);
+            // §12.2 credit bookkeeping: the baseline *is* this document host's
+            // first clean, so it must also consume that host's credit.  Without
+            // it the very next request to the same host would run a second
+            // "pass through, adopt nothing" pass and, worse, delete the page
+            // copies the first pass had just materialized.  The pass itself is
+            // counted by `baselineCleans`, so `hostBaselineCleans` (the §12.2
+            // counter) stays untouched.
+            if (!targetPartition.baselineCleanedHosts.has(respHost)) {
+                targetPartition.baselineCleanedHosts.add(respHost);
+                targetPartition.persistNow();
+            }
             if (isBaselineCleanPending) {
                 isBaselineCleanPending = false;
                 diagnostics.baselineCleans++;
@@ -2616,6 +2773,20 @@ export async function handleYangshipinHeadersReceived(
         if (requestId && pendingHostBaselineCleanByReq.has(requestId)) {
             const names = requestCookieNamesByReq.get(requestId) ?? [];
             for (const name of names) {
+                // On a document host this very response also materializes page
+                // copies (§13, step 3c above).  A delete row for a name this
+                // partition still manages would cancel the copy emitted moments
+                // earlier, so the deletion set on document hosts is limited to
+                // values that have no partition authority at all (the same
+                // guard §3d applies to the residue pass-through).  The two
+                // row shapes stay host-only + parent-domain for every host.
+                if (
+                    isDocHost &&
+                    (targetPartition.hasServerManagedName(name) ||
+                        targetPartition.entries.has(getClientDomainKey(name)))
+                ) {
+                    continue;
+                }
                 newResponseHeaders.push({
                     name: "Set-Cookie",
                     value: `${name}=; Max-Age=0; Path=/`
@@ -2737,6 +2908,7 @@ export function clearYangshipinSession(): void {
 
 /** §7.2 test-only full reset (must not be exposed by production UI). */
 export function clearYangshipinPartitions(): void {
+    stateEpoch++;
     pcPartition.reset();
     mobilePartition.reset();
     requestIdPlatformMap.clear();
@@ -2765,6 +2937,46 @@ export function rerunYangshipinBaseline(): void {
     isBaselineCleanPending = true;
     void persistBaselineCleanDone(false);
     logger.info("Yangshipin: baseline cleaning scheduled again");
+}
+
+/**
+ * §12.3 production "reinstall equivalent" reset: signs both ends out, drops
+ * the materialization ledger and re-arms the baseline, so the next visit
+ * behaves exactly like the first visit after a fresh install.  Jar cookies
+ * are cleaned by that baseline pass, not synchronously here.
+ *
+ * Async and result-bearing on purpose (§11.3 / §11.4):
+ * - it opens a new operation generation first, so a hydration snapshot that is
+ *   still being read is discarded instead of being committed over the cleared
+ *   state (the read-then-commit race);
+ * - it resolves **only after the cleared partitions and the re-armed marker
+ *   were confirmed written** — `waitForWrites()` alone cannot prove that,
+ *   because the ordinary writer swallows failures.  It returns `false` when
+ *   any of the three writes failed; the partitions stay dirty so an ordinary
+ *   later change (or another reset) retries.
+ *
+ * The in-flight baseline navigation needs no special handling here: its
+ * response carries a §11.3 generation binding (recorded before the baseline
+ * branch sees the request), and `clearYangshipinSession()` below bumps both
+ * partitions' generation — so that response is voided *and* drops its own
+ * request-scoped registration, leaving the freshly re-armed marker unconsumed.
+ */
+export async function resetYangshipinForUser(): Promise<boolean> {
+    stateEpoch++;
+    clearYangshipinSession();
+    pcPartition.materializedCopies.clear();
+    mobilePartition.materializedCopies.clear();
+    rerunYangshipinBaseline();
+    const [pcPersisted, mobilePersisted, markerPersisted] = await Promise.all([
+        pcPartition.persistNowConfirmed(),
+        mobilePartition.persistNowConfirmed(),
+        persistBaselineCleanDone(false)
+    ]);
+    const persisted = pcPersisted && mobilePersisted && markerPersisted;
+    logger.info("Yangshipin: session reset to fresh-install state by user", {
+        persisted
+    });
+    return persisted;
 }
 
 // ============================================================================
@@ -2898,4 +3110,9 @@ export function initYangshipinSessionInterceptor(): void {
     }
 }
 
-void ensurePartitionsHydrated();
+// Fire-and-forget warm-up.  Failures are already logged by hydrateAll; the
+// catch here keeps a transient storage error from surfacing as an unhandled
+// rejection at module load (the cache reset above lets later callers retry).
+void ensurePartitionsHydrated().catch(() => {
+    /* logged in hydrateAll */
+});

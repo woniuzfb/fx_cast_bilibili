@@ -803,10 +803,9 @@ async function resolveLiveStreamUrl(
 // ============================================================================
 
 import {
-    clearYangshipinSession,
     getYangshipinDiagnostics,
     initYangshipinSessionInterceptor,
-    rerunYangshipinBaseline
+    resetYangshipinForUser
 } from "./yangshipinSession";
 
 export {
@@ -873,15 +872,18 @@ export function initYangshipinLive() {
     initMediaPlaylistCapture();
 
     browser.runtime.onMessage.addListener((message, sender) => {
-        // §11.3 / §12.3 options-page commands.  `clearYangshipinSession` is the
-        // production clear; the test-only full reset is never exposed here.
-        if (message?.subject === "yangshipin:clearSession") {
-            clearYangshipinSession();
-            return Promise.resolve({ ok: true });
-        }
-        if (message?.subject === "yangshipin:rerunBaseline") {
-            rerunYangshipinBaseline();
-            return Promise.resolve({ ok: true });
+        // §11.3 / §12.3 options-page command.  `resetYangshipinForUser` is
+        // the reinstall-equivalent production reset; the test-only full
+        // reset is never exposed here.
+        if (message?.subject === "yangshipin:resetSession") {
+            // §11.3 / §11.4: the reset opens a new operation generation and only
+            // replies once its state is confirmed on disk.  `ok: false` means
+            // "cleared in memory, but the writes failed" — the options page
+            // reports that rather than claiming success, because a restart
+            // would otherwise restore the old session.
+            return resetYangshipinForUser().then(persisted => ({
+                ok: persisted
+            }));
         }
         if (message?.subject === "yangshipin:diagnostics") {
             return Promise.resolve({

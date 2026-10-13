@@ -81,7 +81,7 @@ const ASSERTION_GROUPS = [
         "server takeover, purge-only, Max-Age precedence",
         ["5", "6", "7"]
     ],
-    ["shared-baseline", "Zero-Jar, global baseline", ["8", "9"]],
+    ["shared-baseline", "Zero-Jar, global baseline", ["8", "9", "35"]],
     [
         "classification",
         "platform rules, redirects, SameSite",
@@ -104,7 +104,13 @@ const ASSERTION_GROUPS = [
         "snapshot",
         "tombstone snapshots, sweep order, write order",
         ["31", "32", "33"]
-    ]
+    ],
+    [
+        "generation",
+        "cold-start and reset operation generation",
+        ["36", "37", "38"]
+    ],
+    ["writer", "single-writer slot for confirmed flushes", ["39", "40"]]
 ];
 
 const checkIdsByGroup = new Map(ASSERTION_GROUPS.map(([id]) => [id, []]));
@@ -454,6 +460,14 @@ function createStorageStub() {
         setAttempts: [],
         inFlightSets: 0,
         maxConcurrentSets: 0,
+        /**
+         * Per-key write concurrency.  `maxConcurrentSets` is global and a
+         * legitimate flush touches several keys at once (two partitions plus
+         * the baseline marker), so only this map can express the §11.4
+         * invariant that a *single* key never has two writers in flight.
+         */
+        inFlightByKey: {},
+        maxConcurrentByKey: {},
         throwCount: 0
     };
     let setBehavior = null;
@@ -478,6 +492,15 @@ function createStorageStub() {
             );
             const record = clone(items || {});
             stats.setAttempts.push(record);
+            const touchedKeys = Object.keys(record);
+            for (const key of touchedKeys) {
+                const inFlight = (stats.inFlightByKey[key] || 0) + 1;
+                stats.inFlightByKey[key] = inFlight;
+                stats.maxConcurrentByKey[key] = Math.max(
+                    stats.maxConcurrentByKey[key] || 0,
+                    inFlight
+                );
+            }
             try {
                 const mode = setBehavior ? setBehavior(record) : undefined;
                 if (mode === "throw") {
@@ -492,6 +515,9 @@ function createStorageStub() {
                 }
             } finally {
                 stats.inFlightSets--;
+                for (const key of touchedKeys) {
+                    stats.inFlightByKey[key]--;
+                }
             }
         },
         async remove(keys) {
@@ -546,6 +572,34 @@ function createStorageStub() {
                 return true;
             }
             return false;
+        },
+        /**
+         * Defers the *continuation* of the next `storage.local.get` until the
+         * returned function runs, while the snapshot itself is taken at call
+         * time.  That is the ordering a real cold start can produce: the read
+         * is already in flight when the first navigation of the session
+         * arrives, so a caller must not act on its in-memory defaults while
+         * the stored marker is still unknown.
+         */
+        gateNextGet() {
+            const area = browserStub.storage.local;
+            const orig = area.get;
+            let release = null;
+            area.get = keys => {
+                const snapshot = orig.call(area, keys);
+                return new Promise(resolve => {
+                    release = () => snapshot.then(resolve);
+                });
+            };
+            return () => {
+                const r = release;
+                release = null;
+                if (r) {
+                    r();
+                    return true;
+                }
+                return false;
+            };
         },
         pendingGates() {
             return gates.length;
@@ -677,7 +731,8 @@ const EXPORT_LIST = [
     "cleanupYangshipinRequest",
     "cleanupRequestIdPlatform",
     "initYangshipinSessionInterceptor",
-    "recordRequestIdBinding"
+    "recordRequestIdBinding",
+    "resetYangshipinForUser"
 ];
 
 let workDir = null;
@@ -1076,6 +1131,19 @@ async function freshGroup(options = {}) {
     });
     world.baselineNav = drained;
 
+    // §12.2's per-host credit covers document hosts as well, so a group that
+    // wants *both* ends in steady state asks for the mobile document host to be
+    // drained too (`drainMobileDocHost: true`); groups that study the first
+    // pass of a document host simply omit it.
+    if (options.drainMobileDocHost === true) {
+        const mobileDocHost = options.mobileDocHost || DOC_HOSTS.mobileW;
+        world.mobileDocNav = await sim.request({
+            url: `https://${mobileDocHost}${MOBILE_DOC_PATH}`,
+            type: "main_frame",
+            tabId: options.tabId === undefined ? 1 : options.tabId
+        });
+    }
+
     for (const host of options.apiHosts || []) {
         const platform = host.platform || "pc";
         const doc =
@@ -1222,7 +1290,9 @@ const NAMES = {
     liveParam: fixture("live-param"),
     trampolineHostOnly: fixture("trampoline-hostonly"),
     trampolineDomain: fixture("trampoline-domain"),
-    mobileClientMark: fixture("mobile-client-mark")
+    mobileClientMark: fixture("mobile-client-mark"),
+    installOrphan: fixture("install-orphan"),
+    installLive: fixture("install-live")
 };
 
 function utf8Length(value) {
@@ -2163,26 +2233,63 @@ ASSERTION_RUNNERS.push([
             `${NAMES.legacyOne}=${V.a}; Domain=.yangshipin.cn`,
             DOC_HOSTS.mobileW
         );
-        const second = await sim.request({
+        const mobileFirst = await sim.request({
+            url: MOBILE_DOC_URL,
+            type: "main_frame",
+            tabId: 2
+        });
+        // §12.2's credit covers document hosts too: the other end's document
+        // host gets its own one-time "pass through, adopt nothing + delete both
+        // scopes" pass.  The global one-shot stays at one (shared jar, §3.1);
+        // what changed is that the *host* credit is consumed per host, so the
+        // jar residue can no longer be adopted by the host the global baseline
+        // never visited (HAR 2026-10-14 00:16).
+        expect(
+            "the other end's document host forwards the residue untouched (§12.2 pass-through)",
+            mobileFirst.outboundCookie.includes(`${NAMES.legacyOne}=${V.a}`),
+            mobileFirst.outboundCookie
+        );
+        expect(
+            "but nothing is adopted from it (no parent-domain client entry)",
+            !mod.mobilePartition.entries.has(
+                mod.getClientDomainKey(NAMES.legacyOne)
+            ),
+            JSON.stringify(Array.from(mod.mobilePartition.entries.keys()))
+        );
+        expect(
+            "its own pass deletes the host-only scope",
+            mobileFirst.setCookieLines.includes(
+                `${NAMES.legacyOne}=; Max-Age=0; Path=/`
+            ),
+            mobileFirst.setCookieLines.join(" | ")
+        );
+        expect(
+            "its own pass deletes the parent-domain scope",
+            mobileFirst.setCookieLines.includes(
+                `${NAMES.legacyOne}=; Max-Age=0; Path=/; Domain=.yangshipin.cn`
+            ),
+            mobileFirst.setCookieLines.join(" | ")
+        );
+        expect(
+            "the baseline is still counted once (shared jar, one global clean)",
+            mod.getYangshipinDiagnostics().baselineCleans === 1
+        );
+        jar.pageWrite(
+            `${NAMES.legacyOne}=${V.a}; Domain=.yangshipin.cn`,
+            DOC_HOSTS.mobileW
+        );
+        const mobileSecond = await sim.request({
             url: MOBILE_DOC_URL,
             type: "main_frame",
             tabId: 2
         });
         expect(
-            "the other platform's first document navigation goes straight to steady state",
-            second.outboundCookie.includes(`${NAMES.legacyOne}=${V.a}`),
-            second.outboundCookie
-        );
-        expect(
-            "it emits no baseline host-only delete row",
-            !second.setCookieLines.includes(
-                `${NAMES.legacyOne}=; Max-Age=0; Path=/`
-            ),
-            second.setCookieLines.join(" | ")
-        );
-        expect(
-            "the baseline is still counted once (shared jar, one clean)",
-            mod.getYangshipinDiagnostics().baselineCleans === 1
+            "a second visit to that host is steady state and now takes it over",
+            mobileSecond.outboundCookie.includes(`${NAMES.legacyOne}=${V.a}`) &&
+                mod.mobilePartition.entries.has(
+                    mod.getClientDomainKey(NAMES.legacyOne)
+                ),
+            mobileSecond.outboundCookie
         );
     }
 ]);
@@ -2499,8 +2606,12 @@ ASSERTION_RUNNERS.push([
     "15",
     "冷启动状态恢复与过期保持 (cold start recovery: two-sided sessions, no baseline rerun, original expiry)",
     async expect => {
+        // Both ends must be past their first document pass for this flow to
+        // exercise steady-state materialization and client adoption (§12.2
+        // credit now covers document hosts as well).
         const world = await freshGroup({
-            apiHosts: [{ host: SHARED_HOSTS.h5access }]
+            apiHosts: [{ host: SHARED_HOSTS.h5access }],
+            drainMobileDocHost: true
         });
         const { sim, mod } = world;
         const pc = mod.pcPartition;
@@ -3060,10 +3171,52 @@ ASSERTION_RUNNERS.push([
     async expect => {
         const world = createWorld({ hangLocalGet: true });
         const { sim, mod } = world;
-        const started = Date.now();
-        const handle = await sim.begin({
+
+        // §3.2.0 ordering: the baseline branch sits *after* the hydrate gate,
+        // because the in-memory marker starts `true` and only becomes truthful
+        // once `fxcast_ysp_baseline_clean_done` has been read.  A navigation
+        // whose storage read has not answered yet must therefore fail closed
+        // as an ordinary request — and, crucially, must leave the one-shot
+        // baseline unconsumed so a later navigation retries it (§12.4).
+        const navStarted = Date.now();
+        const navHandle = await sim.begin({
             url: `https://${DOC_HOSTS.pc}/`,
             type: "main_frame",
+            rawCookie: `${NAMES.failCred}=${V.a}`
+        });
+        const navElapsed = Date.now() - navStarted;
+        expect(
+            "a navigation whose storage read hangs still fails closed bounded",
+            navElapsed >= 450 && navElapsed < 2000,
+            `${navElapsed} ms`
+        );
+        expect(
+            "its Cookie header is emptied (fail-closed, no blind forwarding)",
+            navHandle.outboundCookie === "",
+            navHandle.outboundCookie
+        );
+        expect(
+            "the hydrate timeout is counted",
+            mod.getYangshipinDiagnostics().hydrateTimeouts >= 1,
+            String(mod.getYangshipinDiagnostics().hydrateTimeouts)
+        );
+        await sim.finish(navHandle, { backend: () => ({}) });
+        expect(
+            "the baseline was not consumed while the marker was unknown",
+            mod.isYangshipinBaselinePending() === true &&
+                mod.getYangshipinDiagnostics().baselineCleans === 0,
+            `pending=${mod.isYangshipinBaselinePending()} cleans=${
+                mod.getYangshipinDiagnostics().baselineCleans
+            }`
+        );
+
+        // Any request that *does* need the partitions still fails closed after
+        // the bounded wait.
+        const started = Date.now();
+        const handle = await sim.begin({
+            url: `https://${SHARED_HOSTS.h5access}/api`,
+            type: "xmlhttprequest",
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
             rawCookie: `${NAMES.failCred}=${V.a}`
         });
         const elapsed = Date.now() - started;
@@ -3100,6 +3253,45 @@ ASSERTION_RUNNERS.push([
             "no exception escaped either handler",
             unhandledRejections === 0,
             String(unhandledRejections)
+        );
+
+        // Recovery: once storage finally answers, the very next document
+        // navigation still runs the one-shot clean.  That §12.4 retry is what
+        // a swallowed baseline must not lose.
+        const timeoutsBeforeRecovery =
+            mod.getYangshipinDiagnostics().hydrateTimeouts;
+        world.browser.storage.local.get = keys =>
+            Promise.resolve(
+                (Array.isArray(keys) ? keys : Object.keys(keys || {})).reduce(
+                    (acc, key) => {
+                        acc[key] = world.storage.getLocalState(key);
+                        return acc;
+                    },
+                    {}
+                )
+            );
+        await mod.rehydrateYangshipinPartitions();
+        const retry = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/retry`,
+            type: "main_frame",
+            tabId: 1,
+            rawCookie: `${NAMES.failCred}=${V.a}`
+        });
+        expect(
+            "the retried navigation is cleaned (Cookie header emptied)",
+            retry.outboundCookie === "",
+            retry.outboundCookie
+        );
+        expect(
+            "and this time the one-shot baseline is consumed",
+            mod.getYangshipinDiagnostics().baselineCleans === 1,
+            String(mod.getYangshipinDiagnostics().baselineCleans)
+        );
+        expect(
+            "the recovered navigation adds no further hydrate timeout",
+            mod.getYangshipinDiagnostics().hydrateTimeouts ===
+                timeoutsBeforeRecovery,
+            String(mod.getYangshipinDiagnostics().hydrateTimeouts)
         );
     }
 ]);
@@ -5926,9 +6118,15 @@ ASSERTION_RUNNERS.push([
             `${mod.pcPartition.entries.size}/${mod.mobilePartition.entries.size} entries`
         );
         expect(
-            "the shell is never booked as a per-host-cleaned api host",
-            !mod.pcPartition.baselineCleanedHosts.has(DOC_HOSTS.mobileW) &&
-                !mod.mobilePartition.baselineCleanedHosts.has(DOC_HOSTS.mobileW)
+            "the shell verdict itself books no host (the shell is not an app document)",
+            mod.pcPartition.baselineCleanedHosts.size === before.pcCleans &&
+                mod.mobilePartition.baselineCleanedHosts.size ===
+                    before.mobileCleans
+        );
+        expect(
+            "the in-app shell-path navigation is an ordinary document and takes the per-host credit",
+            mod.mobilePartition.baselineCleanedHosts.has(DOC_HOSTS.mobileW) ===
+                true
         );
         expect(
             "the shell verdict is counted as trampoline, never as unknown",
@@ -6028,6 +6226,567 @@ ASSERTION_RUNNERS.push([
             jar.byScope(live, "yangshipin.cn").length === 0 &&
                 jar.count(live) === 1,
             JSON.stringify(jar.find(live))
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "35",
+    "安装期顺序：先清洗、再接管，文档主机同样计入按主机清洗 (install-time ordering, doc hosts take the per-host credit)",
+    async expect => {
+        // Regression for HAR 2026-10-14 00:16: a freshly installed extension
+        // (empty partitions, global baseline pending) found a page copy the
+        // *previous* install had materialized on the mobile document host.  The
+        // global baseline only covers the document host its own navigation
+        // lands on, so that copy used to be adopted by `m.*`'s first
+        // steady-state request as a parent-domain client entry — "adopt first,
+        // clean later".  The per-host credit now covers document hosts as well,
+        // and the baseline itself runs before the hydrate gate.
+        const world = createWorld();
+        const { sim, jar, mod } = world;
+        mod.clearYangshipinPartitions();
+        await settleWrites(world);
+
+        const orphanCopy = NAMES.installOrphan;
+        const liveParam = NAMES.installLive;
+        jar.setCookie(`${orphanCopy}=${V.a}; Path=/`, DOC_HOSTS.mobileM);
+        jar.pageWrite(
+            `${liveParam}=${V.b}; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        mod.tabTopHostByTabId.set(1, DOC_HOSTS.mobileW);
+
+        // 1. The install's first document navigation runs the one-shot clean.
+        const baseline = await sim.request({
+            url: MOBILE_DOC_URL,
+            type: "main_frame",
+            tabId: 1
+        });
+        expect(
+            "the first document navigation empties the outbound Cookie header",
+            baseline.outboundCookie === "",
+            baseline.outboundCookie
+        );
+        expect(
+            "it deletes the parent-domain live parameter it saw",
+            baseline.setCookieLines.includes(
+                `${liveParam}=; Max-Age=0; Path=/; Domain=.yangshipin.cn`
+            ),
+            baseline.setCookieLines.join(" | ")
+        );
+        expect(
+            "the global baseline is counted once",
+            mod.getYangshipinDiagnostics().baselineCleans === 1
+        );
+        expect(
+            "the baseline consumes its own document host's per-host credit",
+            mod.mobilePartition.baselineCleanedHosts.has(DOC_HOSTS.mobileW) ===
+                true,
+            JSON.stringify(Array.from(mod.mobilePartition.baselineCleanedHosts))
+        );
+        expect(
+            "the other end's credit set is untouched",
+            mod.pcPartition.baselineCleanedHosts.size === 0
+        );
+
+        // 2. The PC page then pulls an asset from the mobile document host.
+        //    `m.*` has never been cleaned for the *pc* partition, so its first
+        //    pass must forward the residue without adopting it.
+        mod.tabTopHostByTabId.set(2, DOC_HOSTS.pc);
+        const firstTouch = await sim.request({
+            url: `https://${DOC_HOSTS.mobileM}/static/x.css`,
+            type: "style",
+            tabId: 2,
+            documentUrl: `https://${DOC_HOSTS.pc}/`
+        });
+        expect(
+            "the first pass forwards the orphan copy untouched",
+            firstTouch.outboundCookie.includes(`${orphanCopy}=${V.a}`),
+            firstTouch.outboundCookie
+        );
+        expect(
+            "but adopts nothing from it",
+            !mod.pcPartition.entries.has(mod.getClientDomainKey(orphanCopy)),
+            JSON.stringify(Array.from(mod.pcPartition.entries.keys()))
+        );
+        expect(
+            "the pass deletes the host-only scope",
+            firstTouch.setCookieLines.includes(
+                `${orphanCopy}=; Max-Age=0; Path=/`
+            ),
+            firstTouch.setCookieLines.join(" | ")
+        );
+        expect(
+            "the pass deletes the parent-domain scope",
+            firstTouch.setCookieLines.includes(
+                `${orphanCopy}=; Max-Age=0; Path=/; Domain=.yangshipin.cn`
+            ),
+            firstTouch.setCookieLines.join(" | ")
+        );
+        expect(
+            "the document host is booked for this partition",
+            mod.pcPartition.baselineCleanedHosts.has(DOC_HOSTS.mobileM) === true
+        );
+
+        // 3. Only the *next* request on that host takes it over.
+        jar.setCookie(`${orphanCopy}=${V.c}; Path=/`, DOC_HOSTS.mobileM);
+        await sim.request({
+            url: `https://${DOC_HOSTS.mobileM}/static/y.css`,
+            type: "style",
+            tabId: 2,
+            documentUrl: `https://${DOC_HOSTS.pc}/`
+        });
+        expect(
+            "the second request on that host takes the live value over",
+            mod.pcPartition.entries.get(mod.getClientDomainKey(orphanCopy))
+                ?.value === V.c,
+            JSON.stringify(
+                mod.pcPartition.entries.get(mod.getClientDomainKey(orphanCopy))
+            )
+        );
+
+        // 4. A document-host pass never deletes a name this partition still
+        //    manages — the delete row would cancel the page copy materialized
+        //    in the same response (§13 step 3c).
+        const managed = NAMES.nonHttpPc;
+        mod.pcPartition.set(
+            serverEntry({
+                name: managed,
+                value: V.a,
+                host: SHARED_HOSTS.h5access,
+                isHostOnly: true,
+                path: "/"
+            })
+        );
+        jar.pageWrite(`${managed}=${V.b}; Domain=.yangshipin.cn`, DOC_HOSTS.pc);
+        const docPass = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/home`,
+            type: "main_frame",
+            tabId: 2
+        });
+        expect(
+            "the managed name gets no delete row on a document host",
+            !docPass.setCookieLines.some(line =>
+                line.startsWith(`${managed}=;`)
+            ),
+            docPass.setCookieLines.join(" | ")
+        );
+        expect(
+            "its materialized page copy is still emitted",
+            docPass.setCookieLines.some(line =>
+                line.includes(`${managed}=${V.a}`)
+            ),
+            docPass.setCookieLines.join(" | ")
+        );
+    }
+]);
+
+/**
+ * Produces the storage payload a *healthy* session leaves behind: a pc
+ * partition holding one client value, plus `baseline_clean_done = true`.  Used
+ * by the cold-start assertions (36/37) as the "disk before restart" fixture.
+ */
+async function healthyColdStartSnapshot() {
+    const seed = createWorld({});
+    seed.jar.pageWrite(
+        `${NAMES.legacyOne}=${V.a}; Domain=.yangshipin.cn`,
+        DOC_HOSTS.pc
+    );
+    await seed.sim.request({
+        url: `https://${DOC_HOSTS.pc}/`,
+        type: "main_frame",
+        tabId: 1
+    });
+    seed.jar.pageWrite(
+        `${NAMES.legacyOne}=${V.a}; Domain=.yangshipin.cn`,
+        DOC_HOSTS.pc
+    );
+    await seed.sim.request({
+        url: `https://${DOC_HOSTS.pc}/home`,
+        type: "main_frame",
+        tabId: 1
+    });
+    await seed.mod.persistSessionPartitionsNow();
+    return {
+        fxcast_ysp_schema: seed.storage.getLocalState("fxcast_ysp_schema"),
+        fxcast_ysp_partition_pc: seed.storage.getLocalState(
+            "fxcast_ysp_partition_pc"
+        ),
+        fxcast_ysp_baseline_clean_done: seed.storage.getLocalState(
+            "fxcast_ysp_baseline_clean_done"
+        )
+    };
+}
+
+function storageWithSnapshot(snapshot) {
+    const storage = createStorageStub();
+    for (const [key, value] of Object.entries(snapshot)) {
+        if (value !== undefined) storage.setLocalState(key, value);
+    }
+    return storage;
+}
+
+ASSERTION_RUNNERS.push([
+    "36",
+    "冷启动竞态：标记未读取前不得当成基线 (no baseline before the marker is read)",
+    async expect => {
+        const snapshot = await healthyColdStartSnapshot();
+        expect(
+            "the fixture really is a finished baseline on disk",
+            snapshot["fxcast_ysp_baseline_clean_done"] === true &&
+                Object.keys(snapshot["fxcast_ysp_partition_pc"].entries)
+                    .length === 1,
+            JSON.stringify(snapshot["fxcast_ysp_baseline_clean_done"])
+        );
+
+        const storage = storageWithSnapshot(snapshot);
+        const releaseGet = storage.gateNextGet();
+        const world = createWorld({ storage });
+        const { sim, jar, mod } = world;
+        jar.pageWrite(
+            `${NAMES.legacyOne}=${V.a}; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        expect(
+            "the in-memory marker defaults to pending before storage resolves",
+            mod.isYangshipinBaselinePending() === true
+        );
+
+        // The session's first navigation arrives while the marker is being
+        // read: the extension must fail closed here, never decide "baseline".
+        const nav = await sim.begin({
+            url: `https://${DOC_HOSTS.pc}/home`,
+            type: "main_frame",
+            tabId: 1
+        });
+        expect(
+            "the navigation is held by the hydrate gate, not by a baseline",
+            nav.outboundCookie === "",
+            nav.outboundCookie
+        );
+
+        releaseGet();
+        await mod.ensurePartitionsHydrated().catch(() => {});
+        await sleep(0);
+        expect(
+            "hydration restores the finished marker",
+            mod.isYangshipinBaselinePending() === false
+        );
+        expect(
+            "the stored partition came back",
+            mod.pcPartition.entries.size === 1,
+            String(mod.pcPartition.entries.size)
+        );
+
+        const navDone = await sim.finish(nav, {});
+        expect(
+            "no baseline delete row is issued for a session that was already clean",
+            !navDone.setCookieLines.some(line =>
+                line.startsWith(`${NAMES.legacyOne}=;`)
+            ),
+            navDone.setCookieLines.join(" | ")
+        );
+        expect(
+            "the one-shot baseline is not consumed (diagnostics.baselineCleans)",
+            mod.getYangshipinDiagnostics().baselineCleans === 0,
+            String(mod.getYangshipinDiagnostics().baselineCleans)
+        );
+        expect(
+            "the restart keeps its page-visible value in the jar",
+            jar
+                .header(DOC_HOSTS.pc, "/home", true)
+                .includes(`${NAMES.legacyOne}=${V.a}`),
+            jar.header(DOC_HOSTS.pc, "/home", true)
+        );
+
+        // And the page keeps holding it on the next navigation of that session
+        // — the ledger must not book a copy the jar does not have.
+        const second = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/video`,
+            type: "main_frame",
+            tabId: 1
+        });
+        expect(
+            "a later navigation still serves the value",
+            second.outboundCookie.includes(`${NAMES.legacyOne}=${V.a}`),
+            second.outboundCookie
+        );
+        expect(
+            "the jar still holds it after that navigation",
+            jar
+                .header(DOC_HOSTS.pc, "/video", true)
+                .includes(`${NAMES.legacyOne}=${V.a}`),
+            jar.header(DOC_HOSTS.pc, "/video", true)
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "37",
+    "重置与 hydrate 串行 (a stale snapshot never overwrites a user reset)",
+    async expect => {
+        const snapshot = await healthyColdStartSnapshot();
+        const storage = storageWithSnapshot(snapshot);
+        const releaseGet = storage.gateNextGet();
+        const world = createWorld({ storage });
+        const { mod } = world;
+
+        // The user resets while the cold-start read is still in flight.
+        const resetPromise = mod.resetYangshipinForUser();
+        expect(
+            "the reset clears the in-memory session immediately",
+            mod.pcPartition.entries.size === 0,
+            String(mod.pcPartition.entries.size)
+        );
+        expect(
+            "and re-arms the baseline",
+            mod.isYangshipinBaselinePending() === true
+        );
+
+        releaseGet();
+        await mod.ensurePartitionsHydrated().catch(() => {});
+        await sleep(0);
+        await resetPromise;
+
+        expect(
+            "the stale snapshot is discarded, not committed",
+            mod.pcPartition.entries.size === 0,
+            Array.from(mod.pcPartition.entries.keys()).join(", ")
+        );
+        expect(
+            "the re-armed baseline is not cancelled by the stale marker",
+            mod.isYangshipinBaselinePending() === true
+        );
+        expect(
+            "the disk marker stays re-armed",
+            storage.getLocalState("fxcast_ysp_baseline_clean_done") === false,
+            String(storage.getLocalState("fxcast_ysp_baseline_clean_done"))
+        );
+        const stored = storage.getLocalState("fxcast_ysp_partition_pc");
+        expect(
+            "the cleared partition is what the next hydration will read",
+            stored && Object.keys(stored.entries || {}).length === 0,
+            JSON.stringify(stored && Object.keys(stored.entries || {}))
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "38",
+    "重置写盘失败必须报错 (a reset that cannot persist must not report success)",
+    async expect => {
+        const snapshot = await healthyColdStartSnapshot();
+        const storage = storageWithSnapshot(snapshot);
+        const world = createWorld({ storage });
+        const { mod } = world;
+        await mod.ensurePartitionsHydrated().catch(() => {});
+        expect(
+            "the seed session is both in memory and on disk",
+            mod.pcPartition.entries.size === 1 &&
+                Object.keys(
+                    storage.getLocalState("fxcast_ysp_partition_pc").entries
+                ).length === 1 &&
+                storage.getLocalState("fxcast_ysp_baseline_clean_done") === true
+        );
+
+        // Every write fails.  The ordinary writer swallows that and only
+        // retries on the next change, so only a result-bearing flush can tell
+        // the caller the truth.
+        storage.setBehavior(() => "throw");
+        const persisted = await mod.resetYangshipinForUser();
+        expect(
+            "the reset reports failure instead of resolving silently",
+            persisted === false,
+            String(persisted)
+        );
+        expect(
+            "the in-memory session is still cleared",
+            mod.pcPartition.entries.size === 0,
+            String(mod.pcPartition.entries.size)
+        );
+        expect(
+            "the partition stays dirty so an ordinary later change retries",
+            mod.pcPartition.hasPendingWrites() === true
+        );
+        expect(
+            "nothing of the old session was erased on disk",
+            Object.keys(
+                storage.getLocalState("fxcast_ysp_partition_pc").entries
+            ).length === 1 &&
+                storage.getLocalState("fxcast_ysp_baseline_clean_done") ===
+                    true,
+            JSON.stringify(
+                Object.keys(
+                    storage.getLocalState("fxcast_ysp_partition_pc").entries
+                )
+            )
+        );
+        expect(
+            "the failing writes were attempted, not skipped",
+            storage.stats.throwCount >= 3,
+            String(storage.stats.throwCount)
+        );
+
+        // Once storage recovers, a retry converges and reports success.
+        storage.setBehavior(null);
+        const retry = await mod.resetYangshipinForUser();
+        expect(
+            "a retry with healthy storage reports success",
+            retry === true,
+            String(retry)
+        );
+        expect(
+            "the cleared state and the re-armed marker are on disk",
+            Object.keys(
+                storage.getLocalState("fxcast_ysp_partition_pc").entries
+            ).length === 0 &&
+                storage.getLocalState("fxcast_ysp_baseline_clean_done") ===
+                    false
+        );
+        expect(
+            "the partition is clean again after the successful flush",
+            mod.pcPartition.hasPendingWrites() === false
+        );
+    }
+]);
+
+/** Per-key write concurrency for the keys §11.4's single queue governs. */
+const SINGLE_WRITER_KEYS = [
+    "fxcast_ysp_partition_pc",
+    "fxcast_ysp_partition_mobile",
+    "fxcast_ysp_baseline_clean_done"
+];
+
+function maxWritersByKey(storage, keys = SINGLE_WRITER_KEYS) {
+    return keys.map(key => [key, storage.stats.maxConcurrentByKey[key] || 0]);
+}
+
+ASSERTION_RUNNERS.push([
+    "39",
+    "确认写盘共用 writer 槽位 (overlapping confirmed flushes share one writer)",
+    async expect => {
+        const storage = storageWithSnapshot(await healthyColdStartSnapshot());
+        const world = createWorld({ storage });
+        const { mod } = world;
+        await mod.ensurePartitionsHydrated().catch(() => {});
+        const pc = mod.pcPartition;
+        pc.set(serverEntry({ name: NAMES.writeOne }));
+
+        storage.stats.maxConcurrentByKey = {};
+        storage.stats.maxConcurrentSets = 0;
+        storage.stats.setAttempts.length = 0;
+        storage.setBehavior(() => "gate");
+        const first = pc.persistNowConfirmed();
+        const second = pc.persistNowConfirmed();
+        await sleep(3);
+        expect(
+            "two confirmed flushes open exactly one gated write",
+            storage.pendingGates() === 1,
+            String(storage.pendingGates())
+        );
+        expect(
+            "the partition key never carries two writers",
+            (storage.stats.maxConcurrentByKey["fxcast_ysp_partition_pc"] ||
+                0) === 1,
+            JSON.stringify(Object.fromEntries(maxWritersByKey(storage)))
+        );
+
+        // Drain: the joined run must still converge (a second revision may
+        // have been marked while the first write was held).
+        storage.setBehavior(null);
+        for (let i = 0; i < 20; i++) {
+            storage.releaseGate();
+            await sleep(1);
+        }
+        await sleep(5);
+        const results = await Promise.all([first, second]);
+        expect(
+            "both confirmed flushes report success",
+            results[0] === true && results[1] === true,
+            JSON.stringify(results)
+        );
+        expect(
+            "the partition ends up confirmed clean",
+            pc.hasPendingWrites() === false
+        );
+        expect(
+            "per-key concurrency stayed at one writer throughout",
+            (storage.stats.maxConcurrentByKey["fxcast_ysp_partition_pc"] ||
+                0) === 1,
+            JSON.stringify(Object.fromEntries(maxWritersByKey(storage)))
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "40",
+    "重置重叠时每键仍只有一个 writer (overlapping resets keep one writer per key)",
+    async expect => {
+        const storage = storageWithSnapshot(await healthyColdStartSnapshot());
+        const world = createWorld({ storage });
+        const { mod } = world;
+        await mod.ensurePartitionsHydrated().catch(() => {});
+
+        storage.stats.maxConcurrentByKey = {};
+        storage.stats.maxConcurrentSets = 0;
+        storage.stats.setAttempts.length = 0;
+        // Per partition: the first write fails, everything after it hangs on a
+        // gate.  That is the window in which both flushes retry their own
+        // newest revision at the same time — two writers on one key would be
+        // visible here as maxConcurrentByKey === 2.
+        const seenByKey = {};
+        storage.setBehavior(record => {
+            const key = Object.keys(record).find(name =>
+                name.startsWith("fxcast_ysp_partition_")
+            );
+            if (key && !seenByKey[key]) {
+                seenByKey[key] = true;
+                return "throw";
+            }
+            return "gate";
+        });
+        const firstReset = mod.resetYangshipinForUser();
+        const secondReset = mod.resetYangshipinForUser();
+        await sleep(5);
+        expect(
+            "each partition has at most one writer while gated",
+            (storage.stats.maxConcurrentByKey["fxcast_ysp_partition_pc"] ||
+                0) <= 1 &&
+                (storage.stats.maxConcurrentByKey[
+                    "fxcast_ysp_partition_mobile"
+                ] || 0) <= 1,
+            JSON.stringify(Object.fromEntries(maxWritersByKey(storage)))
+        );
+        expect(
+            "the baseline marker is written by one writer at a time",
+            (storage.stats.maxConcurrentByKey[
+                "fxcast_ysp_baseline_clean_done"
+            ] || 0) <= 1,
+            JSON.stringify(Object.fromEntries(maxWritersByKey(storage)))
+        );
+
+        for (let i = 0; i < 30; i++) {
+            storage.releaseGate();
+            await sleep(2);
+        }
+        const results = await Promise.all([firstReset, secondReset]);
+        expect(
+            "both overlapping resets converge once storage answers",
+            results.every(value => value === true),
+            JSON.stringify(results)
+        );
+        expect(
+            "and every governed key stayed single-writer throughout",
+            maxWritersByKey(storage).every(([, writers]) => writers <= 1),
+            JSON.stringify(Object.fromEntries(maxWritersByKey(storage)))
+        );
+        expect(
+            "the disk ends up cleared and re-armed",
+            Object.keys(
+                storage.getLocalState("fxcast_ysp_partition_pc").entries
+            ).length === 0 &&
+                storage.getLocalState("fxcast_ysp_baseline_clean_done") ===
+                    false
         );
     }
 ]);
