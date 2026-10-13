@@ -30,11 +30,26 @@ export const yangshipinSite = {
     pcDocHost: "www.yangshipin.cn",
     /** Mobile H5 document hosts. */
     mobileDocHosts: ["w.yangshipin.cn", "m.yangshipin.cn"],
+    /**
+     * Mobile document hosts whose **root path** serves a redirect trampoline
+     * instead of the H5 app: `https://w.yangshipin.cn/` answers 200 with
+     * `<meta http-equiv="refresh" content="0; URL='https://www.yangshipin.cn'"/>`
+     * and hands the visitor to the PC site (HAR-verified 2026-10-13).  Real
+     * business paths (`/home`, `/video`, `/tv`, ...) stay ordinary H5
+     * documents.
+     */
+    trampolineDocHosts: ["w.yangshipin.cn"],
     /** Scope of the client-managed (JS written) domain entry. */
     clientDomainScope: "yangshipin.cn"
 };
 
-export type Platform = "pc" | "mobile" | "external" | "unknown";
+export type Platform =
+    | "pc"
+    | "mobile"
+    | "external"
+    | "unknown"
+    /** §9.2 special case: a request class of its own, never a document host. */
+    | "trampoline";
 
 export function getHostname(urlStr?: string): string {
     if (!urlStr) return "";
@@ -64,6 +79,54 @@ export function docHostPlatform(host: string): "pc" | "mobile" | null {
 
 export function isYangshipinDocHost(host: string): boolean {
     return docHostPlatform(host) !== null;
+}
+
+/**
+ * Path component of a URL string, exactly as written.  A **bare origin**
+ * (`https://w.yangshipin.cn`, which is what an `Origin` header and
+ * `details.originUrl` carry — they never include a path) returns `""`, not
+ * `"/"`: the URL parser would normalise the missing path to `/` and make an
+ * iframe at `/embed` look like the root shell.  `""` means "the path is not
+ * known", and no trampoline verdict may be derived from it.
+ */
+export function getPathname(urlStr?: string): string {
+    if (!urlStr) return "";
+    const m = urlStr.match(/^(?:[a-z][a-z0-9+.-]*:)?\/\/[^\/?#]*(\/[^?#]*)?/i);
+    if (m) return m[1] || "";
+    try {
+        return new URL(urlStr).pathname || "/";
+    } catch {
+        return "";
+    }
+}
+
+/**
+ * §9.2 trampoline special case: a configured mobile document host's root path
+ * that only redirects.  It is deliberately *not* expressed as "not a document
+ * host": that verdict would hand the request to the §12.2 per-host baseline
+ * path, which deletes the parent-domain live parameters (`versionName`,
+ * `vplatform`, `guid`, `nseqId`, ...) this exception exists to protect.
+ *
+ * The predicate requires an explicit **root** path.  Host-only evaluations
+ * (the top-level host table, a bare initiator `originUrl` / `Origin` header,
+ * which never carry a path) cannot tell the shell from `/home`, so an absent
+ * or empty path never yields a trampoline verdict.
+ */
+export function isYangshipinTrampoline(
+    host: string,
+    pathname?: string
+): boolean {
+    if (typeof pathname !== "string") return false;
+    const h = (host || "").toLowerCase();
+    if (!yangshipinSite.trampolineDocHosts.includes(h)) return false;
+    return pathname.trim() === "/";
+}
+
+/** URL-level form of `isYangshipinTrampoline` (host and path from one URL). */
+export function isYangshipinTrampolineUrl(urlStr?: string): boolean {
+    const host = getHostname(urlStr);
+    if (!host) return false;
+    return isYangshipinTrampoline(host, getPathname(urlStr));
 }
 
 // ============================================================================
@@ -114,6 +177,8 @@ export interface YangshipinDiagnostics {
     errors: number;
     tombstoneBlocked: number;
     unknownPlatform: number;
+    /** §9.2 trampoline verdicts that refused credentials to a redirect shell. */
+    trampoline: number;
     setCookieParseFailures: number;
     invalidDomains: number;
     oversizeValues: number;
@@ -137,6 +202,7 @@ const diagnostics: YangshipinDiagnostics = {
     errors: 0,
     tombstoneBlocked: 0,
     unknownPlatform: 0,
+    trampoline: 0,
     setCookieParseFailures: 0,
     invalidDomains: 0,
     oversizeValues: 0,
@@ -393,6 +459,9 @@ export class SessionPartition {
     /** §12.2 per-host baseline cleaning markers. */
     baselineCleanedHosts = new Set<string>();
 
+    /** §13 doc hosts that have materialized their page copies in this session. */
+    materializedDocHosts = new Set<string>();
+
     /** §4.3 monotonic materialization revision counter. */
     nextValueRev = 0;
     /** §11.3 generation: bumped by session clear / session termination. */
@@ -429,6 +498,20 @@ export class SessionPartition {
 
     hasPendingWrites(): boolean {
         return this.stateRev > this.confirmedRev;
+    }
+
+    /** §5.2 step 3: demotion task mutations that mark persistent state changed. */
+    addPendingDemoteName(name: string): boolean {
+        if (!name || this.pendingDemoteNames.has(name)) return false;
+        this.pendingDemoteNames.add(name);
+        this.markChanged();
+        return true;
+    }
+
+    deletePendingDemoteName(name: string): boolean {
+        if (!this.pendingDemoteNames.delete(name)) return false;
+        this.markChanged();
+        return true;
     }
 
     /** Fire-and-forget write-through. Never throws, never awaited. */
@@ -487,9 +570,14 @@ export class SessionPartition {
     private buildStoragePayload(): Record<string, unknown> {
         const entries: Record<string, SessionPartitionCookie> = {};
         for (const [k, e] of this.entries) {
-            // §11.2: only server entries with a persistent expiry are stored.
-            if (e.source !== "server") continue;
-            if (e.expires === null || e.expires === undefined) continue;
+            // Drop entries whose explicit expiry has already elapsed
+            if (
+                e.expires !== null &&
+                e.expires !== undefined &&
+                e.expires <= Date.now()
+            ) {
+                continue;
+            }
             entries[k] = { ...e };
         }
         const tombstones: Record<string, PartitionTombstone> = {};
@@ -506,6 +594,7 @@ export class SessionPartition {
                 entries,
                 tombstones,
                 materializedCopies,
+                pendingDemoteNames: Array.from(this.pendingDemoteNames),
                 baselineCleanedHosts: Array.from(this.baselineCleanedHosts),
                 nextValueRev: this.nextValueRev,
                 stateRev: this.stateRev
@@ -779,6 +868,7 @@ export class SessionPartition {
         this.usageOrder.clear();
         this.tombstones.clear();
         this.pendingDemoteNames.clear();
+        this.materializedDocHosts.clear();
         this.generation++;
         this.markChanged();
         this.persistNow();
@@ -809,6 +899,7 @@ export class SessionPartition {
         this.pendingDemoteNames.clear();
         this.materializedCopies.clear();
         this.baselineCleanedHosts.clear();
+        this.materializedDocHosts.clear();
     }
 
     /** Restore a persisted state object (schema already validated). */
@@ -822,14 +913,19 @@ export class SessionPartition {
             )) {
                 const entry = validateStoredEntry(value);
                 if (!entry) continue;
-                if (entry.source !== "server") continue;
-                if (entry.expires === null || entry.expires === undefined) {
-                    // §11.1 session cookies never survive a restart
+                // Only drop entries whose explicit expiry has passed
+                if (
+                    entry.expires !== null &&
+                    entry.expires !== undefined &&
+                    entry.expires <= Date.now()
+                ) {
                     continue;
                 }
-                if (entry.expires <= Date.now()) continue;
                 this.entries.set(key, entry);
-                this.indexServer(entry);
+                this.markUsed(key);
+                if (entry.source === "server") {
+                    this.indexServer(entry);
+                }
                 if (entry.valueRev > this.nextValueRev) {
                     this.nextValueRev = entry.valueRev;
                 }
@@ -866,6 +962,14 @@ export class SessionPartition {
                 }
             }
         }
+        const rawDemote = state.pendingDemoteNames;
+        if (Array.isArray(rawDemote)) {
+            for (const n of rawDemote) {
+                if (typeof n === "string" && n) {
+                    this.pendingDemoteNames.add(n);
+                }
+            }
+        }
         const rawHosts = state.baselineCleanedHosts;
         if (Array.isArray(rawHosts)) {
             for (const h of rawHosts) {
@@ -894,7 +998,13 @@ function validateStoredEntry(
     if (typeof e.isHostOnly !== "boolean") return undefined;
     if (typeof e.httpOnly !== "boolean") return undefined;
     if (e.source !== "server" && e.source !== "client") return undefined;
-    if (e.expires !== null && typeof e.expires !== "number") return undefined;
+    if (
+        e.expires !== null &&
+        e.expires !== undefined &&
+        typeof e.expires !== "number"
+    ) {
+        return undefined;
+    }
     const sameSite =
         e.sameSite === "strict" || e.sameSite === "lax" || e.sameSite === "none"
             ? (e.sameSite as SameSiteValue)
@@ -908,7 +1018,7 @@ function validateStoredEntry(
         domain: typeof e.domain === "string" ? e.domain : undefined,
         secure: e.secure === true,
         httpOnly: e.httpOnly,
-        expires: e.expires as number | null,
+        expires: (e.expires as number | null | undefined) ?? null,
         source: e.source as CookieSource,
         createdAt: typeof e.createdAt === "number" ? e.createdAt : Date.now(),
         sameSite,
@@ -953,7 +1063,6 @@ export const mobilePartition = new SessionPartition(YSP_MOBILE_PARTITION_KEY);
 
 /** §3.1 in-memory execution marker for the global baseline. */
 let isBaselineCleanPending = true;
-let baselineMarkerHydrated = false;
 
 export function isYangshipinBaselinePending(): boolean {
     return isBaselineCleanPending;
@@ -990,14 +1099,22 @@ async function hydrateAll(): Promise<void> {
                 { storedSchema: schema, currentSchema: YSP_SCHEMA_VERSION }
             );
         }
-        if (!baselineMarkerHydrated) {
-            baselineMarkerHydrated = true;
-            isBaselineCleanPending = res[BASELINE_CLEAN_DONE_KEY] !== true;
-        }
+        isBaselineCleanPending = res[BASELINE_CLEAN_DONE_KEY] !== true;
+        // Counts only — never credential names or values.  This is the one
+        // line that tells a cold start apart from "the extension was not
+        // running at all" (a temporary add-on is unloaded on browser exit, so
+        // nothing hydrates and the site looks signed out by design).
+        logger.info("Yangshipin: session partitions hydrated", {
+            schemaAccepted,
+            pcEntries: pcPartition.entries.size,
+            mobileEntries: mobilePartition.entries.size,
+            baselinePending: isBaselineCleanPending
+        });
     } catch (err) {
         logger.warn("Yangshipin: failed to hydrate session partitions", {
             error: err instanceof Error ? err.message : String(err)
         });
+        throw err;
     }
 }
 
@@ -1014,14 +1131,21 @@ export function ensurePartitionsHydrated(): Promise<void> {
 export async function ensurePartitionsHydratedWithinTimeout(
     timeoutMs: number = HYDRATE_TIMEOUT_MS
 ): Promise<boolean> {
-    const hydration = ensurePartitionsHydrated().then(() => "ok" as const);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"timeout">(resolve => {
-        timer = setTimeout(() => resolve("timeout"), timeoutMs);
-    });
-    const result = await Promise.race([hydration, timeout]);
-    if (timer) clearTimeout(timer);
-    return result === "ok";
+    try {
+        const hydration = ensurePartitionsHydrated().then(
+            () => "ok" as const,
+            () => "err" as const
+        );
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<"timeout">(resolve => {
+            timer = setTimeout(() => resolve("timeout"), timeoutMs);
+        });
+        const result = await Promise.race([hydration, timeout]);
+        if (timer) clearTimeout(timer);
+        return result === "ok";
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -1104,6 +1228,12 @@ export function cleanupRequestIdPlatform(requestId?: string): void {
     requestIdPlatformMap.delete(requestId);
 }
 
+/**
+ * §9.2 initiator chain: `originUrl` > `documentUrl` > `Origin` > `Referer`,
+ * reduced to hosts.  The chain describes *who* the request belongs to and
+ * nothing else — an initiator URL is **never** inspected for its path (see
+ * `isYangshipinTrampolineNavigation`).
+ */
 export function collectCallerHosts(details: {
     originUrl?: string;
     documentUrl?: string;
@@ -1128,6 +1258,46 @@ export function collectCallerHosts(details: {
 }
 
 /**
+ * §9.2 trampoline request: a **top-level navigation to the shell URL itself**
+ * that is **not an in-app navigation**.
+ *
+ * The rule is deliberately this narrow, and an initiator URL can never
+ * *produce* a trampoline verdict (it can only exclude one):
+ *
+ * - The target must be an exact `main_frame` navigation to the shell.  A
+ *   subresource / XHR / iframe request to the same path is ordinary mobile
+ *   traffic.
+ * - An initiator that *is* a mobile document makes the navigation an ordinary
+ *   in-app one, handled as a mobile document.  The browser's default referrer
+ *   policy trims cross-origin referrers to their **origin**
+ *   (`https://w.yangshipin.cn/`) — textually identical to the shell URL — so
+ *   reading paths out of initiator URLs turned every mobile login/API call into
+ *   a "trampoline", sent it without credentials and discarded its
+ *   `Set-Cookie` (observed 2026-10-13 18:38: `auth_login` answered with
+ *   `vusession`/`vuserid`/`accesstoken`, none of which ever reached a later
+ *   request).  Initiator paths are therefore never consulted.
+ *
+ * HAR evidence for the shell itself: `https://w.yangshipin.cn/` reached as a
+ * `main_frame`, `sec-fetch-site: none` navigation answers 200 with a 163-byte
+ * meta-refresh body and carries the jar's live client parameters, which the
+ * mobile document path would adopt and then demote away before the redirect to
+ * `www.yangshipin.cn` needs them (`10011 请求不合法`).
+ */
+export function isYangshipinTrampolineNavigation(details: {
+    type?: string;
+    url: string;
+    originUrl?: string;
+    documentUrl?: string;
+    requestHeaders?: { name: string; value?: string }[];
+}): boolean {
+    if (details.type !== "main_frame") return false;
+    if (!isYangshipinTrampolineUrl(details.url)) return false;
+    return !collectCallerHosts(details).some(
+        host => docHostPlatform(host) === "mobile"
+    );
+}
+
+/**
  * §9.2 classification rules, evaluated in order.  The target host never
  * guesses the platform of a request whose initiator is unknown (R4 / D5), and
  * — per §9.3 step 2 — the top-level host table is a *context precondition*
@@ -1146,6 +1316,12 @@ function classifyWithCallerHosts(
 ): Platform {
     const isMainFrame = details.type === "main_frame";
     const isFrame = isMainFrame || details.type === "sub_frame";
+
+    // §9.2 R0t: the shell is a request class of its own, decided *before* R1
+    // and before the initiator fallback.  Saying "not a document host" instead
+    // would drop it into the §12.2 per-host baseline path, whose parent-domain
+    // deletes are exactly what broke the site (HAR 10011).
+    if (isYangshipinTrampolineNavigation(details)) return "trampoline";
 
     // §9.3 step 2: every non-navigation request must carry an established
     // top-level context.  Missing context (navigation failed, extension
@@ -1179,13 +1355,22 @@ function classifyWithCallerHosts(
     return "unknown";
 }
 
-/** Response-side platform resolution: binding first, document host fallback. */
+/**
+ * Response-side platform resolution: the outbound verdict for this very hop
+ * first, then — only when no verdict exists (extension reloaded mid-flight) —
+ * the shell rule and the document-host fallback.  The binding must win: a
+ * mobile-initiated navigation to the shell URL is an ordinary mobile document
+ * response, and re-deciding it from the URL alone would strand its
+ * `Set-Cookie`.
+ */
 function resolveResponsePlatform(
     requestId: string | undefined,
-    url: string
+    url: string,
+    type?: string
 ): Platform {
     const binding = requestId ? requestIdPlatformMap.get(requestId) : undefined;
     if (binding) return binding.platform;
+    if (isYangshipinTrampolineNavigation({ type, url })) return "trampoline";
     return docHostPlatform(getHostname(url)) ?? "unknown";
 }
 
@@ -1429,8 +1614,9 @@ function hasPendingCopyRevocation(
     reqHost: string,
     reqPath: string
 ): boolean {
-    // A live server entry keeps its own authority path (step 1-B).
+    // A live entry (server authority or active client) keeps its own authority path.
     if (partition.hasServerManagedName(name)) return false;
+    if (partition.entries.has(getClientDomainKey(name))) return false;
     for (const [key, record] of partition.materializedCopies) {
         if (record.name !== name) continue;
         if (docHostOfLedgerKey(key) !== reqHost) continue;
@@ -1541,6 +1727,21 @@ export async function handleYangshipinBeforeSendHeaders(
             tabId: typeof details.tabId === "number" ? details.tabId : -1
         });
 
+        if (platform === "trampoline") {
+            // §9.2: a top-level navigation to the redirect shell.  It carries
+            // no credential of either side, adopts nothing and starts no
+            // partition work — no baseline, no demotion/purge task, no
+            // materialization, no per-host clean marker.  The jar's own
+            // parent-domain live parameters stay in the jar, untouched, for
+            // the PC page the shell redirects to.
+            diagnostics.trampoline++;
+            if (cookieHeader) {
+                cookieHeader.value = "";
+                diagnostics.stripped++;
+                return { requestHeaders: reqHeaders as any };
+            }
+            return {};
+        }
         if (platform === "external") {
             // §9.1: third-party initiated — leave native behaviour alone.
             return {};
@@ -1674,6 +1875,8 @@ export async function handleYangshipinBeforeSendHeaders(
                 }
                 if (existingClient.value !== value) {
                     existingClient.value = value;
+                    existingClient.valueRev = ++targetPartition.nextValueRev;
+                    targetPartition.markChanged();
                 }
                 demoteNames.add(name);
             } else {
@@ -1732,11 +1935,12 @@ export async function handleYangshipinBeforeSendHeaders(
             ? // §9.3 step 3 explicit exception: a top-level navigation with no
               // initiator at all (typed URL, bookmark, stripped referrer) is
               // still same-site for cookie purposes.
-              callerHosts.length === 0 || callerHosts.some(isYangshipinDocHost)
+              callerHosts.length === 0 ||
+              callerHosts.some(host => isYangshipinDocHost(host))
             : // Every remaining request only reaches this point because §9.2 R2
               // resolved a document-host initiator, i.e. it is same-site.  The
               // top-level table never supplies the initiator itself.
-              callerHosts.some(isYangshipinDocHost);
+              callerHosts.some(host => isYangshipinDocHost(host));
         const method = (details.method || "GET").toUpperCase();
 
         const candidates: SessionPartitionCookie[] = [];
@@ -1883,8 +2087,10 @@ export async function handleYangshipinBeforeSendHeaders(
             reqHeaders.push({ name: "Cookie", value: outCookieValue });
         }
 
-        // §11.4: tombstone changes are write-through; client changes are not.
+        // §11.4: tombstone changes are write-through; client changes are debounced.
         if (tombstoneMutated) targetPartition.persistNow();
+        else if (targetPartition.hasPendingWrites())
+            targetPartition.schedulePersist();
 
         return { requestHeaders: reqHeaders as any };
     } catch (err) {
@@ -1979,11 +2185,13 @@ function buildMaterializedCopyLine(
         line += `; Expires=${new Date(entry.expires).toUTCString()}`;
     }
     if (reqIsHttps) line += "; Secure";
-    if (entry.sameSite) {
+    const sameSite =
+        entry.sameSite ?? (entry.source === "client" ? "lax" : undefined);
+    if (sameSite) {
         line += `; SameSite=${
-            entry.sameSite === "strict"
+            sameSite === "strict"
                 ? "Strict"
-                : entry.sameSite === "lax"
+                : sameSite === "lax"
                 ? "Lax"
                 : "None"
         }`;
@@ -1994,19 +2202,31 @@ function buildMaterializedCopyLine(
 /**
  * §13 materialization: one row per page-copy key `(name, path)`, computed
  * from the final state before any header is generated.
+ * Covers non-HttpOnly server credentials as well as active client entries.
  */
 function applyMaterialization(
     partition: SessionPartition,
     docHost: string,
     reqIsHttps: boolean,
     newResponseHeaders: { name: string; value?: string }[],
-    materializeCommits: { key: string; record?: MaterializedCopyRecord }[]
+    materializeCommits: { key: string; record?: MaterializedCopyRecord }[],
+    demotedHostOnlyNames: ReadonlySet<string> = new Set()
 ): boolean {
     const suffix = `#${docHost}`;
-    const candidates = Array.from(partition.entries.values()).filter(
-        entry => entry.source === "server" && !entry.httpOnly
-    );
+    const candidates = Array.from(partition.entries.values()).filter(entry => {
+        if (entry.source === "server") {
+            return !entry.httpOnly;
+        }
+        if (entry.source === "client") {
+            return !partition.hasServerManagedName(entry.name);
+        }
+        return false;
+    });
     candidates.sort((a, b) => {
+        // Server authority strictly precedes client
+        if (a.source !== b.source) {
+            return a.source === "server" ? -1 : 1;
+        }
         if (b.path.length !== a.path.length) {
             return b.path.length - a.path.length;
         }
@@ -2036,6 +2256,7 @@ function applyMaterialization(
         ...winnerByCopyKey.keys(),
         ...ledgerByCopyKey.keys()
     ]);
+    const firstVisitInSession = !partition.materializedDocHosts.has(docHost);
     let modified = false;
     for (const copyKey of copyKeys) {
         const winner = winnerByCopyKey.get(copyKey);
@@ -2044,14 +2265,21 @@ function applyMaterialization(
             const winnerKey = `${getEntryCompositeKey(winner)}${suffix}`;
             const current = partition.materializedCopies.get(winnerKey);
             const upToDate =
+                !firstVisitInSession &&
                 current !== undefined &&
                 current.valueRev === winner.valueRev &&
                 current.path === winner.path;
+            const alreadyEmittedByDemote = demotedHostOnlyNames.has(
+                winner.name
+            );
             if (!upToDate) {
-                newResponseHeaders.push({
-                    name: "Set-Cookie",
-                    value: buildMaterializedCopyLine(winner, reqIsHttps)
-                });
+                if (!alreadyEmittedByDemote) {
+                    newResponseHeaders.push({
+                        name: "Set-Cookie",
+                        value: buildMaterializedCopyLine(winner, reqIsHttps)
+                    });
+                    modified = true;
+                }
                 materializeCommits.push({
                     key: winnerKey,
                     record: {
@@ -2061,7 +2289,6 @@ function applyMaterialization(
                     }
                 });
                 diagnostics.materialized++;
-                modified = true;
             }
             for (const stale of ledger) {
                 if (stale.key === winnerKey) continue;
@@ -2096,7 +2323,18 @@ export async function handleYangshipinHeadersReceived(
         }
 
         const requestId = details.requestId;
-        const platform = resolveResponsePlatform(requestId, details.url);
+        const platform = resolveResponsePlatform(
+            requestId,
+            details.url,
+            details.type
+        );
+        if (platform === "trampoline") {
+            // §9.2: a trampoline response never reaches the jar or the
+            // partitions — every Set-Cookie is stripped and no demotion drain,
+            // baseline, session adjudication or materialization runs.
+            clearRequestScopedState(requestId);
+            return stripSetCookieHeaders(respHeaders);
+        }
         if (platform !== "pc" && platform !== "mobile") {
             // §9.1 / §9.5: only pc/mobile adjudicated responses may touch the
             // jar or the partitions.
@@ -2276,6 +2514,7 @@ export async function handleYangshipinHeadersReceived(
             ? pendingDemoteNamesByReq.get(requestId)
             : undefined;
         const processedDemoteNames: string[] = [];
+        const demotedHostOnlyNames = new Set<string>();
         if (!isDocHost) {
             if (demoteNames) {
                 for (const name of demoteNames) {
@@ -2291,7 +2530,9 @@ export async function handleYangshipinHeadersReceived(
                     } else {
                         // Task survives this response: wait for the next
                         // document-host response (accepted contract).
-                        targetPartition.pendingDemoteNames.add(name);
+                        if (targetPartition.addPendingDemoteName(name)) {
+                            persistentStateDirty = true;
+                        }
                     }
                 }
             }
@@ -2321,10 +2562,11 @@ export async function handleYangshipinHeadersReceived(
                         reqUrl.protocol === "https:" ? "; Secure" : ""
                     }`
                 });
+                demotedHostOnlyNames.add(name);
             }
         }
 
-        // Step 3c: materialize non-HttpOnly server credentials for the page.
+        // Step 3c: materialize page-visible credentials for the document host.
         const materializeCommits: {
             key: string;
             record?: MaterializedCopyRecord;
@@ -2336,7 +2578,8 @@ export async function handleYangshipinHeadersReceived(
                 respHost,
                 reqUrl.protocol === "https:",
                 newResponseHeaders,
-                materializeCommits
+                materializeCommits,
+                demotedHostOnlyNames
             )
         ) {
             headersModified = true;
@@ -2396,7 +2639,9 @@ export async function handleYangshipinHeadersReceived(
         // Commit boundary: only a full successful pass commits tasks/ledger.
         // ------------------------------------------------------------------
         for (const name of processedDemoteNames) {
-            targetPartition.pendingDemoteNames.delete(name);
+            if (targetPartition.deletePendingDemoteName(name)) {
+                persistentStateDirty = true;
+            }
         }
         for (const commit of materializeCommits) {
             if (commit.record) {
@@ -2409,6 +2654,9 @@ export async function handleYangshipinHeadersReceived(
             }
             targetPartition.markChanged();
             persistentStateDirty = true;
+        }
+        if (isDocHost) {
+            targetPartition.materializedDocHosts.add(respHost);
         }
 
         cleanupRequestIdPlatform(requestId);
@@ -2455,17 +2703,25 @@ export function cleanupYangshipinRequest(details: {
         const partition = partitionForPlatform(binding.platform);
         // §11.3: only tasks of the live generation are carried over.
         if (binding.generation === partition.generation) {
+            let taskAdded = false;
             const demoteNames = pendingDemoteNamesByReq.get(requestId);
             if (demoteNames) {
                 for (const name of demoteNames) {
-                    partition.pendingDemoteNames.add(name);
+                    if (partition.addPendingDemoteName(name)) {
+                        taskAdded = true;
+                    }
                 }
             }
             const purgeNames = pendingPurgeNamesByReq.get(requestId);
             if (purgeNames) {
                 for (const name of purgeNames) {
-                    partition.pendingDemoteNames.add(name);
+                    if (partition.addPendingDemoteName(name)) {
+                        taskAdded = true;
+                    }
                 }
+            }
+            if (taskAdded) {
+                partition.schedulePersist();
             }
         }
     }
@@ -2491,7 +2747,6 @@ export function clearYangshipinPartitions(): void {
     requestCookieNamesByReq.clear();
     pendingHostBaselineCleanByReq.clear();
     isBaselineCleanPending = true;
-    baselineMarkerHydrated = true;
     // The full reset is the only way back from a tripped breaker in-process;
     // production recovers by reloading the background page.
     circuitBreakerTripped = false;
@@ -2508,7 +2763,6 @@ export function rerunYangshipinBaseline(): void {
     pcPartition.persistNow();
     mobilePartition.persistNow();
     isBaselineCleanPending = true;
-    baselineMarkerHydrated = true;
     void persistBaselineCleanDone(false);
     logger.info("Yangshipin: baseline cleaning scheduled again");
 }
@@ -2534,10 +2788,24 @@ export function initYangshipinSessionInterceptor(): void {
     initIsolationOptionWatcher();
 
     // §9.3 step 2: the provisional top-level host must exist before any
-    // subresource of that document is issued.
+    // subresource of that document is issued.  A trampoline navigation
+    // *invalidates* the tab's stale context instead of writing its own: the
+    // shell is not an app document, and the redirect target establishes the
+    // next context (§9.2 trampoline special case).
     browser.webRequest.onBeforeRequest.addListener(
         details => {
             if (details.type === "main_frame" && details.tabId >= 0) {
+                if (
+                    isYangshipinTrampolineNavigation({
+                        type: details.type,
+                        url: details.url,
+                        originUrl: details.originUrl,
+                        documentUrl: details.documentUrl
+                    })
+                ) {
+                    tabTopHostByTabId.delete(details.tabId);
+                    return;
+                }
                 const host = getHostname(details.url);
                 if (host) tabTopHostByTabId.set(details.tabId, host);
             }
@@ -2546,7 +2814,9 @@ export function initYangshipinSessionInterceptor(): void {
     );
 
     // §9.3 step 2: a committed 2xx response confirms the host (each redirect
-    // hop already overwrote the provisional value).
+    // hop already overwrote the provisional value).  A committed trampoline
+    // confirms *no* context — writing `w.yangshipin.cn` here would resurrect
+    // exactly the stale verdict the navigation listener just dropped.
     browser.webRequest.onHeadersReceived.addListener(
         details => {
             if (
@@ -2556,6 +2826,17 @@ export function initYangshipinSessionInterceptor(): void {
                 details.statusCode >= 200 &&
                 details.statusCode < 300
             ) {
+                if (
+                    isYangshipinTrampolineNavigation({
+                        type: details.type,
+                        url: details.url,
+                        originUrl: details.originUrl,
+                        documentUrl: details.documentUrl
+                    })
+                ) {
+                    tabTopHostByTabId.delete(details.tabId);
+                    return;
+                }
                 const host = getHostname(details.url);
                 if (host) tabTopHostByTabId.set(details.tabId, host);
             }

@@ -85,7 +85,7 @@ const ASSERTION_GROUPS = [
     [
         "classification",
         "platform rules, redirects, SameSite",
-        ["10", "11", "12", "13", "14"]
+        ["10", "11", "12", "13", "14", "34"]
     ],
     [
         "persistence",
@@ -642,6 +642,11 @@ function installDomStubs() {
 
 const EXPORT_LIST = [
     "classifyYangshipinPlatform",
+    "isYangshipinDocHost",
+    "isYangshipinTrampoline",
+    "isYangshipinTrampolineUrl",
+    "getPathname",
+    "isYangshipinTrampolineNavigation",
     "handleYangshipinBeforeSendHeaders",
     "handleYangshipinHeadersReceived",
     "pcPartition",
@@ -650,6 +655,7 @@ const EXPORT_LIST = [
     "clearYangshipinSession",
     "rerunYangshipinBaseline",
     "rehydrateYangshipinPartitions",
+    "ensurePartitionsHydrated",
     "ensurePartitionsHydratedWithinTimeout",
     "persistSessionPartitionsNow",
     "isYangshipinBaselinePending",
@@ -705,7 +711,7 @@ async function bundleProductionModule() {
 
 /** Loads a fresh module instance against a fresh browser stub. */
 function createWorld(options = {}) {
-    const storage = createStorageStub();
+    const storage = options.storage || createStorageStub();
     const browser = createBrowserStub(storage, options);
     global.browser = browser;
     delete require.cache[require.resolve(bundlePath)];
@@ -1033,6 +1039,17 @@ const DOC_HOSTS = {
     mobileM: "m.yangshipin.cn"
 };
 
+/**
+ * The mobile H5 *business* document.  `https://w.yangshipin.cn/` (bare root) is
+ * a meta-refresh trampoline that hands the visitor to the PC site (§9.2), so
+ * every fixture meaning "the mobile document" uses a real business path.
+ */
+const MOBILE_DOC_PATH = "/home";
+const MOBILE_DOC_URL = `https://${DOC_HOSTS.mobileW}${MOBILE_DOC_PATH}`;
+const MOBILE_DOC_URL_M = `https://${DOC_HOSTS.mobileM}${MOBILE_DOC_PATH}`;
+/** The redirect shell itself: 200 + `<meta http-equiv="refresh">` to the PC site. */
+const TRAMPOLINE_URL = `https://${DOC_HOSTS.mobileW}/`;
+
 const SHARED_HOSTS = {
     h5access: "h5access.yangshipin.cn",
     ucenter: "ucenter-api.yangshipin.cn",
@@ -1063,7 +1080,7 @@ async function freshGroup(options = {}) {
         const platform = host.platform || "pc";
         const doc =
             platform === "mobile"
-                ? options.mobileDocumentUrl || `https://${DOC_HOSTS.mobileW}/`
+                ? options.mobileDocumentUrl || MOBILE_DOC_URL
                 : options.documentUrl || `https://${DOC_HOSTS.pc}/`;
         const partition =
             platform === "mobile"
@@ -1140,6 +1157,14 @@ const NAMES = {
     sessionCred: fixture("session-cred"),
     persistCred: fixture("persist-cred"),
     expiredCred: fixture("expired-cred"),
+    sessPc: fixture("sess-pc"),
+    persPc: fixture("pers-pc"),
+    clientPc: fixture("client-pc"),
+    nonHttpPc: fixture("nonhttp-pc"),
+    sessMob: fixture("sess-mob"),
+    persMob: fixture("pers-mob"),
+    clientMob: fixture("client-mob"),
+    nonHttpMob: fixture("nonhttp-mob"),
     quotaOne: fixture("quota-one"),
     quotaTwo: fixture("quota-two"),
     failCred: fixture("fail-cred"),
@@ -1193,7 +1218,11 @@ const NAMES = {
     plainDomain: fixture("plain-domain"),
     copyStale: fixture("copy-stale"),
     copyDeleted: fixture("copy-deleted"),
-    lruPrefix: fixture("lru-entry")
+    lruPrefix: fixture("lru-entry"),
+    liveParam: fixture("live-param"),
+    trampolineHostOnly: fixture("trampoline-hostonly"),
+    trampolineDomain: fixture("trampoline-domain"),
+    mobileClientMark: fixture("mobile-client-mark")
 };
 
 function utf8Length(value) {
@@ -1947,7 +1976,7 @@ ASSERTION_RUNNERS.push([
         const name = NAMES.mobileCred;
         const res = await sim.request({
             url: `https://${SHARED_HOSTS.h5access}/api/login`,
-            documentUrl: `https://${DOC_HOSTS.mobileW}/`,
+            documentUrl: MOBILE_DOC_URL,
             backend: () => ({
                 setCookies: [`${name}=${V.a}; HttpOnly; Path=/; Max-Age=3600`]
             })
@@ -1985,7 +2014,7 @@ ASSERTION_RUNNERS.push([
         const invalidBefore = mod.getYangshipinDiagnostics().invalidDomains;
         const apiInvalid = await sim.request({
             url: `https://${SHARED_HOSTS.h5access}/api/domain`,
-            documentUrl: `https://${DOC_HOSTS.mobileW}/`,
+            documentUrl: MOBILE_DOC_URL,
             backend: () => ({
                 setCookies: [
                     `${NAMES.badDomain}=${V.a}; Domain=evil.example; Path=/; Max-Age=3600`,
@@ -2135,7 +2164,7 @@ ASSERTION_RUNNERS.push([
             DOC_HOSTS.mobileW
         );
         const second = await sim.request({
-            url: `https://${DOC_HOSTS.mobileW}/`,
+            url: MOBILE_DOC_URL,
             type: "main_frame",
             tabId: 2
         });
@@ -2317,7 +2346,7 @@ ASSERTION_RUNNERS.push([
             })
         });
         await sim.request({
-            url: `https://${DOC_HOSTS.mobileW}/`,
+            url: MOBILE_DOC_URL,
             type: "main_frame",
             tabId: 2,
             backend: () => ({
@@ -2468,61 +2497,85 @@ ASSERTION_RUNNERS.push([
 
 ASSERTION_RUNNERS.push([
     "15",
-    "会话 cookie 与过期剔除 (session cookies, lazy expiry sweep)",
+    "冷启动状态恢复与过期保持 (cold start recovery: two-sided sessions, no baseline rerun, original expiry)",
     async expect => {
         const world = await freshGroup({
             apiHosts: [{ host: SHARED_HOSTS.h5access }]
         });
         const { sim, mod } = world;
         const pc = mod.pcPartition;
-        const sess = NAMES.sessionCred;
-        const pers = NAMES.persistCred;
+
+        const sessPc = NAMES.sessPc;
+        const persPc = NAMES.persPc;
+        const clientPc = NAMES.clientPc;
+        const nonHttpPc = NAMES.nonHttpPc;
+
+        const sessMob = NAMES.sessMob;
+        const persMob = NAMES.persMob;
+        const clientMob = NAMES.clientMob;
+        const nonHttpMob = NAMES.nonHttpMob;
+
         const expired = NAMES.expiredCred;
+        const futureExpiry = Date.now() + 3600 * 1000;
+        const pastExpiry = Date.now() - 1000;
+
+        // 1. PC 登录与页面物化
         await sim.request({
-            url: `https://${SHARED_HOSTS.h5access}/login`,
+            url: `https://${SHARED_HOSTS.h5access}/pc-login`,
             documentUrl: `https://${DOC_HOSTS.pc}/`,
             backend: () => ({
                 setCookies: [
-                    `${sess}=${V.a}; Path=/`,
-                    `${pers}=${V.b}; Path=/; Max-Age=3600`
+                    `${sessPc}=pc-sess-val; Path=/; HttpOnly`,
+                    `${persPc}=pc-pers-val; Path=/; Max-Age=3600; HttpOnly`,
+                    `${nonHttpPc}=pc-page-val; Path=/`
                 ]
             })
         });
-        const sessKey = mod.getCompositeCookieKey(
-            sess,
-            SHARED_HOSTS.h5access,
-            true,
-            "/"
+        world.jar.pageWrite(
+            `${clientPc}=pc-client-val; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
         );
-        const persKey = mod.getCompositeCookieKey(
-            pers,
-            SHARED_HOSTS.h5access,
-            true,
-            "/"
-        );
+        const pcDocPre = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/home`,
+            type: "main_frame"
+        });
         expect(
-            "session entry lives in memory with expires === null",
-            pc.entries.get(sessKey)?.expires === null,
-            JSON.stringify(pc.entries.get(sessKey))
+            "PC document response materialized non-HttpOnly credential before restart",
+            pcDocPre.setCookieLines.some(l =>
+                l.includes(`${nonHttpPc}=pc-page-val`)
+            ),
+            pcDocPre.setCookieLines.join(" | ")
         );
-        await mod.persistSessionPartitionsNow();
-        const stored = world.storage.getLocalState("fxcast_ysp_partition_pc");
-        expect(
-            "the stored payload omits the session cookie",
-            stored && stored.entries && !(sessKey in stored.entries),
-            JSON.stringify(stored && Object.keys(stored.entries || {}))
-        );
-        expect(
-            "the stored payload keeps the persistent server entry",
-            stored && stored.entries && persKey in stored.entries
-        );
-        await mod.rehydrateYangshipinPartitions();
-        expect(
-            "the session cookie does not survive re-hydration",
-            !pc.entries.has(sessKey)
-        );
-        expect("the persistent entry is restored", pc.entries.has(persKey));
 
+        // 2. Mobile 登录与页面物化
+        await sim.request({
+            url: `https://${SHARED_HOSTS.h5access}/mobile-login`,
+            documentUrl: MOBILE_DOC_URL,
+            backend: () => ({
+                setCookies: [
+                    `${sessMob}=mob-sess-val; Path=/; HttpOnly`,
+                    `${persMob}=mob-pers-val; Path=/; Max-Age=3600; HttpOnly`,
+                    `${nonHttpMob}=mob-page-val; Path=/`
+                ]
+            })
+        });
+        world.jar.pageWrite(
+            `${clientMob}=mob-client-val; Domain=.yangshipin.cn`,
+            DOC_HOSTS.mobileW
+        );
+        const mobDocPre = await sim.request({
+            url: `https://${DOC_HOSTS.mobileW}/home`,
+            type: "main_frame"
+        });
+        expect(
+            "Mobile document response materialized non-HttpOnly credential before restart",
+            mobDocPre.setCookieLines.some(l =>
+                l.includes(`${nonHttpMob}=mob-page-val`)
+            ),
+            mobDocPre.setCookieLines.join(" | ")
+        );
+
+        // 过期条目放入分区，验证不会复活
         const expKey = mod.getCompositeCookieKey(
             expired,
             SHARED_HOSTS.h5access,
@@ -2537,83 +2590,339 @@ ASSERTION_RUNNERS.push([
                 isHostOnly: true,
                 path: "/",
                 httpOnly: true,
-                expires: Date.now() - 1000
+                expires: pastExpiry
             })
         );
-        expect("expired entry placed in the partition", pc.entries.has(expKey));
-        await sim.request({
-            url: `https://${SHARED_HOSTS.h5access}/probe`,
-            documentUrl: `https://${DOC_HOSTS.pc}/`
-        });
         expect(
-            "the expired entry is swept on the outbound path",
-            !pc.entries.has(expKey)
-        );
-        expect(
-            "the sweep tombstones it with its last value",
-            pc.tombstones.get(expKey)?.valueFingerprint ===
-                mod.fingerprint(V.c),
-            JSON.stringify(pc.tombstones.get(expKey))
+            "expired entry placed in PC partition before persist",
+            pc.entries.has(expKey)
         );
 
-        const mkStored = (name, value, expires) => ({
-            name,
-            value,
-            host: SHARED_HOSTS.h5access,
-            path: "/",
-            isHostOnly: true,
-            secure: false,
-            httpOnly: true,
-            expires,
-            source: "server",
-            createdAt: Date.now(),
-            valueRev: 1
-        });
-        const storedSessionKey = `stored-${sess}#host#h5access.yangshipin.cn#/`;
-        const storedExpiredKey = `stored-${expired}#host#h5access.yangshipin.cn#/`;
-        const storedLiveKey = `stored-${pers}#host#h5access.yangshipin.cn#/`;
-        world.storage.setLocalState("fxcast_ysp_schema", 1);
-        world.storage.setLocalState("fxcast_ysp_partition_pc", {
-            entries: {
-                [storedSessionKey]: mkStored(sess, V.a, null),
-                [storedExpiredKey]: mkStored(expired, V.a, Date.now() - 1000),
-                [storedLiveKey]: mkStored(pers, V.a, Date.now() + 3600 * 1000)
-            },
-            tombstones: {},
-            materializedCopies: {},
-            baselineCleanedHosts: [],
-            nextValueRev: 7,
-            stateRev: 3
-        });
-        await mod.rehydrateYangshipinPartitions();
+        // 3. 持久化并检查落盘 payload
+        await mod.persistSessionPartitionsNow();
+        await settleWrites(world);
+
+        const storedPc = world.storage.getLocalState("fxcast_ysp_partition_pc");
+        const storedMob = world.storage.getLocalState(
+            "fxcast_ysp_partition_mobile"
+        );
+        const sessPcKey = mod.getCompositeCookieKey(
+            sessPc,
+            SHARED_HOSTS.h5access,
+            true,
+            "/"
+        );
+        const persPcKey = mod.getCompositeCookieKey(
+            persPc,
+            SHARED_HOSTS.h5access,
+            true,
+            "/"
+        );
+        const clientPcKey = mod.getClientDomainKey(clientPc);
+        const sessMobKey = mod.getCompositeCookieKey(
+            sessMob,
+            SHARED_HOSTS.h5access,
+            true,
+            "/"
+        );
+        const clientMobKey = mod.getClientDomainKey(clientMob);
+
         expect(
-            "hydrate drops the stored session cookie",
-            !pc.entries.has(storedSessionKey)
+            "stored PC payload keeps the session entry",
+            !!(storedPc && storedPc.entries && sessPcKey in storedPc.entries)
         );
         expect(
-            "hydrate drops the stored expired entry",
-            !pc.entries.has(storedExpiredKey)
+            "stored PC payload keeps the client entry",
+            !!(storedPc && storedPc.entries && clientPcKey in storedPc.entries)
         );
         expect(
-            "hydrate restores the stored live entry",
-            pc.entries.has(storedLiveKey)
+            "stored PC payload keeps the persistent entry",
+            !!(storedPc && storedPc.entries && persPcKey in storedPc.entries)
         );
         expect(
-            "hydrate restores nextValueRev",
-            pc.nextValueRev >= 7,
-            String(pc.nextValueRev)
+            "stored Mobile payload keeps the session entry",
+            !!(
+                storedMob &&
+                storedMob.entries &&
+                sessMobKey in storedMob.entries
+            )
+        );
+        expect(
+            "stored Mobile payload keeps the client entry",
+            !!(
+                storedMob &&
+                storedMob.entries &&
+                clientMobKey in storedMob.entries
+            )
         );
 
-        // §11.6: any schema version other than the current one is discarded
-        // (version 1 has no migration path).
-        world.storage.setLocalState("fxcast_ysp_schema", 2);
-        await mod.rehydrateYangshipinPartitions();
+        // 4. 全新模块冷启动（复用 storage，清除内存 jar）
+        const coldWorld = createWorld({
+            storage: world.storage
+        });
+        const coldSim = coldWorld.sim;
+        const coldMod = coldWorld.mod;
+        const coldPc = coldMod.pcPartition;
+
+        await coldMod.ensurePartitionsHydrated();
+
+        // 契约：重启不重新执行基线
+        expect(
+            "cold start does not rerun global baseline",
+            coldMod.isYangshipinBaselinePending() === false
+        );
+
+        // 契约：已过期条目不复活，未过期条目保持原到期时间（不续期）
+        expect(
+            "expired entry is not restored on cold start",
+            !coldPc.entries.has(expKey)
+        );
+        expect(
+            "persistent entry retains original expiry timestamp without renewal",
+            coldPc.entries.get(persPcKey)?.expires !== null &&
+                Math.abs(coldPc.entries.get(persPcKey).expires - futureExpiry) <
+                    5000,
+            String(coldPc.entries.get(persPcKey)?.expires)
+        );
+
+        // 5. 两端首次访问仍保持各自状态
+        // PC 访问文档主机：入向恢复页面可读副本（同时包含非 HttpOnly server 凭据与 client 凭据！）
+        const pcFirstDoc = await coldSim.request({
+            url: `https://${DOC_HOSTS.pc}/`,
+            type: "main_frame"
+        });
+        expect(
+            "PC document response re-materializes non-HttpOnly server copy on cold start",
+            pcFirstDoc.setCookieLines.some(l =>
+                l.includes(`${nonHttpPc}=pc-page-val`)
+            ),
+            pcFirstDoc.setCookieLines.join(" | ")
+        );
+        expect(
+            "PC document response re-materializes client page copy on cold start",
+            pcFirstDoc.setCookieLines.some(l =>
+                l.includes(`${clientPc}=pc-client-val`)
+            ),
+            pcFirstDoc.setCookieLines.join(" | ")
+        );
+
+        expect(
+            "PC partition records docHost as materialized after first commit",
+            coldPc.materializedDocHosts.has(DOC_HOSTS.pc) === true
+        );
+
+        // 同一会话第二次访问文档主机：不重复下发已物化的副本
+        const pcSecondDoc = await coldSim.request({
+            url: `https://${DOC_HOSTS.pc}/page2`,
+            type: "main_frame",
+            noJarHeader: true
+        });
+        expect(
+            "PC second document response does NOT re-emit already materialized copies",
+            !pcSecondDoc.setCookieLines.some(l => l.includes(`${clientPc}=`)) &&
+                !pcSecondDoc.setCookieLines.some(l =>
+                    l.includes(`${nonHttpPc}=`)
+                ),
+            pcSecondDoc.setCookieLines.join(" | ")
+        );
+
+        // PC 访问 API 主机：出向携带 PC session、client 与 persistent 凭据，绝对不带 Mobile 凭据
+        const pcApiReq = await coldSim.request({
+            url: `https://${SHARED_HOSTS.h5access}/api`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            type: "xmlhttprequest"
+        });
+        expect(
+            "PC API request carries PC session and client credentials",
+            pcApiReq.outboundCookie.includes(`${sessPc}=pc-sess-val`) &&
+                pcApiReq.outboundCookie.includes(`${clientPc}=pc-client-val`) &&
+                pcApiReq.outboundCookie.includes(`${persPc}=pc-pers-val`),
+            pcApiReq.outboundCookie
+        );
+        expect(
+            "PC API request carries NO Mobile credentials",
+            !pcApiReq.outboundCookie.includes(sessMob) &&
+                !pcApiReq.outboundCookie.includes(clientMob) &&
+                !pcApiReq.outboundCookie.includes(persMob),
+            pcApiReq.outboundCookie
+        );
+
+        // Mobile 访问文档主机：入向恢复页面可读副本
+        const mobFirstDoc = await coldSim.request({
+            url: MOBILE_DOC_URL,
+            type: "main_frame"
+        });
+        expect(
+            "Mobile document response re-materializes non-HttpOnly server copy on cold start",
+            mobFirstDoc.setCookieLines.some(l =>
+                l.includes(`${nonHttpMob}=mob-page-val`)
+            ),
+            mobFirstDoc.setCookieLines.join(" | ")
+        );
+        expect(
+            "Mobile document response re-materializes client page copy on cold start",
+            mobFirstDoc.setCookieLines.some(l =>
+                l.includes(`${clientMob}=mob-client-val`)
+            ),
+            mobFirstDoc.setCookieLines.join(" | ")
+        );
+
+        // Mobile 访问 API 主机：出向携带 Mobile session、client 与 persistent 凭据，绝对不带 PC 凭据
+        const mobApiReq = await coldSim.request({
+            url: `https://${SHARED_HOSTS.h5access}/api`,
+            documentUrl: MOBILE_DOC_URL,
+            type: "xmlhttprequest"
+        });
+        expect(
+            "Mobile API request carries Mobile session and client credentials",
+            mobApiReq.outboundCookie.includes(`${sessMob}=mob-sess-val`) &&
+                mobApiReq.outboundCookie.includes(
+                    `${clientMob}=mob-client-val`
+                ) &&
+                mobApiReq.outboundCookie.includes(`${persMob}=mob-pers-val`),
+            mobApiReq.outboundCookie
+        );
+        expect(
+            "Mobile API request carries NO PC credentials",
+            !mobApiReq.outboundCookie.includes(sessPc) &&
+                !mobApiReq.outboundCookie.includes(clientPc) &&
+                !mobApiReq.outboundCookie.includes(persPc),
+            mobApiReq.outboundCookie
+        );
+
+        // 6. 验证“条目已落盘之后才新增任务”以及“任务排空后重启不再恢复旧任务”
+        // A. 当前 coldPc 稳态持久化，pendingDemoteNames 为空
+        await coldMod.persistSessionPartitionsNow();
+        await settleWrites(coldWorld);
+        const storedBeforeTask = coldWorld.storage.getLocalState(
+            "fxcast_ysp_partition_pc"
+        );
+        expect(
+            "pending tasks empty in storage before new API task",
+            !storedBeforeTask.pendingDemoteNames ||
+                storedBeforeTask.pendingDemoteNames.length === 0,
+            JSON.stringify(storedBeforeTask.pendingDemoteNames)
+        );
+
+        // B. API 请求写入新 client 参数（产生待降级任务）
+        const taskClientName = "taskClientKey";
+        coldWorld.jar.pageWrite(
+            `${taskClientName}=task-val; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        await coldSim.request({
+            url: `https://${SHARED_HOSTS.h5access}/api-task`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            type: "xmlhttprequest"
+        });
+        expect(
+            "API response adds task to memory pendingDemoteNames",
+            coldPc.pendingDemoteNames.has(taskClientName)
+        );
+        expect(
+            "adding task marks persistent state dirty (has pending writes)",
+            coldPc.hasPendingWrites() === true
+        );
+
+        // C. 持久化并验证存储包含该任务
+        await coldMod.persistSessionPartitionsNow();
+        await settleWrites(coldWorld);
+        const storedWithTask = coldWorld.storage.getLocalState(
+            "fxcast_ysp_partition_pc"
+        );
+        expect(
+            "storage now persists the pending demote task",
+            Array.isArray(storedWithTask.pendingDemoteNames) &&
+                storedWithTask.pendingDemoteNames.includes(taskClientName),
+            JSON.stringify(storedWithTask.pendingDemoteNames)
+        );
+
+        // D. 全新模块冷启动，验证冷启动能恢复该任务
+        const coldWorldWithTask = createWorld({
+            storage: coldWorld.storage
+        });
+        await coldWorldWithTask.mod.ensurePartitionsHydrated();
+        expect(
+            "cold start restores the pending demote task",
+            coldWorldWithTask.mod.pcPartition.pendingDemoteNames.has(
+                taskClientName
+            )
+        );
+
+        // E. 文档响应排空该任务
+        const drainDoc = await coldWorldWithTask.sim.request({
+            url: `https://${DOC_HOSTS.pc}/drain-task`,
+            type: "main_frame"
+        });
+        expect(
+            "document response drains the task and purges domain copy",
+            drainDoc.setCookieLines.some(l =>
+                l.includes(`${taskClientName}=; Max-Age=0`)
+            ),
+            drainDoc.setCookieLines.join(" | ")
+        );
+        expect(
+            "drained task is deleted from memory pendingDemoteNames",
+            !coldWorldWithTask.mod.pcPartition.pendingDemoteNames.has(
+                taskClientName
+            )
+        );
+        expect(
+            "task deletion marks persistent state dirty",
+            coldWorldWithTask.mod.pcPartition.hasPendingWrites() === true
+        );
+
+        // F. 持久化后再次冷启动，验证已排空任务不会复活
+        await coldWorldWithTask.mod.persistSessionPartitionsNow();
+        await settleWrites(coldWorldWithTask);
+        const storedDrained = coldWorldWithTask.storage.getLocalState(
+            "fxcast_ysp_partition_pc"
+        );
+        expect(
+            "storage no longer contains the drained task",
+            !storedDrained.pendingDemoteNames ||
+                !storedDrained.pendingDemoteNames.includes(taskClientName),
+            JSON.stringify(storedDrained.pendingDemoteNames)
+        );
+
+        const coldWorldFinal = createWorld({
+            storage: coldWorldWithTask.storage
+        });
+        await coldWorldFinal.mod.ensurePartitionsHydrated();
+        expect(
+            "final cold start does not resurrect drained task",
+            !coldWorldFinal.mod.pcPartition.pendingDemoteNames.has(
+                taskClientName
+            )
+        );
+
+        // G. 错误清理路径主动安排持久化
+        const errClientName = "errCleanTask";
+        coldWorldFinal.jar.pageWrite(
+            `${errClientName}=err-val; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        const errHandle = await coldWorldFinal.sim.begin({
+            url: `https://${DOC_HOSTS.pc}/err-fail`,
+            type: "main_frame"
+        });
+        coldWorldFinal.sim.fail(errHandle);
+        expect(
+            "cleanupYangshipinRequest transfers task to partition and marks pending writes",
+            coldWorldFinal.mod.pcPartition.pendingDemoteNames.has(
+                errClientName
+            ) && coldWorldFinal.mod.pcPartition.hasPendingWrites() === true
+        );
+
+        // 验证 schema 不匹配依然丢弃
+        coldWorld.storage.setLocalState("fxcast_ysp_schema", 2);
+        await coldMod.rehydrateYangshipinPartitions();
         expect(
             "a higher stored schema discards every hydrated entry and tombstone",
-            pc.entries.size === 0 && pc.tombstones.size === 0,
-            `${pc.entries.size} entries / ${pc.tombstones.size} tombstones`
+            coldPc.entries.size === 0 && coldPc.tombstones.size === 0,
+            `${coldPc.entries.size} entries / ${coldPc.tombstones.size} tombstones`
         );
-        world.storage.setLocalState("fxcast_ysp_schema", 1);
+        coldWorld.storage.setLocalState("fxcast_ysp_schema", 1);
     }
 ]);
 
@@ -2657,12 +2966,13 @@ ASSERTION_RUNNERS.push([
         );
         await mod.persistSessionPartitionsNow();
         const stored = world.storage.getLocalState("fxcast_ysp_partition_pc");
+        const clientKey = mod.getClientDomainKey(name);
         expect(
-            "the client entry never appears in a persisted payload",
+            "the client entry is persisted with its newest value on persist",
             stored &&
                 stored.entries &&
-                !Object.keys(stored.entries).some(key => key.includes(name)),
-            JSON.stringify(stored && Object.keys(stored.entries || {}))
+                stored.entries[clientKey]?.value === "sequence-99",
+            JSON.stringify(stored && stored.entries)
         );
     }
 ]);
@@ -2936,7 +3246,7 @@ ASSERTION_RUNNERS.push([
         );
         const otherPlatform = await sim.request({
             url: `https://${SHARED_HOSTS.h5access}/api`,
-            documentUrl: `https://${DOC_HOSTS.mobileW}/`
+            documentUrl: MOBILE_DOC_URL
         });
         expect(
             "the other platform's request no longer carries the name",
@@ -3423,15 +3733,15 @@ ASSERTION_RUNNERS.push([
         await apiSet(
             "/mobile-login",
             [`${loginType}=${V.c}; Path=/; Max-Age=3600`],
-            `https://${DOC_HOSTS.mobileW}/`
+            MOBILE_DOC_URL
         );
-        const onW = await docGet(`https://${DOC_HOSTS.mobileW}/`, 2);
+        const onW = await docGet(MOBILE_DOC_URL, 2);
         expect(
             "materialized on w",
             onW.setCookieLines.some(l => l.startsWith(`${loginType}=${V.c};`)),
             onW.setCookieLines.join(" | ")
         );
-        const onM = await docGet(`https://${DOC_HOSTS.mobileM}/`, 3);
+        const onM = await docGet(MOBILE_DOC_URL_M, 3);
         expect(
             "m materializes independently (w progress does not represent m)",
             onM.setCookieLines.some(l => l.startsWith(`${loginType}=${V.c};`)),
@@ -4400,7 +4710,7 @@ ASSERTION_RUNNERS.push([
             tabId: 21
         });
         const tabB = await sim.begin({
-            url: `https://${DOC_HOSTS.mobileW}/`,
+            url: MOBILE_DOC_URL,
             type: "main_frame",
             tabId: 22
         });
@@ -5317,6 +5627,411 @@ ASSERTION_RUNNERS.push([
     }
 ]);
 
+ASSERTION_RUNNERS.push([
+    "34",
+    "根目录跳板只限顶层直连导航 (the shell is a narrow top-level exception, never an initiator verdict, §9.2)",
+    async expect => {
+        const world = await freshGroup({
+            apiHosts: [{ host: SHARED_HOSTS.ucenter }]
+        });
+        const { sim, mod, jar } = world;
+        const tab = 51;
+        const live = NAMES.liveParam;
+        const sheet = url =>
+            mod.classifyYangshipinPlatform(
+                Object.assign({ type: "main_frame", tabId: tab }, url)
+            );
+        // The tab is on the mobile H5 page (the §9.3 context precondition).
+        mod.tabTopHostByTabId.set(tab, DOC_HOSTS.mobileW);
+
+        // ------------------------------------------------------------------
+        // 1. The regression that broke the mobile sign-in (HAR 2026-10-13
+        //    18:38): the browser trims cross-origin referrers to their origin,
+        //    so every mobile login/API call carries `Referer:
+        //    https://w.yangshipin.cn/` — textually the shell URL.  No initiator
+        //    URL may ever produce a trampoline verdict.
+        // ------------------------------------------------------------------
+        expect(
+            "an api call from the mobile page with the origin-trimmed referer is mobile",
+            mod.classifyYangshipinPlatform({
+                url: `https://${SHARED_HOSTS.h5access}/web/auth_login?vappid=1`,
+                type: "xmlhttprequest",
+                tabId: tab,
+                documentUrl: MOBILE_DOC_URL,
+                requestHeaders: [
+                    { name: "Referer", value: TRAMPOLINE_URL },
+                    { name: "Origin", value: `https://${DOC_HOSTS.mobileW}` }
+                ]
+            }) === "mobile",
+            mod.classifyYangshipinPlatform({
+                url: `https://${SHARED_HOSTS.h5access}/web/auth_login?vappid=1`,
+                type: "xmlhttprequest",
+                tabId: tab,
+                documentUrl: MOBILE_DOC_URL,
+                requestHeaders: [{ name: "Referer", value: TRAMPOLINE_URL }]
+            })
+        );
+        expect(
+            "a trimmed referer alone is enough context to stay mobile",
+            sheet({
+                url: `https://${SHARED_HOSTS.h5access}/web/simple_user_info`,
+                type: "xmlhttprequest",
+                documentUrl: undefined,
+                requestHeaders: [{ name: "Referer", value: TRAMPOLINE_URL }]
+            }) === "mobile" ||
+                mod.classifyYangshipinPlatform({
+                    url: `https://${SHARED_HOSTS.h5access}/web/simple_user_info`,
+                    type: "xmlhttprequest",
+                    tabId: tab,
+                    documentUrl: MOBILE_DOC_URL,
+                    requestHeaders: [{ name: "Referer", value: TRAMPOLINE_URL }]
+                }) === "mobile"
+        );
+        expect(
+            "an in-app navigation to the shell path is an ordinary mobile document",
+            sheet({ url: TRAMPOLINE_URL, documentUrl: MOBILE_DOC_URL }) ===
+                "mobile",
+            sheet({ url: TRAMPOLINE_URL, documentUrl: MOBILE_DOC_URL })
+        );
+        expect(
+            "a non-navigation request to the shell path is not a trampoline either",
+            mod.classifyYangshipinPlatform({
+                url: TRAMPOLINE_URL,
+                type: "xmlhttprequest",
+                tabId: tab,
+                documentUrl: MOBILE_DOC_URL
+            }) === "mobile"
+        );
+
+        // Full cycle: the mobile login response must land in the *mobile*
+        // partition (Zero-Jar) and be re-sent by the very next mobile call.
+        const loginName = NAMES.mobileCred;
+        sim.fireNavStart({
+            tabId: tab,
+            url: MOBILE_DOC_URL,
+            requestId: sim.nextRequestId()
+        });
+        const login = await sim.request({
+            url: `https://${SHARED_HOSTS.h5access}/web/auth_login?vappid=1`,
+            method: "POST",
+            type: "xmlhttprequest",
+            tabId: tab,
+            documentUrl: MOBILE_DOC_URL,
+            referer: TRAMPOLINE_URL,
+            backend: () => ({
+                setCookies: [`${loginName}=${V.a}; HttpOnly; Path=/`]
+            })
+        });
+        expect(
+            "the mobile sign-in credential is registered in the mobile partition",
+            entriesNamed(mod.mobilePartition, loginName).length === 1 &&
+                entriesNamed(mod.pcPartition, loginName).length === 0,
+            JSON.stringify(entriesNamed(mod.mobilePartition, loginName))
+        );
+        expect(
+            "and it never reaches the jar (Zero-Jar on the shared host)",
+            jar.count(loginName) === 0 && !hasSetCookie(login.responseHeaders)
+        );
+        const afterLogin = await sim.request({
+            url: `https://${SHARED_HOSTS.h5access}/web/simple_user_info`,
+            type: "xmlhttprequest",
+            tabId: tab,
+            documentUrl: MOBILE_DOC_URL,
+            referer: TRAMPOLINE_URL
+        });
+        expect(
+            "the next mobile call is re-populated with it",
+            afterLogin.outboundCookie.includes(`${loginName}=${V.a}`),
+            afterLogin.outboundCookie
+        );
+
+        // An in-app navigation to the shell path is an ordinary mobile document
+        // for its *response* too: the outbound verdict must win over the URL,
+        // otherwise its Set-Cookie is stranded.
+        const inAppShell = await sim.request({
+            url: TRAMPOLINE_URL,
+            type: "main_frame",
+            tabId: tab,
+            documentUrl: MOBILE_DOC_URL,
+            backend: () => ({
+                setCookies: [
+                    `${NAMES.trampolineDomain}=${V.c}; Path=/; Max-Age=3600`
+                ]
+            })
+        });
+        expect(
+            "an in-app shell-path navigation keeps its own document response (the binding wins)",
+            entriesNamed(mod.mobilePartition, NAMES.trampolineDomain).length ===
+                1 && hasSetCookie(inAppShell.responseHeaders),
+            `${JSON.stringify(
+                entriesNamed(mod.mobilePartition, NAMES.trampolineDomain)
+            )} / ${inAppShell.setCookieLines.join(" | ")}`
+        );
+        mod.mobilePartition.entries.delete(
+            mod.getCompositeCookieKey(
+                NAMES.trampolineDomain,
+                DOC_HOSTS.mobileW,
+                true,
+                "/"
+            )
+        );
+        mod.mobilePartition.entries.delete(
+            mod.getCompositeCookieKey(
+                NAMES.trampolineDomain,
+                "yangshipin.cn",
+                false,
+                "/"
+            )
+        );
+
+        // ------------------------------------------------------------------
+        // 2. The shell itself: a top-level navigation with **no initiator**
+        //    (typed URL / bookmark) is the case the exception exists for; a
+        //    navigation started by the PC site is not an in-app one either.
+        // ------------------------------------------------------------------
+        expect(
+            "the typed shell navigation is classified trampoline",
+            sheet({ url: TRAMPOLINE_URL }) === "trampoline",
+            sheet({ url: TRAMPOLINE_URL })
+        );
+        expect(
+            "a pc-initiated shell navigation is trampoline, not a mobile document",
+            sheet({
+                url: TRAMPOLINE_URL,
+                documentUrl: `https://${DOC_HOSTS.pc}/`
+            }) === "trampoline",
+            sheet({
+                url: TRAMPOLINE_URL,
+                documentUrl: `https://${DOC_HOSTS.pc}/`
+            })
+        );
+        expect(
+            "the shell predicate is host-aware but never host-only",
+            mod.isYangshipinDocHost(DOC_HOSTS.mobileW) === true &&
+                mod.isYangshipinTrampoline(DOC_HOSTS.mobileW) === false &&
+                mod.isYangshipinTrampoline(DOC_HOSTS.mobileW, "/") === true &&
+                mod.isYangshipinTrampolineUrl(TRAMPOLINE_URL) === true &&
+                mod.isYangshipinTrampolineUrl(MOBILE_DOC_URL) === false &&
+                mod.isYangshipinTrampolineUrl(`https://${DOC_HOSTS.pc}/`) ===
+                    false
+        );
+        expect(
+            "only a main_frame navigation qualifies",
+            mod.isYangshipinTrampolineNavigation({
+                type: "xmlhttprequest",
+                url: TRAMPOLINE_URL
+            }) === false &&
+                mod.isYangshipinTrampolineNavigation({
+                    type: "sub_frame",
+                    url: TRAMPOLINE_URL
+                }) === false &&
+                mod.isYangshipinTrampolineNavigation({
+                    type: "main_frame",
+                    url: TRAMPOLINE_URL
+                }) === true &&
+                mod.isYangshipinTrampolineNavigation({
+                    type: "main_frame",
+                    url: TRAMPOLINE_URL,
+                    documentUrl: MOBILE_DOC_URL
+                }) === false
+        );
+
+        // The tab currently shows the PC site, with a live parent-domain
+        // parameter in the jar for the shell to (not) destroy.
+        sim.fireNavStart({
+            tabId: tab,
+            url: `https://${DOC_HOSTS.pc}/`,
+            requestId: sim.nextRequestId()
+        });
+        mod.tabTopHostByTabId.set(tab, DOC_HOSTS.pc);
+        jar.pageWrite(`${live}=${V.a}; Domain=.yangshipin.cn`, DOC_HOSTS.pc);
+
+        const before = {
+            pcEntries: mod.pcPartition.entries.size,
+            mobileEntries: mod.mobilePartition.entries.size,
+            pcDemotes: mod.pcPartition.pendingDemoteNames.size,
+            mobileDemotes: mod.mobilePartition.pendingDemoteNames.size,
+            pcLedger: mod.pcPartition.materializedCopies.size,
+            mobileLedger: mod.mobilePartition.materializedCopies.size,
+            pcCleans: mod.pcPartition.baselineCleanedHosts.size,
+            mobileCleans: mod.mobilePartition.baselineCleanedHosts.size,
+            trampoline: mod.getYangshipinDiagnostics().trampoline,
+            unknown: mod.getYangshipinDiagnostics().unknownPlatform
+        };
+
+        const shellHandle = await sim.begin({
+            url: TRAMPOLINE_URL,
+            type: "main_frame",
+            tabId: tab
+        });
+        expect(
+            "the shell request carries no credential at all",
+            shellHandle.outboundCookie === "",
+            shellHandle.outboundCookie
+        );
+        expect(
+            "the shell navigation invalidates the stale top-level context before its response",
+            !mod.tabTopHostByTabId.has(tab),
+            String(mod.tabTopHostByTabId.get(tab))
+        );
+        expect(
+            "it is bound as its own class, not as unknown",
+            mod.requestIdPlatformMap.get(shellHandle.requestId)?.platform ===
+                "trampoline",
+            String(
+                mod.requestIdPlatformMap.get(shellHandle.requestId)?.platform
+            )
+        );
+        const shell = await sim.finish(shellHandle, {
+            backend: () => ({
+                statusCode: 200,
+                headers: [{ name: "Content-Type", value: "text/html" }],
+                setCookies: [
+                    `${NAMES.trampolineHostOnly}=${V.b}; Path=/`,
+                    `${NAMES.trampolineDomain}=${V.c}; Domain=.yangshipin.cn; Path=/`
+                ]
+            })
+        });
+        expect(
+            "every Set-Cookie of the shell response is stripped",
+            !hasSetCookie(shell.responseHeaders) &&
+                shell.setCookieLines.length === 0,
+            shell.setCookieLines.join(" | ")
+        );
+        expect(
+            "the shell response issues no delete of any kind",
+            !shell.setCookieLines.some(
+                line => line.includes("Domain=") || line.includes("Max-Age=0")
+            ),
+            shell.setCookieLines.join(" | ")
+        );
+        expect(
+            "the parent-domain live parameter is still in the jar",
+            jar.byScope(live, "yangshipin.cn").length === 1,
+            JSON.stringify(jar.find(live))
+        );
+        expect(
+            "no partition entry, demotion task, ledger row or clean marker changed",
+            mod.pcPartition.entries.size === before.pcEntries &&
+                mod.mobilePartition.entries.size === before.mobileEntries &&
+                mod.pcPartition.pendingDemoteNames.size === before.pcDemotes &&
+                mod.mobilePartition.pendingDemoteNames.size ===
+                    before.mobileDemotes &&
+                mod.pcPartition.materializedCopies.size === before.pcLedger &&
+                mod.mobilePartition.materializedCopies.size ===
+                    before.mobileLedger &&
+                mod.pcPartition.baselineCleanedHosts.size === before.pcCleans &&
+                mod.mobilePartition.baselineCleanedHosts.size ===
+                    before.mobileCleans,
+            `${mod.pcPartition.entries.size}/${mod.mobilePartition.entries.size} entries`
+        );
+        expect(
+            "the shell is never booked as a per-host-cleaned api host",
+            !mod.pcPartition.baselineCleanedHosts.has(DOC_HOSTS.mobileW) &&
+                !mod.mobilePartition.baselineCleanedHosts.has(DOC_HOSTS.mobileW)
+        );
+        expect(
+            "the shell verdict is counted as trampoline, never as unknown",
+            mod.getYangshipinDiagnostics().trampoline ===
+                before.trampoline + 1 &&
+                mod.getYangshipinDiagnostics().unknownPlatform ===
+                    before.unknown
+        );
+        expect(
+            "the shell leaves no top-level context behind",
+            !mod.tabTopHostByTabId.has(tab),
+            String(mod.tabTopHostByTabId.get(tab))
+        );
+
+        // ------------------------------------------------------------------
+        // 3. With no binding at all (extension reloaded between the two
+        //    halves) a `main_frame` shell response is still refused — while an
+        //    unbound *mobile document* response still takes the normal path,
+        //    so the URL rule is not over-broad.
+        // ------------------------------------------------------------------
+        const unboundShell = await mod.handleYangshipinHeadersReceived({
+            requestId: "unbound-shell-34",
+            url: TRAMPOLINE_URL,
+            type: "main_frame",
+            tabId: 52,
+            statusCode: 200,
+            responseHeaders: [
+                {
+                    name: "Set-Cookie",
+                    value: `${NAMES.trampolineHostOnly}=${V.b}; Path=/`
+                }
+            ]
+        });
+        expect(
+            "an unbound main_frame shell response is refused by its URL alone",
+            !hasSetCookie(unboundShell.responseHeaders || []) &&
+                entriesNamed(mod.mobilePartition, NAMES.trampolineHostOnly)
+                    .length === 0,
+            JSON.stringify(unboundShell)
+        );
+        const unboundDoc = await mod.handleYangshipinHeadersReceived({
+            requestId: "unbound-doc-34",
+            url: MOBILE_DOC_URL,
+            type: "main_frame",
+            tabId: 52,
+            statusCode: 200,
+            responseHeaders: [
+                {
+                    name: "Set-Cookie",
+                    value: `${NAMES.mobileMark}=${V.b}; Path=/; Max-Age=3600`
+                }
+            ]
+        });
+        expect(
+            "an unbound mobile document response is still processed as mobile",
+            entriesNamed(mod.mobilePartition, NAMES.mobileMark).length === 1 &&
+                hasSetCookie(unboundDoc.responseHeaders || []),
+            JSON.stringify(unboundDoc)
+        );
+
+        // ------------------------------------------------------------------
+        // 4. A new request lifecycle after the shell: the meta refresh lands
+        //    on the PC site, the context is rebuilt there, and the jar's live
+        //    parameter reaches the pc partition instead of dying in the shell.
+        // ------------------------------------------------------------------
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/`,
+            type: "main_frame",
+            tabId: tab
+        });
+        expect(
+            "the redirect target establishes the pc context",
+            mod.tabTopHostByTabId.get(tab) === DOC_HOSTS.pc,
+            String(mod.tabTopHostByTabId.get(tab))
+        );
+        const api = await sim.request({
+            url: `https://${SHARED_HOSTS.ucenter}/v1/user/userinfo`,
+            type: "xmlhttprequest",
+            method: "POST",
+            tabId: tab
+        });
+        expect(
+            "the pc page's first api call still carries the parent-domain live parameter",
+            api.outboundCookie.includes(`${live}=${V.a}`),
+            api.outboundCookie
+        );
+        expect(
+            "the pc partition adopted it as its own client entry",
+            mod.pcPartition.entries.get(mod.getClientDomainKey(live))?.value ===
+                V.a && entriesNamed(mod.mobilePartition, live).length === 0,
+            JSON.stringify(
+                mod.pcPartition.entries.get(mod.getClientDomainKey(live))
+            )
+        );
+        expect(
+            "the parent-domain demotion is performed by the pc document, not by the shell",
+            jar.byScope(live, "yangshipin.cn").length === 0 &&
+                jar.count(live) === 1,
+            JSON.stringify(jar.find(live))
+        );
+    }
+]);
+
 // ============================================================================
 // 10. main
 // ============================================================================
@@ -5354,7 +6069,7 @@ async function main() {
         suppressed++;
     };
     try {
-        console.log("Yangshipin session-isolation harness (design v+8)");
+        console.log("Yangshipin session-isolation harness (design v+10)");
         console.log(
             `esbuild resolved via require.resolve: ${path.relative(
                 repoRoot,

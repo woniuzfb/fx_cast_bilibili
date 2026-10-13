@@ -59,6 +59,13 @@ Because the credentials live in the extension's storage rather than the browser 
     sent without credentials, and an unattributable response has its `Set-Cookie` discarded. In practice this
     can happen when the background page was restarted while a Yangshipin tab stayed open; reloading the page
     restores the context.
+-   **The mobile site's bare root (`https://w.yangshipin.cn/`) is a redirect shell when opened directly**, not an H5
+    page: such a top-level navigation (typed URL, bookmark) is sent without credentials, its `Set-Cookie` is
+    discarded, and it neither reads nor changes either session, so the live parameters the page writes into
+    `.yangshipin.cn` survive the hop to `www.yangshipin.cn` (before this rule the shell wiped them and the PC
+    player APIs answered `10011 请求不合法`). Navigating to that path from inside the mobile site, and every
+    normal mobile request, stay ordinary mobile traffic.
+
 -   **Known limits.** Firefox Multi-Account Containers share one extension partition, so using Yangshipin in
     several containers is not isolated from itself; private windows are out of scope. Only `pc` and `mobile`
     partitions exist.

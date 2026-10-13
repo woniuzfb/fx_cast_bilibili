@@ -84,11 +84,12 @@ This document provides architectural guidance, core invariants, common pitfalls,
 -   **按主机清洗只跳过「准入」，绝不跳过「补发」**：未清洗的共享 API 主机必须照常收到本端分区的权威候选（Zero-Jar 之后分区是唯一凭据来源，跳过补发会让该主机首次请求整条不带凭据、也不带页面 JS 的跨主机活体参数，服务端请求合法性校验直接失败）；只跳过原始头的采纳与墓碑清除，jar 中分区未覆盖的残留仍按原样放行、由该响应双删，同名时本端权威值优先。
 -   **残留放行不得绕过本端已知防御**：残留追加前必须丢弃「值匹配墓碑 / 本端任意作用域已有同名 server 权威 / 本端已有同名 client 受管条目 / 同名页面副本待撤销」的项。放行只是「不学习」，不是「绕过裁决」。
 -   **平台判定 fail-closed（`classifyYangshipinPlatform`）**：非 `main_frame` 请求必须有顶层上下文（`tabTopHostByTabId`，缺失或 `tabId < 0` → `unknown`）且必须有文档主机发起方（`originUrl` > `documentUrl` > `Origin` > `Referer`，缺失 → `unknown`）；顶层表**只校验上下文，绝不替代发起方**。第三方顶层 → `external`。`unknown`/以其它方式无法归属的响应一律剥除 Set-Cookie。SameSite 的「无发起方视为同站」例外只允许出现在 `main_frame` 顶层导航。
+-   **根目录跳板只限顶层直连导航（`isYangshipinTrampolineNavigation`，方案 §9.2 R0t）**：`https://w.yangshipin.cn/` 仅在「`type === "main_frame"` **且**目标 URL 命中跳板（配置主机 + **显式** `/`）**且**发起方链（`collectCallerHosts`，**只取 host**）不含移动文档主机」时判为 `trampoline`。出向不注入任何凭据（本端分区候选与 jar 残留都拦下）、不准入、不排队降级/purge、不写 `baselineCleanedHosts`；入向**绑定优先**（站内导航到 `/` 的文档响应按 mobile 处理，否则其 Set-Cookie 被搁死），仅无绑定时才以 `main_frame` + 响应 URL 兜底剥除整条 Set-Cookie；仅判决成立时删除该 tab 的旧顶层上下文。**两条铁律**：① 严禁把跳板表达成「不是文档主机」——那会把它交给按主机清洗路径，从另一个入口继续删父域 cookie 并伪造清洗记录；② **严禁用发起方 URL 的路径产生跳板判决**——浏览器把跨域 Referer 裁成 origin `https://w.yangshipin.cn/`（与跳板 URL 字面相同），据此判决会让整条移动端登录被当成跳板（`auth_login` 不带凭据、`vusession` 从未登记），发起方路径只能用于排除。详见 [.memory/2026-10-13.md](file:///.memory/2026-10-13.md) §4。
 -   **页面副本撤销期抑制**：名字在请求主机上还有 `materializedCopies` 台账而未撤销、且本端已无同名活跃 server 条目时，原始头里的同名值不得被重新准入为 client 条目（否则清除会话后的旧副本会以更宽作用域复活）；撤销由台账响应完成，抑制随台账记录删除自动解除。
 -   **非法 Domain 一律拒绝**：`Domain` 存在但与响应主机不 domain-match 时整条 Set-Cookie 失效（RFC 6265 §5.3 step 6），绝不降级成 host-only 落盘；缺省 `Domain` 才是 host-only。
 -   **容量淘汰是真 LRU**：`usageOrder`（Map 插入序 = 最近使用序）+ `markUsed()`，不用创建时间冒名顶替「最久未使用」。
 -   **生命周期**：会话终结由协议属性判定（`source=server && httpOnly` 条目被删且同复合键未重发），**严禁按 URL 路径识别登出**；终结 / 清除会话推进分区 `generation`，旧代际的在飞响应只剥 Set-Cookie、不登记不降级不物化。
--   **持久化**：client 条目与会话 cookie 永不落盘；墓碑 / 会话终结 / 基线完成走 `persistNow()` 写穿，其余走 1000 ms 防抖；所有写入经同一串行队列（`stateRev` 单调，旧快照不得覆盖新快照），入口内部吞掉一切异常。
+-   **持久化与重启恢复（v+9 契约）**：重启不清除两端状态、不重新执行基线，恢复关闭前的有效状态；原本有明确到期时间的 Cookie 仍按原时间到期（不续期，过期直接丢弃），无到期时间的条目（会话 server 条目与 client 条目）及恢复关联状态（`pendingDemoteNames`、`baselineCleanedHosts`、`materializedCopies`）完整持久化与恢复；冷启动首个同端文档响应重新下发页面赢家副本；client 变更走 1000 ms 防抖合并，墓碑 / 会话终结 / 基线完成走 `persistNow()` 写穿；所有写入经同一串行队列（`stateRev` 单调，旧快照不得覆盖新快照），入口内部吞掉一切异常。
 -   **关闭开关 = 登出一次**：凭据不在 jar 中，`yangshipinSessionIsolation` 关闭后 handler 立即 `return {}`，等价于登出；改这条链路前先读方案 §9.5 与 §15。
 
 ---
