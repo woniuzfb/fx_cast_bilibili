@@ -110,7 +110,12 @@ const ASSERTION_GROUPS = [
         "cold-start and reset operation generation",
         ["36", "37", "38"]
     ],
-    ["writer", "single-writer slot for confirmed flushes", ["39", "40"]]
+    ["writer", "single-writer slot for confirmed flushes", ["39", "40"]],
+    [
+        "playback-401",
+        "cross-platform doc-host, 304 cache replay, stale host-only rollback, tab context recovery, 401/403 debug dump",
+        ["41", "42", "43", "44", "45"]
+    ]
 ];
 
 const checkIdsByGroup = new Map(ASSERTION_GROUPS.map(([id]) => [id, []]));
@@ -727,12 +732,15 @@ const EXPORT_LIST = [
     "pathMatches",
     "domainMatches",
     "tabTopHostByTabId",
+    "committedTopHostByTabId",
     "requestIdPlatformMap",
     "cleanupYangshipinRequest",
     "cleanupRequestIdPlatform",
     "initYangshipinSessionInterceptor",
     "recordRequestIdBinding",
-    "resetYangshipinForUser"
+    "resetYangshipinForUser",
+    "getYangshipinAuthFailureLogs",
+    "clearYangshipinAuthFailureLogs"
 ];
 
 let workDir = null;
@@ -1108,7 +1116,8 @@ const TRAMPOLINE_URL = `https://${DOC_HOSTS.mobileW}/`;
 const SHARED_HOSTS = {
     h5access: "h5access.yangshipin.cn",
     ucenter: "ucenter-api.yangshipin.cn",
-    liveinfo: "liveinfo.yangshipin.cn"
+    liveinfo: "liveinfo.yangshipin.cn",
+    player: "player-api.yangshipin.cn"
 };
 
 /**
@@ -6787,6 +6796,750 @@ ASSERTION_RUNNERS.push([
             ).length === 0 &&
                 storage.getLocalState("fxcast_ysp_baseline_clean_done") ===
                     false
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "41",
+    "跨平台子资源不偷排空降级与按主机清洗保护待降级客户端项 (cross-platform subresource & pending-demote protection)",
+    async expect => {
+        const world = await freshGroup({
+            apiHosts: [{ host: SHARED_HOSTS.ucenter }]
+        });
+        const { sim, jar, mod } = world;
+        const pc = mod.pcPartition;
+        const tokenMark = cookieName("client-token-", "mark");
+
+        // 1. Page JS on PC writes a parent-domain token mark and calls an API
+        //    host (`ucenter-api`), which admits it into `pcPartition` and
+        //    queues `tokenMark` in `pc.pendingDemoteNames`.
+        jar.pageWrite(
+            `${tokenMark}=${V.fresh}; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        await sim.request({
+            url: `https://${SHARED_HOSTS.ucenter}/v1/user/info`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`
+        });
+        expect(
+            "the API call queues the client mark in pcPartition.pendingDemoteNames",
+            pc.pendingDemoteNames.has(tokenMark) &&
+                pc.entries.get(mod.getClientDomainKey(tokenMark))?.value ===
+                    V.fresh
+        );
+
+        // 2. Before any new `www.yangshipin.cn` document response arrives, the
+        //    PC page loads a CSS/PNG subresource from `m.yangshipin.cn` (which
+        //    is a mobile document host, NOT a PC document host) and touches an
+        //    uncleaned API host (`player-api.yangshipin.cn`).
+        //     First touch on `m.*` runs per-host baseline clean, second touch on
+        //    `m.*` runs steady-state response handling for `platform === "pc"`.
+        const mTouch1 = await sim.request({
+            url: `https://${DOC_HOSTS.mobileM}/static/login.png`,
+            type: "image",
+            documentUrl: `https://${DOC_HOSTS.pc}/`
+        });
+        const mTouch2 = await sim.request({
+            url: `https://${DOC_HOSTS.mobileM}/static/theme.css`,
+            type: "style",
+            documentUrl: `https://${DOC_HOSTS.pc}/`
+        });
+        expect(
+            "m.yangshipin.cn subresource loaded by PC never steals pcPartition.pendingDemoteNames",
+            pc.pendingDemoteNames.has(tokenMark),
+            JSON.stringify(Array.from(pc.pendingDemoteNames))
+        );
+        expect(
+            "m.yangshipin.cn subresource loaded by PC never materializes PC cookies onto m",
+            !mTouch1.setCookieLines.some(l =>
+                l.startsWith(`${tokenMark}=${V.fresh}`)
+            ) &&
+                !mTouch2.setCookieLines.some(l =>
+                    l.startsWith(`${tokenMark}=${V.fresh}`)
+                ) &&
+                !pc.materializedDocHosts.has(DOC_HOSTS.mobileM),
+            mTouch1.setCookieLines.concat(mTouch2.setCookieLines).join(" | ")
+        );
+        expect(
+            "per-host baseline on a non-document host does not delete an un-drained active client domain cookie",
+            jar.byScope(tokenMark, "yangshipin.cn").length === 1 &&
+                jar.byScope(tokenMark, "yangshipin.cn")[0].value === V.fresh,
+            JSON.stringify(jar.find(tokenMark))
+        );
+
+        // 3. The next PC document response on `www.yangshipin.cn` drains
+        //    `pendingDemoteNames`, deletes the parent-domain copy and plants
+        //    the Host-Only copy on `www.yangshipin.cn`.
+        const pcDoc = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/video`,
+            type: "main_frame"
+        });
+        expect(
+            "www.yangshipin.cn drains the pending demote task and plants the Host-Only copy on www",
+            !pc.pendingDemoteNames.has(tokenMark) &&
+                pcDoc.setCookieLines.includes(
+                    `${tokenMark}=; Max-Age=0; Path=/; Domain=.yangshipin.cn`
+                ) &&
+                pcDoc.setCookieLines.some(l =>
+                    l.startsWith(`${tokenMark}=${V.fresh}; Path=/`)
+                ),
+            pcDoc.setCookieLines.join(" | ")
+        );
+        expect(
+            "the browser jar now holds the Host-Only copy on www.yangshipin.cn",
+            jar.byScope(tokenMark, DOC_HOSTS.pc).length === 1 &&
+                jar.byScope(tokenMark, "yangshipin.cn").length === 0,
+            JSON.stringify(jar.find(tokenMark))
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "42",
+    "304 缓存重放与文档主机副本回显防御及污染自愈 (304 / cached doc-host echo defense & hydration self-heal)",
+    async expect => {
+        const world = await freshGroup({
+            apiHosts: [
+                { host: SHARED_HOSTS.player },
+                { host: SHARED_HOSTS.ucenter }
+            ]
+        });
+        const { sim, jar, mod } = world;
+        const pc = mod.pcPartition;
+        const clientId = cookieName("device-id-", "key");
+        const clientKey = mod.getClientDomainKey(clientId);
+
+        // 1. Page JS writes `clientId` on `.yangshipin.cn`; `www` demotes it
+        //    to a Host-Only copy on `www.yangshipin.cn`.
+        jar.pageWrite(
+            `${clientId}=${V.a}; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        const firstDoc = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/`,
+            type: "main_frame"
+        });
+        expect(
+            "first 200 response emits the demotion pair (Domain Max-Age=0 + Host-Only copy)",
+            firstDoc.setCookieLines.includes(
+                `${clientId}=; Max-Age=0; Path=/; Domain=.yangshipin.cn`
+            ) &&
+                firstDoc.setCookieLines.some(l =>
+                    l.startsWith(`${clientId}=${V.a}; Path=/; SameSite=Lax`)
+                ),
+            firstDoc.setCookieLines.join(" | ")
+        );
+
+        // 2. Simulate Firefox Gecko's 304 Not Modified cache revalidation on
+        //    `www.yangshipin.cn`, which replays the cached response headers
+        //    from the earlier 200 OK (including our injected demotion pair!).
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/`,
+            type: "main_frame",
+            backend: () => ({
+                statusCode: 304,
+                setCookies: firstDoc.setCookieLines.slice()
+            })
+        });
+        expect(
+            "after 304 cache replay the entry remains a client domain entry (never tombstoned or turned into host-only server)",
+            pc.entries.get(clientKey)?.source === "client" &&
+                pc.entries.get(clientKey)?.value === V.a &&
+                !pc.hasServerManagedName(clientId) &&
+                !pc.tombstones.has(clientKey),
+            JSON.stringify({
+                entries: Array.from(pc.entries.entries()),
+                tombstones: Array.from(pc.tombstones.keys())
+            })
+        );
+
+        // 3. Even if a 200 OK cached doc-host response replays those exact
+        //    demotion/materialization lines, Step 2 must not poison the client
+        //    domain entry into a host-only server entry on `www`.
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/cached-sub`,
+            type: "script",
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            backend: () => ({
+                statusCode: 200,
+                setCookies: firstDoc.setCookieLines.slice()
+            })
+        });
+        expect(
+            "after 200 cached doc-host echo the entry still remains a client domain entry",
+            pc.entries.get(clientKey)?.source === "client" &&
+                !pc.hasServerManagedName(clientId),
+            JSON.stringify(Array.from(pc.entries.entries()))
+        );
+
+        // 4. Shared API (`player-api.yangshipin.cn`) still receives `clientId`!
+        const apiCall = await sim.request({
+            url: `https://${SHARED_HOSTS.player}/v1/player/auth`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`
+        });
+        expect(
+            "shared API request still carries the client domain entry after 304/cached doc-host responses",
+            apiCall.outboundCookie.includes(`${clientId}=${V.a}`),
+            apiCall.outboundCookie
+        );
+
+        // 5. Hydration self-heal for a previously poisoned storage snapshot
+        //    where `clientId#host#www.yangshipin.cn#/` was stored as
+        //    `source: "server"` and `applyMaterialization` had already overwritten
+        //    the ledger key to `clientId#host#www.yangshipin.cn#/#www.yangshipin.cn`
+        //    plus a domain tombstone at `clientKey`.
+        const poisonedKey = mod.getCompositeCookieKey(
+            clientId,
+            DOC_HOSTS.pc,
+            true,
+            "/"
+        );
+        const poisonedStorage = createStorageStub();
+        poisonedStorage.setLocalState("fxcast_ysp_schema", 1);
+        poisonedStorage.setLocalState("fxcast_ysp_baseline_clean_done", true);
+        poisonedStorage.setLocalState("fxcast_ysp_partition_pc", {
+            entries: {
+                [poisonedKey]: {
+                    name: clientId,
+                    value: V.a,
+                    host: DOC_HOSTS.pc,
+                    path: "/",
+                    isHostOnly: true,
+                    httpOnly: false,
+                    expires: null,
+                    source: "server",
+                    createdAt: Date.now() - 5000,
+                    sameSite: "lax",
+                    valueRev: 3
+                }
+            },
+            tombstones: {
+                [clientKey]: {
+                    name: clientId,
+                    scope: "yangshipin.cn",
+                    isHostOnly: false,
+                    path: "/",
+                    timestamp: Date.now() - 5000,
+                    valueFingerprint: mod.fingerprint(V.a)
+                }
+            },
+            materializedCopies: {
+                [`${poisonedKey}#${DOC_HOSTS.pc}`]: {
+                    valueRev: 3,
+                    path: "/",
+                    name: clientId
+                }
+            },
+            pendingDemoteNames: [],
+            baselineCleanedHosts: [DOC_HOSTS.pc, SHARED_HOSTS.player],
+            nextValueRev: 3,
+            stateRev: 3
+        });
+        const healedWorld = createWorld({ storage: poisonedStorage });
+        await healedWorld.mod.ensurePartitionsHydrated();
+        const healedPc = healedWorld.mod.pcPartition;
+        expect(
+            "hydration heals the poisoned host-only @ www server entry back into a client domain entry",
+            healedPc.entries.get(clientKey)?.source === "client" &&
+                healedPc.entries.get(clientKey)?.value === V.a &&
+                !healedPc.entries.has(poisonedKey) &&
+                !healedPc.hasServerManagedName(clientId) &&
+                !healedPc.tombstones.has(clientKey),
+            JSON.stringify({
+                entries: Array.from(healedPc.entries.entries()),
+                tombstones: Array.from(healedPc.tombstones.keys())
+            })
+        );
+
+        // 6. Legitimate Host-Only server cookie on `www.yangshipin.cn` must NOT
+        //    be widened to a parent-domain client entry on `hydrate()` when
+        //    there is no client-provenance ledger or paired parent-domain
+        //    tombstone (`报告2` §1 regression check).
+        const legitServerName = cookieName("legit-doc-", "server");
+        const legitServerKey = mod.getCompositeCookieKey(
+            legitServerName,
+            DOC_HOSTS.pc,
+            true,
+            "/"
+        );
+        await healedWorld.sim.request({
+            url: `https://${DOC_HOSTS.pc}/set-legit`,
+            type: "main_frame",
+            backend: () => ({
+                statusCode: 200,
+                setCookies: [
+                    `${legitServerName}=${V.server}; Path=/; SameSite=Lax`
+                ]
+            })
+        });
+        await healedWorld.mod.persistSessionPartitionsNow();
+        await settleWrites(healedWorld);
+        const rehydratedWorld = createWorld({ storage: poisonedStorage });
+        await rehydratedWorld.mod.ensurePartitionsHydrated();
+        const rehydratedPc = rehydratedWorld.mod.pcPartition;
+        expect(
+            "a legitimate Host-Only server cookie on www stays server-scoped after hydrate and is never widened to .yangshipin.cn",
+            rehydratedPc.entries.get(legitServerKey)?.source === "server" &&
+                rehydratedPc.entries.get(legitServerKey)?.isHostOnly === true &&
+                !rehydratedPc.entries.has(
+                    rehydratedWorld.mod.getClientDomainKey(legitServerName)
+                ),
+            JSON.stringify(Array.from(rehydratedPc.entries.entries()))
+        );
+
+        // 7. Legitimate 304 server renewal (`Set-Cookie` with new value) is
+        //    still registered and NOT blanket-dropped (`报告2` §2 regression check).
+        const rotateName = cookieName("rotate-304-", "cred");
+        const rotateKey = mod.getCompositeCookieKey(
+            rotateName,
+            SHARED_HOSTS.ucenter,
+            true,
+            "/"
+        );
+        await sim.request({
+            url: `https://${SHARED_HOSTS.ucenter}/v1/token`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            backend: () => ({
+                statusCode: 200,
+                setCookies: [
+                    `${rotateName}=${V.old}; HttpOnly; Path=/; Max-Age=3600`
+                ]
+            })
+        });
+        await sim.request({
+            url: `https://${SHARED_HOSTS.ucenter}/v1/token`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            backend: () => ({
+                statusCode: 304,
+                setCookies: [
+                    `${rotateName}=${V.fresh}; HttpOnly; Path=/; Max-Age=3600`
+                ]
+            })
+        });
+        expect(
+            "a legitimate Set-Cookie renewal on a 304 response updates the partition entry",
+            pc.entries.get(rotateKey)?.value === V.fresh,
+            JSON.stringify(pc.entries.get(rotateKey))
+        );
+
+        // 8. Standalone parent-domain server deletion on `www.yangshipin.cn`
+        //    (with no companion Host-Only client echo in the same response)
+        //    deletes and tombstones the active client entry (`报告2` §3 check).
+        const delClientName = cookieName("server-del-", "client");
+        const delClientKey = mod.getClientDomainKey(delClientName);
+        jar.pageWrite(
+            `${delClientName}=${V.a}; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/init-del`,
+            type: "main_frame"
+        });
+        expect(
+            "delClientName is active before standalone server deletion",
+            pc.entries.get(delClientKey)?.value === V.a
+        );
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/do-del`,
+            type: "main_frame",
+            backend: () => ({
+                statusCode: 200,
+                setCookies: [
+                    `${delClientName}=; Domain=.yangshipin.cn; Path=/; Max-Age=0`
+                ]
+            })
+        });
+        expect(
+            "a standalone parent-domain deletion on www deletes and tombstones the client entry",
+            !pc.entries.has(delClientKey) && pc.tombstones.has(delClientKey),
+            JSON.stringify({
+                hasEntry: pc.entries.has(delClientKey),
+                hasTombstone: pc.tombstones.has(delClientKey)
+            })
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "43",
+    "同请求新旧值与未更新 Host-Only 副本防回滚及跨主机待撤销抑制 (rollback defense & cross-host revocation guard)",
+    async expect => {
+        const world = await freshGroup({
+            apiHosts: [
+                { host: SHARED_HOSTS.ucenter },
+                { host: SHARED_HOSTS.player }
+            ]
+        });
+        const { sim, jar, mod } = world;
+        const pc = mod.pcPartition;
+        const refreshMark = cookieName("refresh-mark-", "key");
+        const clientKey = mod.getClientDomainKey(refreshMark);
+
+        // 1. Initial login: `refreshMark = V.old` is materialized/demoted onto
+        //    `www.yangshipin.cn` (`hostOnly: true`).
+        jar.pageWrite(
+            `${refreshMark}=${V.old}; Domain=.yangshipin.cn`,
+            DOC_HOSTS.pc
+        );
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/`,
+            type: "main_frame"
+        });
+        expect(
+            "initial value V.old is recorded in pcPartition and its fingerprint (never plaintext) in materializedCopies",
+            pc.entries.get(clientKey)?.value === V.old &&
+                pc.materializedCopies.get(`${clientKey}#${DOC_HOSTS.pc}`)
+                    ?.valueFingerprint === mod.fingerprint(V.old) &&
+                pc.materializedCopies.get(`${clientKey}#${DOC_HOSTS.pc}`)
+                    ?.value === undefined
+        );
+
+        // 2. Scenario A: Page JS updates `.yangshipin.cn` to `V.fresh`, and the
+        //    next request to `www.yangshipin.cn` sends `Cookie: refreshMark=V.fresh; refreshMark=V.old`
+        //    (`NEW; OLD` order in the same header).
+        const sameReq = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/play`,
+            type: "main_frame",
+            rawCookie: `${refreshMark}=${V.fresh}; ${refreshMark}=${V.old}`
+        });
+        expect(
+            "same-request NEW; OLD order keeps V.fresh and does not roll back to V.old",
+            pc.entries.get(clientKey)?.value === V.fresh &&
+                sameReq.outboundCookie.includes(`${refreshMark}=${V.fresh}`) &&
+                !sameReq.outboundCookie.includes(`${refreshMark}=${V.old}`),
+            `${pc.entries.get(clientKey)?.value} / ${sameReq.outboundCookie}`
+        );
+        expect(
+            "the response updates the Host-Only copy on www to V.fresh",
+            sameReq.setCookieLines.some(l =>
+                l.startsWith(`${refreshMark}=${V.fresh}; Path=/`)
+            ),
+            sameReq.setCookieLines.join(" | ")
+        );
+
+        // 3. Scenario B: Later, Page JS refreshes tokens to `V.c` and makes an
+        //    API call (`ucenter-api`), which updates `pcPartition` to `V.c`
+        //    (`valueRev` advances), while `www.yangshipin.cn`'s Host-Only copy
+        //    in the jar is still `V.fresh`.  When the user then visits `www`,
+        //    even if the request carries the stale Host-Only copy `V.fresh`
+        //    (alone or after `V.c`), `pcPartition` must keep `V.c` and overwrite
+        //    `www`'s Host-Only copy with `V.c`!
+        await sim.request({
+            url: `https://${SHARED_HOSTS.ucenter}/v1/auth/refresh`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            rawCookie: `${refreshMark}=${V.c}`
+        });
+        expect(
+            "API request advances pcPartition to V.c while www ledger still records fingerprint(V.fresh)",
+            pc.entries.get(clientKey)?.value === V.c &&
+                pc.materializedCopies.get(`${clientKey}#${DOC_HOSTS.pc}`)
+                    ?.valueFingerprint === mod.fingerprint(V.fresh)
+        );
+        const visitPlayback = await sim.request({
+            url: `https://${DOC_HOSTS.pc}/live/detail`,
+            type: "main_frame",
+            rawCookie: `${refreshMark}=${V.fresh}`
+        });
+        expect(
+            "visiting PC playback page with stale Host-Only copy V.fresh does NOT roll pcPartition back from V.c",
+            pc.entries.get(clientKey)?.value === V.c &&
+                visitPlayback.outboundCookie.includes(
+                    `${refreshMark}=${V.c}`
+                ) &&
+                visitPlayback.setCookieLines.some(l =>
+                    l.startsWith(`${refreshMark}=${V.c}; Path=/`)
+                ),
+            visitPlayback.setCookieLines.join(" | ")
+        );
+
+        // 4. Scenario C: Cross-host `hasPendingCopyRevocation` suppression:
+        //    A non-HttpOnly server cookie on `ucenter-api` is materialized onto
+        //    `www.yangshipin.cn`, then deleted on `ucenter-api` (leaving only a
+        //    Host-Only tombstone on `ucenter-api` and the pending revocation
+        //    record in `materializedCopies`).  Before `www` revokes the copy, a
+        //    request to `player-api.yangshipin.cn` carrying the stale value `V.a`
+        //    must be suppressed by `hasPendingCopyRevocation` instead of
+        //    resurrecting `V.a` as a parent-domain client entry.
+        const crossRevokeName = cookieName("cross-revoke-", "open");
+        await sim.request({
+            url: `https://${SHARED_HOSTS.ucenter}/v1/open/set`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            backend: () => ({
+                setCookies: [`${crossRevokeName}=${V.a}; Path=/; Max-Age=3600`]
+            })
+        });
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/materialize-open`,
+            type: "main_frame"
+        });
+        await sim.request({
+            url: `https://${SHARED_HOSTS.ucenter}/v1/open/del`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            backend: () => ({
+                setCookies: [`${crossRevokeName}=; Path=/; Max-Age=0`]
+            })
+        });
+        const suppressedBefore =
+            mod.getYangshipinDiagnostics().pendingCopySuppressed;
+        const crossApi = await sim.request({
+            url: `https://${SHARED_HOSTS.player}/v1/player/check`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            rawCookie: `${crossRevokeName}=${V.a}`
+        });
+        expect(
+            "cross-host API request before www revocation does not re-admit the deleted materialized value as a client entry",
+            !pc.entries.has(mod.getClientDomainKey(crossRevokeName)) &&
+                !crossApi.outboundCookie.includes(crossRevokeName) &&
+                mod.getYangshipinDiagnostics().pendingCopySuppressed ===
+                    suppressedBefore + 1,
+            crossApi.outboundCookie
+        );
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "44",
+    "顶层主机表生命周期加固：已提交页面中断导航恢复与 MV3 事件页 frameId=0 自愈 (tab top-host resilience)",
+    async expect => {
+        const world = await freshGroup({
+            apiHosts: [{ host: SHARED_HOSTS.player }]
+        });
+        const { sim, mod } = world;
+        const pc = mod.pcPartition;
+        const cred = NAMES.pcOnly;
+        pc.set(
+            serverEntry({
+                name: cred,
+                value: V.server,
+                host: SHARED_HOSTS.player,
+                isHostOnly: true,
+                path: "/",
+                httpOnly: true,
+                expires: null
+            })
+        );
+
+        // 1. Tab 61 commits a 200 OK navigation on `www.yangshipin.cn`.
+        await sim.request({
+            url: `https://${DOC_HOSTS.pc}/`,
+            type: "main_frame",
+            tabId: 61
+        });
+        expect(
+            "200 commit records both tabTopHostByTabId and committedTopHostByTabId",
+            mod.tabTopHostByTabId.get(61) === DOC_HOSTS.pc &&
+                mod.committedTopHostByTabId.get(61) === DOC_HOSTS.pc
+        );
+
+        // 2. An in-page navigation on tab 61 starts and is immediately aborted
+        //    (`onErrorOccurred` on `main_frame`, e.g. NS_BINDING_ABORTED).
+        sim.fireNavStart({
+            tabId: 61,
+            url: `https://${DOC_HOSTS.pc}/aborted-link`,
+            requestId: "aborted-61"
+        });
+        sim.fireError({
+            tabId: 61,
+            url: `https://${DOC_HOSTS.pc}/aborted-link`,
+            type: "main_frame",
+            requestId: "aborted-61"
+        });
+        expect(
+            "an aborted navigation on an already-committed tab restores the committed top host",
+            mod.tabTopHostByTabId.get(61) === DOC_HOSTS.pc,
+            String(mod.tabTopHostByTabId.get(61))
+        );
+        const afterAbort = await sim.request({
+            url: `https://${SHARED_HOSTS.player}/v1/player/auth`,
+            type: "xmlhttprequest",
+            tabId: 61,
+            documentUrl: `https://${DOC_HOSTS.pc}/`
+        });
+        expect(
+            "shared API requests on the committed tab still carry credentials after the aborted navigation",
+            afterAbort.outboundCookie.includes(`${cred}=${V.server}`),
+            afterAbort.outboundCookie
+        );
+
+        // 3. Simulate MV3 background event page idle wake-up on tab 62 (which
+        //    was already open on `www.yangshipin.cn` before the event page
+        //    woke up, so `tabTopHostByTabId` has no entry for 62, and a
+        //    top-frame XHR arrives with `frameId: 0` and `documentUrl`).
+        const wakeRes = await mod.handleYangshipinBeforeSendHeaders({
+            requestId: "wake-62",
+            url: `https://${SHARED_HOSTS.player}/v1/player/get_live_info`,
+            type: "xmlhttprequest",
+            method: "POST",
+            tabId: 62,
+            frameId: 0,
+            documentUrl: `https://${DOC_HOSTS.pc}/tv/home`,
+            requestHeaders: [{ name: "Cookie", value: "" }]
+        });
+        const wakeCookie =
+            (wakeRes.requestHeaders || []).find(
+                h => h.name.toLowerCase() === "cookie"
+            )?.value || "";
+        expect(
+            "a top-frame (frameId === 0) request after MV3 event-page wake-up self-heals tabTopHostByTabId and injects credentials",
+            mod.tabTopHostByTabId.get(62) === DOC_HOSTS.pc &&
+                wakeCookie.includes(`${cred}=${V.server}`),
+            wakeCookie
+        );
+        mod.cleanupYangshipinRequest({ requestId: "wake-62" });
+
+        // 4. By contrast, an embedded iframe (`frameId: 1`) when `tabTopHostByTabId`
+        //    is missing must NOT self-heal as a top-level document and must
+        //    still fail closed as `unknown`.
+        const iframeWake = await mod.handleYangshipinBeforeSendHeaders({
+            requestId: "iframe-63",
+            url: `https://${SHARED_HOSTS.player}/v1/player/get_live_info`,
+            type: "xmlhttprequest",
+            method: "POST",
+            tabId: 63,
+            frameId: 1,
+            documentUrl: `https://${DOC_HOSTS.pc}/embed`,
+            requestHeaders: [{ name: "Cookie", value: `${cred}=${V.server}` }]
+        });
+        const iframeCookie =
+            (iframeWake.requestHeaders || []).find(
+                h => h.name.toLowerCase() === "cookie"
+            )?.value ?? "";
+        expect(
+            "a non-top-frame (frameId > 0) request without top-level context still fails closed",
+            iframeCookie === "" && !mod.tabTopHostByTabId.has(63),
+            iframeCookie
+        );
+        mod.cleanupYangshipinRequest({ requestId: "iframe-63" });
+    }
+]);
+
+ASSERTION_RUNNERS.push([
+    "45",
+    "HTTP 401 / 403 鉴权失败完整后台诊断日志 (complete background debug dump on 401/403)",
+    async expect => {
+        const world = await freshGroup({
+            apiHosts: [{ host: SHARED_HOSTS.player }]
+        });
+        const { sim, mod } = world;
+        const pc = mod.pcPartition;
+        mod.clearYangshipinAuthFailureLogs();
+
+        const sentCred = cookieName("sent-cred-", "ok");
+        const mismatchCred = cookieName("mismatch-host-", "only");
+        const shadowedCred = cookieName("shadowed-client-", "name");
+
+        // Populate `pcPartition` with:
+        // - `sentCred`: matches `player-api.yangshipin.cn`
+        // - `mismatchCred`: host-only on `www.yangshipin.cn` -> `scope_mismatch` on `player-api`
+        // - `shadowedCred`: both a host-only server entry on `h5access` and a client entry -> `client_shadowed_by_server`
+        pc.set(
+            serverEntry({
+                name: sentCred,
+                value: V.server,
+                host: SHARED_HOSTS.player,
+                isHostOnly: true,
+                path: "/",
+                httpOnly: true,
+                expires: expiresIn(3600 * 1000)
+            })
+        );
+        pc.set(
+            serverEntry({
+                name: mismatchCred,
+                value: V.a,
+                host: DOC_HOSTS.pc,
+                isHostOnly: true,
+                path: "/",
+                httpOnly: false,
+                expires: null
+            })
+        );
+        pc.set(
+            serverEntry({
+                name: shadowedCred,
+                value: V.b,
+                host: SHARED_HOSTS.h5access,
+                isHostOnly: true,
+                path: "/",
+                httpOnly: true,
+                expires: null
+            })
+        );
+        pc.entries.set(mod.getClientDomainKey(shadowedCred), {
+            name: shadowedCred,
+            value: V.client,
+            host: "yangshipin.cn",
+            domain: ".yangshipin.cn",
+            isHostOnly: false,
+            path: "/",
+            httpOnly: false,
+            expires: null,
+            source: "client",
+            createdAt: Date.now(),
+            valueRev: 1
+        });
+
+        const beforeFailures = mod.getYangshipinDiagnostics().authFailures;
+        await sim.request({
+            url: `https://${SHARED_HOSTS.player}/v1/player/auth?sig=${V.a}#frag`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            backend: () => ({ statusCode: 401 })
+        });
+        await sim.request({
+            url: `https://${SHARED_HOSTS.player}/v1/player/get_live_info`,
+            documentUrl: `https://${DOC_HOSTS.pc}/`,
+            backend: () => ({ statusCode: 403 })
+        });
+
+        const logs = mod.getYangshipinAuthFailureLogs();
+        expect(
+            "401 and 403 responses increment diagnostics.authFailures and record structured debug logs",
+            mod.getYangshipinDiagnostics().authFailures ===
+                beforeFailures + 2 &&
+                logs.length === 2 &&
+                logs[0].statusCode === 401 &&
+                logs[1].statusCode === 403,
+            JSON.stringify(logs.map(l => l.statusCode))
+        );
+
+        const dump = logs[0];
+        const expectedSigParam = `sig=<len:${V.a.length},fp:${mod.fingerprint(
+            V.a
+        )}>`;
+        expect(
+            "the 401 debug dump redacts URL query values and fragments to length+fingerprint",
+            !dump.url.includes(V.a) &&
+                !dump.url.includes("#frag") &&
+                dump.url.includes(expectedSigParam)
+        );
+        expect(
+            "the 401 debug dump records platform, top-level host, outbound cookies and partition snapshot",
+            dump.outboundPlatform === "pc" &&
+                dump.inboundPlatform === "pc" &&
+                dump.tabTopHost === DOC_HOSTS.pc &&
+                dump.outboundTrace !== null &&
+                dump.outboundTrace.outCookies.some(
+                    c =>
+                        c.name === sentCred &&
+                        c.fp === mod.fingerprint(V.server)
+                ) &&
+                dump.partitionSnapshot !== null &&
+                dump.partitionSnapshot.entriesCount === pc.entries.size,
+            JSON.stringify(dump)
+        );
+        const skipped = dump.outboundTrace?.skippedPartitionEntries || [];
+        expect(
+            "the 401 debug dump pinpoints why partition entries were skipped (scope_mismatch & client_shadowed_by_server)",
+            skipped.some(
+                s => s.name === mismatchCred && s.reason === "scope_mismatch"
+            ) &&
+                skipped.some(
+                    s =>
+                        s.name === shadowedCred &&
+                        s.reason === "client_shadowed_by_server"
+                ),
+            JSON.stringify(skipped)
         );
     }
 ]);

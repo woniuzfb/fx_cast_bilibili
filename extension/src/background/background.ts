@@ -103,6 +103,11 @@ async function init() {
         return;
     }
 
+    // Register network-layer webRequest interceptors synchronously before any
+    // await so MV3 non-persistent event page wakeups never miss the waking
+    // navigation or API request.
+    initYangshipinLive();
+
     /**
      * If options haven't been set yet, we can't properly initialize,
      * so wait until init is called again in the onInstalled listener.
@@ -111,6 +116,9 @@ async function init() {
         return;
     }
 
+    if (isInitialized) {
+        return;
+    }
     logger.info("init");
     isInitialized = true;
 
@@ -128,7 +136,6 @@ async function init() {
     }
     initBleRemote();
     initCctvLive();
-    initYangshipinLive();
     initBilibiliPageCapture();
 
     // Surface popup debug logs in the background console. The browser-action

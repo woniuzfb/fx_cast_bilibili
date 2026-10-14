@@ -849,6 +849,9 @@ export {
     isYangshipinBaselinePending,
     isYangshipinIsolationEnabled,
     getYangshipinDiagnostics,
+    getYangshipinAuthFailureLogs,
+    clearYangshipinAuthFailureLogs,
+    committedTopHostByTabId,
     initYangshipinSessionInterceptor,
     SessionPartition
 } from "./yangshipinSession";
@@ -862,13 +865,27 @@ export type {
     MaterializedCopyRecord,
     TombstoneSnapshot,
     YangshipinDiagnostics,
+    YangshipinAuthFailureLogEntry,
     YangshipinRequestDetails,
     YangshipinResponseDetails
 } from "./yangshipinSession";
 
+let yangshipinLiveWired = false;
+let lastWiredLiveBrowser: unknown = null;
+
 export function initYangshipinLive() {
-    initLiveInfoRequestSanitizer();
     initYangshipinSessionInterceptor();
+    if (
+        yangshipinLiveWired &&
+        typeof browser !== "undefined" &&
+        browser === lastWiredLiveBrowser
+    ) {
+        return;
+    }
+    yangshipinLiveWired = true;
+    lastWiredLiveBrowser = typeof browser !== "undefined" ? browser : null;
+
+    initLiveInfoRequestSanitizer();
     initMediaPlaylistCapture();
 
     browser.runtime.onMessage.addListener((message, sender) => {
