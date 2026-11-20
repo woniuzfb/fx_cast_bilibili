@@ -6,7 +6,7 @@ import type {
     ReceiverSelection,
     ReceiverSelectorMediaMessage,
     ReceiverSelectorReceiverMessage
-} from "./background/ReceiverSelector";
+} from "./background/receiverSelector";
 
 import type {
     CastSessionCreatedDetails,

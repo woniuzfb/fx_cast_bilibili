@@ -26,7 +26,7 @@ import ReceiverSelector, {
     type ReceiverSelection,
     type ReceiverSelectorMediaMessage,
     type ReceiverSelectorReceiverMessage
-} from "./ReceiverSelector";
+} from "./receiverSelector";
 
 import deviceManager from "./deviceManager";
 import {

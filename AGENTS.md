@@ -164,12 +164,28 @@ This project maintains persistent institutional memory under the [`.memory/`](fi
 
 ## 5. Git & 工作区纪律（强制）
 
--   **禁止用 `checkout` 或任何类似 HEAD 的手段覆盖工作区中未保存的文件**：
-    -   不得执行 `git checkout <path>`、`git checkout HEAD -- <path>`、`git checkout -- .`、`git restore`、`git reset --hard`、`git reset -- <path>`、`git clean -f/-fd/-fdx`，也不得用 `git stash` 来"把工作区弄干净"。这些命令都会丢弃或覆盖尚未提交的改动，包括别人的。
-    -   需要看 HEAD 版本时只用**只读**手段：`git show HEAD:<path>`、`git diff HEAD -- <path>`、`git log`，或把 HEAD 内容重定向到临时文件再比对——**绝不写回工作区**。
-    -   改文件一律用编辑工具（Edit/Write），不用 git 当文件操作手段。
-    -   唯一例外：用户在同一轮对话中明确要求丢弃/回滚**某个具体文件**。
--   **禁止未经允许 commit**：
-    -   只有用户在当前对话里明确说"提交/commit"才允许 `git commit`；不要从"任务完成"推断出提交授权。
-    -   只提交用户要求的范围：提交前先 `git status` + `git diff`，把"顺手修的""不在要求内"的改动排除在外；提交后在回复里列出本次包含的文件，以及仍然留在工作区未提交的改动。
-    -   不得使用 `--amend`、`--no-verify`、`--no-gpg-sign`（除非用户明确要求），不得 `git push`（除非用户明确要求）。
+### 铁律 1：严禁未经允许擅自改变 Git 文件状态（No Unauthorized Git Add / Stage / Unstage / Commit）
+
+-   **核心禁令**：AI Agent **绝对禁止**在没有得到用户明确许可的情况下执行任何改变 Git 暂存区（Index）或提交历史的命令：
+    1. **严禁擅自 Unstage**：绝对禁止执行 `git restore --staged`、`git reset`、`git rm --cached` 等任何将用户已暂存（staged）文件取消暂存的操作！用户已暂存的内容由用户全权掌控，Agent 绝无权利触碰、撤销或改变其暂存状态。
+    2. **严禁擅自 Stage / Commit**：绝对禁止未经用户明确许可自动执行 `git add`、`git stage` 或 `git commit`。
+-   **工作区规范**：Agent 自身的代码修改在完成验证（通过自测与 Ruff）后，保留在工作区中向用户汇报，等待用户指令。**严禁以「遵守未提交规则」为借口去擅自 unstage 用户已暂存的文件，严禁以任何理由改变任何文件的现有 Git 状态**。
+
+---
+
+### 铁律 2：注释不得引用外部文件，不得写外部文件的版本号，不得写日期
+
+-   **要求**：注释中**绝对禁止**引用任何外部文件，包括但不限于：
+    -   抓包文件；
+    -   外部二进制/ bundle 路径；
+    -   外部源码文件；
+    -   二进制地址/偏移。
+-   **版本号禁令**：注释中**绝对禁止**出现外部文件的版本号。版本号只能作为**线上协议常量值**存在，不得写进任何注释文字。
+-   **日期禁令**：注释中**绝对禁止**出现日期。
+-   **允许的写法**：注释只描述协议本身，出处一律写**不带文件、不带版本、不带日期**的表述。
+
+---
+
+### 铁律 3：绝对禁止暂存或提交 `.memory/` 目录
+
+-   **要求**：`.memory/` 目录（包含每日记录、长期记忆 `MEMORY.md` 以及各专项业务设计规范等）仅用于本地 Agent 运行上下文维护。**绝对不要执行 `git add .memory/` 或将其提交到版本控制中（DO NOT stage or commit `.memory/`）**。

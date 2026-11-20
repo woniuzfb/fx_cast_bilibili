@@ -51,7 +51,7 @@ const argv = await yargs()
 const supportedTargets = {
     win32: ["x86", "x64"],
     darwin: ["x64", "arm64"],
-    linux: ["x64"]
+    linux: ["x64", "arm64"]
 };
 if (!supportedTargets[process.platform]?.includes(argv.arch)) {
     console.error(
@@ -484,11 +484,15 @@ function packageLinuxDeb(
     // Copy package info to root
     fs.copySync(controlDir, controlOutputDir);
 
+    /** @type {Record<string, string>} */
+    const debArchMap = { x64: "amd64", arm64: "arm64" };
+
     const view = {
         // Debian package names can't contain underscores
         packageName: config.applicationName.replace(/_/g, "-"),
         applicationName: config.applicationName,
         applicationVersion: config.applicationVersion,
+        architecture: debArchMap[arch],
         author: config.author
     };
 
@@ -553,7 +557,7 @@ function packageLinuxRpm(
     );
 
     /** @type {Record<string, string>} */
-    const rpmArchMap = { x86: "i386", x64: "x86_64" };
+    const rpmArchMap = { x86: "i386", x64: "x86_64", arm64: "aarch64" };
 
     spawnSync(
         `rpmbuild -bb ${specOutputPath} \

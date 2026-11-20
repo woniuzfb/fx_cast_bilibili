@@ -28,7 +28,9 @@ bridge_assets = [
     ("mac", "x64", f"fx_cast_bilibili_bridge-{ver}-x64.pkg"),
     ("win", "x64", f"fx_cast_bilibili_bridge-{ver}-x64.exe"),
     ("linux-deb", "x64", f"fx_cast_bilibili_bridge-{ver}-x64.deb"),
+    ("linux-deb", "arm64", f"fx_cast_bilibili_bridge-{ver}-arm64.deb"),
     ("linux-rpm", "x64", f"fx_cast_bilibili_bridge-{ver}-x64.rpm"),
+    ("linux-rpm", "arm64", f"fx_cast_bilibili_bridge-{ver}-arm64.rpm"),
 ]
 
 # Asset digests are computed asynchronously; they are normally ready long
